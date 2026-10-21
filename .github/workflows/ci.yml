@@ -38,23 +38,43 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build dpkg-dev \
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config dpkg-dev \
+            libxkbcommon-dev libgl1-mesa-dev \
             qt6-base-dev libqt6core6t64 libqt6gui6t64 libqt6widgets6t64 libqt6network6t64
 
-      - name: Install Qt6 on Windows & macOS
-        if: runner.os != 'Linux'
+      - name: Setup MSVC 2022 Environment on Windows
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt6 on Windows (MSVC 2022)
+        if: runner.os == 'Windows'
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.*'
+          arch: 'win64_msvc2022_64'
+          cache: true
+
+      - name: Install Qt6 on macOS
+        if: runner.os == 'macOS'
+        uses: jurplel/install-qt-action@v4
+        with:
           cache: true
 
       - name: Configure CMake
         shell: bash
         run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCPACK_GENERATOR="${{ matrix.cpack_gen }}"
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            cmake -B build -G Ninja \
+              -DCMAKE_C_COMPILER=cl \
+              -DCMAKE_CXX_COMPILER=cl \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCPACK_GENERATOR="${{ matrix.cpack_gen }}"
+          else
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCPACK_GENERATOR="${{ matrix.cpack_gen }}"
+          fi
 
       - name: Build AIDE
         shell: bash

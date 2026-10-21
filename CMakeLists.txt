@@ -17,6 +17,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 include(GNUInstallDirs)
 
 add_executable(aide WIN32 MACOSX_BUNDLE
+    .github/workflows/ci.yml
     src/main.cpp
     src/core/ConfigManager.h
     src/core/ConfigManager.cpp
@@ -63,13 +64,22 @@ install(TARGETS aide
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime
 )
 
-# Автоматическое копирование плагинов и библиотек Qt6 при упаковке (Qt 6.3+)
-if(COMMAND qt_generate_deploy_app_script)
-    qt_generate_deploy_app_script(
-        TARGET aide
-        OUTPUT_SCRIPT deploy_script
-        NO_UNSUPPORTED_PLATFORM_ERROR
-    )
+# Автоматическое копирование плагинов и DLL/Frameworks Qt6 для Windows и macOS.
+# На Linux зависимости пакета разрешаются автоматически через CPACK_DEBIAN_PACKAGE_SHLIBDEPS.
+if((WIN32 OR APPLE) AND COMMAND qt_generate_deploy_app_script)
+    if(Qt6_VERSION VERSION_GREATER_EQUAL "6.5.0")
+        qt_generate_deploy_app_script(
+            TARGET aide
+            OUTPUT_SCRIPT deploy_script
+            NO_UNSUPPORTED_PLATFORM_ERROR
+        )
+    else()
+        qt_generate_deploy_app_script(
+            TARGET aide
+            FILENAME_VARIABLE deploy_script
+            NO_UNSUPPORTED_PLATFORM_ERROR
+        )
+    endif()
     install(SCRIPT ${deploy_script} COMPONENT Runtime)
 endif()
 
