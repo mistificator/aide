@@ -1,4 +1,3 @@
-# .github/workflows/ci.yml
 name: AIDE Build & Release CI/CD
 
 on:
@@ -25,7 +24,7 @@ jobs:
             cpack_gen: "DEB;TGZ"
           - os: windows-latest
             artifact_name: AIDE-Windows-x64
-            cpack_gen: "ZIP"
+            cpack_gen: "NSIS;ZIP"
           - os: macos-latest
             artifact_name: AIDE-macOS-universal
             cpack_gen: "DragNDrop;TGZ"
@@ -34,7 +33,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Qt6 on Linux
+      # ---------------- Linux Setup ----------------
+      - name: Install Qt6 & Dependencies on Linux
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -42,11 +42,21 @@ jobs:
             libxkbcommon-dev libgl1-mesa-dev \
             qt6-base-dev libqt6core6t64 libqt6gui6t64 libqt6widgets6t64 libqt6network6t64
 
+      # ---------------- Windows Setup ----------------
       - name: Setup MSVC 2022 Environment on Windows
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      - name: Install NSIS Compiler on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ ! -d "/c/Program Files (x86)/NSIS" ]; then
+            choco install nsis -y
+          fi
+          echo "C:\Program Files (x86)\NSIS" >> $GITHUB_PATH
 
       - name: Install Qt6 on Windows (MSVC 2022)
         if: runner.os == 'Windows'
@@ -55,12 +65,14 @@ jobs:
           arch: 'win64_msvc2022_64'
           cache: true
 
+      # ---------------- macOS Setup ----------------
       - name: Install Qt6 on macOS
         if: runner.os == 'macOS'
         uses: jurplel/install-qt-action@v4
         with:
           cache: true
 
+      # ---------------- Build & Package ----------------
       - name: Configure CMake
         shell: bash
         run: |
@@ -83,7 +95,7 @@ jobs:
       - name: Package with CPack
         shell: bash
         working-directory: build
-        run: cpack -C Release -B packages
+        run: cpack -G "${{ matrix.cpack_gen }}" -C Release -B packages
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
