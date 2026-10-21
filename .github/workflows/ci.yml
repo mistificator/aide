@@ -1,0 +1,98 @@
+# .github/workflows/ci.yml
+name: AIDE Build & Release CI/CD
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-package:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact_name: AIDE-Linux-x64
+            cpack_gen: "DEB;TGZ"
+          - os: windows-latest
+            artifact_name: AIDE-Windows-x64
+            cpack_gen: "ZIP"
+          - os: macos-latest
+            artifact_name: AIDE-macOS-universal
+            cpack_gen: "DragNDrop;TGZ"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt6 on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build dpkg-dev \
+            qt6-base-dev libqt6core6t64 libqt6gui6t64 libqt6widgets6t64 libqt6network6t64
+
+      - name: Install Qt6 on Windows & macOS
+        if: runner.os != 'Linux'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCPACK_GENERATOR="${{ matrix.cpack_gen }}"
+
+      - name: Build AIDE
+        shell: bash
+        run: cmake --build build --config Release --parallel
+
+      - name: Package with CPack
+        shell: bash
+        working-directory: build
+        run: cpack -C Release -B packages
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            build/packages/*.deb
+            build/packages/*.tar.gz
+            build/packages/*.zip
+            build/packages/*.dmg
+            build/packages/*.exe
+          if-no-files-found: ignore
+
+  release:
+    name: Publish GitHub Release
+    needs: build-and-package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
