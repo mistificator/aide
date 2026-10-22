@@ -5,6 +5,7 @@
 
 class QTreeView;
 class QLabel;
+class QPushButton;
 class QMenu;
 class QStackedWidget;
 class ProjectManager;
@@ -12,6 +13,7 @@ class ProjectTreeModel;
 class EditorTabWidget;
 class ContextInspectorDock;
 class AiDebugConsoleDock;
+class AiTaskQueueDock;
 class AiProvider;
 class AiTaskQueue;
 class SummaryWorker;
@@ -69,11 +71,12 @@ private:
     ProjectTreeModel* m_fsModel = nullptr;
     ContextInspectorDock* m_inspectorDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
+    AiTaskQueueDock* m_taskQueueDock = nullptr;
 
     QMenu* m_recentProjectsMenu = nullptr;
     QMenu* m_windowMenu = nullptr;
     QMenu* m_themeMenu = nullptr;
     QMenu* m_langMenu = nullptr;
-    QLabel* m_queueStatusLabel = nullptr;
+    QPushButton* m_queueStatusBtn = nullptr;
     QLabel* m_langStatusLabel = nullptr;
 };

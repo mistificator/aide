@@ -31,7 +31,8 @@ private:
     QLabel* m_statusLabel = nullptr;
     QDoubleSpinBox* m_tempSpin = nullptr;
     QDoubleSpinBox* m_topPSpin = nullptr;
-    QSpinBox* m_maxTokensSpin = nullptr;
+    QSpinBox* m_maxCodeTokensSpin = nullptr;
+    QSpinBox* m_maxSummaryTokensSpin = nullptr;
     QSpinBox* m_ctxWindowSpin = nullptr;
     QSpinBox* m_timeoutSpin = nullptr;
     QSpinBox* m_summaryIntervalSpin = nullptr;

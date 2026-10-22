@@ -15,7 +15,7 @@
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(480, 420);
+    resize(500, 450);
 
     auto cfg = ConfigManager::instance().aiConfig();
     auto* mainLay = new QVBoxLayout(this);
@@ -39,12 +39,41 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     modelRow->addWidget(m_fetchBtn);
 
     m_statusLabel = new QLabel(this);
-    m_tempSpin = new QDoubleSpinBox(this); m_tempSpin->setRange(0.0, 2.0); m_tempSpin->setSingleStep(0.05); m_tempSpin->setValue(cfg.temperature);
-    m_topPSpin = new QDoubleSpinBox(this); m_topPSpin->setRange(0.0, 1.0); m_topPSpin->setSingleStep(0.05); m_topPSpin->setValue(cfg.topP);
-    m_maxTokensSpin = new QSpinBox(this);  m_maxTokensSpin->setRange(64, 65536); m_maxTokensSpin->setSingleStep(256); m_maxTokensSpin->setValue(cfg.maxOutputTokens);
-    m_ctxWindowSpin = new QSpinBox(this);  m_ctxWindowSpin->setRange(1024, 131072); m_ctxWindowSpin->setSingleStep(1024); m_ctxWindowSpin->setValue(cfg.contextWindow);
-    m_timeoutSpin = new QSpinBox(this);    m_timeoutSpin->setRange(10, 3600); m_timeoutSpin->setSuffix(" sec"); m_timeoutSpin->setValue(cfg.timeoutSec);
-    m_summaryIntervalSpin = new QSpinBox(this); m_summaryIntervalSpin->setRange(1, 120); m_summaryIntervalSpin->setSuffix(" min"); m_summaryIntervalSpin->setValue(cfg.projectSummaryIntervalMin);
+
+    m_tempSpin = new QDoubleSpinBox(this);
+    m_tempSpin->setRange(0.0, 2.0);
+    m_tempSpin->setSingleStep(0.05);
+    m_tempSpin->setValue(cfg.temperature);
+
+    m_topPSpin = new QDoubleSpinBox(this);
+    m_topPSpin->setRange(0.0, 1.0);
+    m_topPSpin->setSingleStep(0.05);
+    m_topPSpin->setValue(cfg.topP);
+
+    m_maxCodeTokensSpin = new QSpinBox(this);
+    m_maxCodeTokensSpin->setRange(64, 65536);
+    m_maxCodeTokensSpin->setSingleStep(256);
+    m_maxCodeTokensSpin->setValue(cfg.maxOutputCodeTokens);
+
+    m_maxSummaryTokensSpin = new QSpinBox(this);
+    m_maxSummaryTokensSpin->setRange(64, 65536);
+    m_maxSummaryTokensSpin->setSingleStep(128);
+    m_maxSummaryTokensSpin->setValue(cfg.maxOutputSummaryTokens);
+
+    m_ctxWindowSpin = new QSpinBox(this);
+    m_ctxWindowSpin->setRange(1024, 131072);
+    m_ctxWindowSpin->setSingleStep(1024);
+    m_ctxWindowSpin->setValue(cfg.contextWindow);
+
+    m_timeoutSpin = new QSpinBox(this);
+    m_timeoutSpin->setRange(10, 3600);
+    m_timeoutSpin->setSuffix(" sec");
+    m_timeoutSpin->setValue(cfg.timeoutSec);
+
+    m_summaryIntervalSpin = new QSpinBox(this);
+    m_summaryIntervalSpin->setRange(1, 120);
+    m_summaryIntervalSpin->setSuffix(" min");
+    m_summaryIntervalSpin->setValue(cfg.projectSummaryIntervalMin);
 
     form->addRow("Provider:", m_backendCombo);
     form->addRow("Endpoint URL:", m_endpointEdit);
@@ -53,7 +82,8 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     form->addRow("", m_statusLabel);
     form->addRow("Temperature:", m_tempSpin);
     form->addRow("Top-P:", m_topPSpin);
-    form->addRow("Max Output Tokens:", m_maxTokensSpin);
+    form->addRow("Max Output Code Tokens:", m_maxCodeTokensSpin);
+    form->addRow("Max Output Summary Tokens:", m_maxSummaryTokensSpin);
     form->addRow("Context Window:", m_ctxWindowSpin);
     form->addRow("Request Timeout:", m_timeoutSpin);
     form->addRow("Project Summary Rebuild:", m_summaryIntervalSpin);
@@ -107,7 +137,8 @@ AiConnectionConfig AiPreferencesDialog::resultConfig() const {
         m_modelCombo->currentText().trimmed(),
         m_tempSpin->value(),
         m_topPSpin->value(),
-        m_maxTokensSpin->value(),
+        m_maxCodeTokensSpin->value(),
+        m_maxSummaryTokensSpin->value(),
         m_ctxWindowSpin->value(),
         m_timeoutSpin->value(),
         m_summaryIntervalSpin->value()

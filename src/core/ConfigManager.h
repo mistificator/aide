@@ -13,14 +13,24 @@ struct AiConnectionConfig {
     QString endpointUrl = "http://127.0.0.1:11434";
     QString apiKey, modelName = "qwen2.5-coder:7b";
     double temperature = 0.2, topP = 0.9;
-    int maxOutputTokens = 2048, contextWindow = 8192, timeoutSec = 120, projectSummaryIntervalMin = 5;
+    int maxOutputCodeTokens = 2048;
+    int maxOutputSummaryTokens = 1024;
+    int contextWindow = 8192, timeoutSec = 120, projectSummaryIntervalMin = 5;
+
+    QString llmIdentifier() const {
+        QString providerPrefix = (backend == AiBackendType::Ollama) ? "ollama"
+                                 : (backend == AiBackendType::KoboldCpp) ? "koboldcpp"
+                                                                         : "openai";
+        QString model = modelName.trimmed().isEmpty() ? endpointUrl.trimmed() : modelName.trimmed();
+        return providerPrefix + ":" + model;
+    }
 };
 
 struct FileTypeRule {
-    QString langId;       // Например: "cpp", "python", "rust"
-    QString displayName;  // Например: "C++", "Python", "Rust"
-    QString syntaxFile;   // Имя файла в ~/.aide/syntax/, например "cpp.xml"
-    QStringList extensions; // Например: {"cpp", "cxx", "cc", "h", "hpp"}
+    QString langId;
+    QString displayName;
+    QString syntaxFile;
+    QStringList extensions;
 };
 
 class ConfigManager : public QObject {
@@ -38,21 +48,17 @@ public:
     QString activeTheme() const { return m_activeTheme; }
     void setActiveTheme(const QString& themeName);
 
-    // Recent & Last Project
     QString lastProjectPath() const { return m_lastProjectPath; }
     void setLastProjectPath(const QString& path);
     QStringList recentProjects() const { return m_recentProjects; }
     void addRecentProject(const QString& path);
     void clearRecentProjects();
 
-    // Last Custom Prompt
     QString lastCustomPrompt() const { return m_lastCustomPrompt; }
     void setLastCustomPrompt(const QString& prompt);
 
-    // Dynamic Syntax & File Types
     QString syntaxBaseUrl() const { return m_syntaxBaseUrl; }
     void setSyntaxBaseUrl(const QString& url);
-
     QVector<FileTypeRule> fileTypeRules() const { return m_fileTypes; }
     void setFileTypeRules(const QVector<FileTypeRule>& rules);
     void upsertFileTypeRule(const FileTypeRule& rule);

@@ -55,6 +55,8 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/EditorPreferencesDialog.cpp
     src/ui/AiDebugConsoleDock.h
     src/ui/AiDebugConsoleDock.cpp
+    src/ui/AiTaskQueueDock.h
+    src/ui/AiTaskQueueDock.cpp
     src/ui/DiffViewerDialog.h
     src/ui/DiffViewerDialog.cpp
     src/ui/MainWindow.h

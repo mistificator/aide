@@ -29,6 +29,7 @@ void AiProvider::abortActiveRequest() {
     m_activeTaskId.clear();
     m_streamBuffer.clear();
     cleanupActiveReply();
+
     if (!cancelledTaskId.isEmpty()) {
         emit debugLog("CANCEL", QString("Task %1 cancelled by user").arg(cancelledTaskId), {});
     }
@@ -39,11 +40,12 @@ void AiProvider::onTimeoutTriggered() {
     QString timedOutTaskId = m_activeTaskId;
     emit debugLog("TIMEOUT", QString("Task %1 timed out (%2 ms) -> triggering Cancel logic")
                                  .arg(timedOutTaskId).arg(m_activeTimeoutMs), {});
-    // Используем точно такую же очистку состояния и прерывание соединения, как при Cancel
+
     m_aborted = true;
     m_activeTaskId.clear();
     m_streamBuffer.clear();
     cleanupActiveReply();
+
     emit requestTimedOut(timedOutTaskId);
 }
 
@@ -86,8 +88,12 @@ void AiProvider::fetchAvailableModels(const AiConnectionConfig& cfg) {
     });
 }
 
-void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt, const QString& userPrompt, bool stream, const AiConnectionConfig& cfg) {
-    // Гарантированно сбрасываем любой зависший предыдущий запрос перед стартом нового
+void AiProvider::sendRequest(const QString& taskId,
+                             const QString& systemPrompt,
+                             const QString& userPrompt,
+                             bool stream,
+                             const AiConnectionConfig& cfg,
+                             int maxOutputTokensOverride) {
     if (m_currentReply) {
         cleanupActiveReply();
     }
@@ -99,6 +105,8 @@ void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt,
     m_streamBuffer.clear();
     m_accumulatedResponse.clear();
     m_activeTimeoutMs = qMax(5, cfg.timeoutSec) * 1000;
+
+    int maxTokens = (maxOutputTokensOverride > 0) ? maxOutputTokensOverride : cfg.maxOutputCodeTokens;
 
     QString base = cfg.endpointUrl.trimmed();
     while (base.endsWith('/')) base.chop(1);
@@ -116,17 +124,17 @@ void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt,
             {"options", QJsonObject{
                             {"temperature", cfg.temperature},
                             {"top_p", cfg.topP},
-                            {"num_predict", cfg.maxOutputTokens},
+                            {"num_predict", maxTokens},
                             {"num_ctx", cfg.contextWindow}
                         }}
         };
-    } else if (cfg.backend == AiBackendType::KoboldCpp && ! base.endsWith("/v1")) {
+    } else if (cfg.backend == AiBackendType::KoboldCpp && !base.endsWith("/v1")) {
         url = QUrl(base + (stream ? "/api/extra/generate/stream" : "/api/v1/generate"));
         payload = {
             {"prompt", systemPrompt.isEmpty() ? userPrompt : (systemPrompt + "\n\n" + userPrompt)},
             {"temperature", cfg.temperature},
             {"top_p", cfg.topP},
-            {"max_length", cfg.maxOutputTokens},
+            {"max_length", maxTokens},
             {"max_context_length", cfg.contextWindow}
         };
     } else {
@@ -140,7 +148,7 @@ void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt,
             {"stream", stream},
             {"temperature", cfg.temperature},
             {"top_p", cfg.topP},
-            {"max_tokens", cfg.maxOutputTokens}
+            {"max_tokens", maxTokens}
         };
     }
 
@@ -150,7 +158,9 @@ void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt,
         req.setRawHeader("Authorization", ("Bearer " + cfg.apiKey).toUtf8());
 
     QByteArray jsonBytes = QJsonDocument(payload).toJson(QJsonDocument::Indented);
-    emit debugLog("REQUEST", QString("POST %1 [Task: %2, Stream: %3]").arg(url.toString(), taskId, stream ? "true" : "false"),
+    emit debugLog("REQUEST",
+                  QString("POST %1 [Task: %2, Stream: %3, MaxTokens: %4]")
+                      .arg(url.toString(), taskId, stream ? "true" : "false").arg(maxTokens),
                   QString::fromUtf8(jsonBytes));
 
     m_currentReply = m_netManager.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
@@ -162,8 +172,6 @@ void AiProvider::sendRequest(const QString& taskId, const QString& systemPrompt,
 
 void AiProvider::onReadyRead() {
     if (!m_currentReply || m_aborted) return;
-
-    // Перезапускаем сторожевой таймер при получении новых данных
     m_timeoutTimer.start(m_activeTimeoutMs);
 
     QByteArray chunk = m_currentReply->readAll();
@@ -209,10 +217,8 @@ void AiProvider::parseSseStreamChunk(const QByteArray& rawData) {
         QByteArray line = m_streamBuffer.left(nl).trimmed();
         m_streamBuffer.remove(0, nl + 1);
         if (!line.startsWith("data:")) continue;
-
         QByteArray payload = line.mid(5).trimmed();
         if (payload == "[DONE]") continue;
-
         auto obj = QJsonDocument::fromJson(payload).object();
         QString tok;
         if (obj.contains("token")) {
@@ -273,7 +279,6 @@ void AiProvider::onReplyFinished() {
         return;
     }
 
-    // Дочитываем последние байты из сокета, если они пришли вместе с сигналом finished
     QByteArray remaining = reply->readAll();
     if (!m_isStreaming) {
         m_streamBuffer.append(remaining);

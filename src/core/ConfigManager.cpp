@@ -84,7 +84,11 @@ void ConfigManager::loadConfig() {
         m_aiConfig.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
         m_aiConfig.temperature = ai["temperature"].toDouble(0.2);
         m_aiConfig.topP = ai["topP"].toDouble(0.9);
-        m_aiConfig.maxOutputTokens = ai["maxOutputTokens"].toInt(2048);
+
+        int legacyMaxTokens = ai["maxOutputTokens"].toInt(2048);
+        m_aiConfig.maxOutputCodeTokens = ai["maxOutputCodeTokens"].toInt(legacyMaxTokens);
+        m_aiConfig.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(1024);
+
         m_aiConfig.contextWindow = ai["contextWindow"].toInt(8192);
         m_aiConfig.timeoutSec = ai["timeoutSec"].toInt(120);
         m_aiConfig.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
@@ -121,7 +125,8 @@ void ConfigManager::saveConfig() {
         {"modelName", m_aiConfig.modelName},
         {"temperature", m_aiConfig.temperature},
         {"topP", m_aiConfig.topP},
-        {"maxOutputTokens", m_aiConfig.maxOutputTokens},
+        {"maxOutputCodeTokens", m_aiConfig.maxOutputCodeTokens},
+        {"maxOutputSummaryTokens", m_aiConfig.maxOutputSummaryTokens},
         {"contextWindow", m_aiConfig.contextWindow},
         {"timeoutSec", m_aiConfig.timeoutSec},
         {"projectSummaryIntervalMin", m_aiConfig.projectSummaryIntervalMin}

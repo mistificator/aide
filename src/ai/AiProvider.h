@@ -13,7 +13,12 @@ public:
     explicit AiProvider(QObject* parent = nullptr);
 
     void fetchAvailableModels(const AiConnectionConfig& cfg);
-    void sendRequest(const QString& taskId, const QString& systemPrompt, const QString& userPrompt, bool stream, const AiConnectionConfig& cfg);
+    void sendRequest(const QString& taskId,
+                     const QString& systemPrompt,
+                     const QString& userPrompt,
+                     bool stream,
+                     const AiConnectionConfig& cfg,
+                     int maxOutputTokensOverride = -1);
     void abortActiveRequest();
 
 signals:

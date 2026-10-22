@@ -4,6 +4,7 @@
 #include "AiPreferencesDialog.h"
 #include "EditorPreferencesDialog.h"
 #include "AiDebugConsoleDock.h"
+#include "AiTaskQueueDock.h"
 #include "DiffViewerDialog.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
@@ -48,7 +49,8 @@ public:
                 if (!fc.aiSummary.isEmpty()) return QColor("#50fa7b");
             } else if (role == Qt::ToolTipRole) {
                 if (fc.isSummaryPending) return "AI Summary: Indexing in background...";
-                if (!fc.aiSummary.isEmpty()) return "AI Summary Ready:\n" + fc.aiSummary.left(300);
+                if (!fc.aiSummary.isEmpty())
+                    return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
                 return "AI Summary: Not indexed yet (open file to index)";
             }
         }
@@ -128,14 +130,25 @@ void MainWindow::setupUiAndDocks() {
     m_inspectorDock = new ContextInspectorDock(m_projectMgr, this);
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
 
+    m_taskQueueDock = new AiTaskQueueDock(m_taskQueue, this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_taskQueueDock);
+
     m_debugConsoleDock = new AiDebugConsoleDock(this);
     addDockWidget(Qt::BottomDockWidgetArea, m_debugConsoleDock);
+    tabifyDockWidget(m_taskQueueDock, m_debugConsoleDock);
     m_debugConsoleDock->hide();
 
-    m_queueStatusLabel = new QLabel("AI: Idle", this);
+    m_queueStatusBtn = new QPushButton("AI: Idle", this);
+    m_queueStatusBtn->setFlat(true);
+    m_queueStatusBtn->setToolTip("Click to open AI Task Queue");
+    connect(m_queueStatusBtn, &QPushButton::clicked, this, [this]() {
+        m_taskQueueDock->show();
+        m_taskQueueDock->raise();
+    });
+
     m_langStatusLabel = new QLabel("Lang: -", this);
     statusBar()->addPermanentWidget(m_langStatusLabel);
-    statusBar()->addPermanentWidget(m_queueStatusLabel);
+    statusBar()->addPermanentWidget(m_queueStatusBtn);
 }
 
 void MainWindow::setupMenus() {
@@ -147,10 +160,8 @@ void MainWindow::setupMenus() {
     });
     fileMenu->addAction("Open File...", QKeySequence::Open, this, &MainWindow::onOpenFile);
     fileMenu->addAction("Open Folder / Project...", QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onOpenFolder);
-
     m_recentProjectsMenu = fileMenu->addMenu("Recent Projects");
     connect(m_recentProjectsMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentProjectsMenu);
-
     fileMenu->addAction("Close All Projects", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::onCloseAllProjects);
     fileMenu->addSeparator();
     fileMenu->addAction("Save", QKeySequence::Save, m_tabWidget, &EditorTabWidget::saveCurrentDocument);
@@ -190,14 +201,13 @@ void MainWindow::setupMenus() {
     QMenu* viewMenu = menuBar()->addMenu("&View");
     viewMenu->addAction(m_projectDock->toggleViewAction());
     viewMenu->addAction(m_inspectorDock->toggleViewAction());
+    viewMenu->addAction(m_taskQueueDock->toggleViewAction());
     viewMenu->addAction(m_debugConsoleDock->toggleViewAction());
     viewMenu->addSeparator();
     m_themeMenu = viewMenu->addMenu("Color Scheme");
     connect(m_themeMenu, &QMenu::aboutToShow, this, &MainWindow::populateThemeMenu);
-
     m_langMenu = viewMenu->addMenu("Syntax Highlighting");
     connect(m_langMenu, &QMenu::aboutToShow, this, &MainWindow::populateSyntaxMenu);
-
     viewMenu->addSeparator();
     viewMenu->addAction("Zoom In", QKeySequence::ZoomIn, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomIn(1); });
     viewMenu->addAction("Zoom Out", QKeySequence::ZoomOut, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomOut(1); });
@@ -223,9 +233,14 @@ void MainWindow::setupMenus() {
             m_summaryWorker->forceRebuildFileSummary(e->filePath(), e->toPlainText().toUtf8());
     });
     aiMenu->addAction("Rebuild Project Summary", m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
+    aiMenu->addAction("Cancel All Background Tasks", m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
     aiMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
         statusBar()->showMessage("Downloading syntax & theme files...", 3000);
         m_downloader->forceDownloadAll();
+    });
+    aiMenu->addAction("Show AI Task Queue", this, [this]() {
+        m_taskQueueDock->show();
+        m_taskQueueDock->raise();
     });
     aiMenu->addAction("Show AI API Debug Console", this, [this]() {
         m_debugConsoleDock->show();
@@ -280,8 +295,10 @@ void MainWindow::setupConnections() {
     });
 
     connect(m_taskQueue, &AiTaskQueue::queueStatusChanged, this, [this](int high, int low, bool busy) {
-        if (!busy && high == 0 && low == 0) m_queueStatusLabel->setText("AI: Idle");
-        else m_queueStatusLabel->setText(QString("AI: Busy (User Queue: %1 | Background: %2)").arg(high).arg(low));
+        if (!busy && high == 0 && low == 0)
+            m_queueStatusBtn->setText("AI: Idle");
+        else
+            m_queueStatusBtn->setText(QString("AI: Busy (User: %1 | Background: %2)").arg(high).arg(low));
     });
 
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &MainWindow::onTaskCompleted);
@@ -294,6 +311,8 @@ void MainWindow::setupConnections() {
 
     connect(m_summaryWorker, &SummaryWorker::summaryStreamingChunk,
             m_inspectorDock, &ContextInspectorDock::appendLiveSummaryChunk);
+    connect(m_summaryWorker, &SummaryWorker::summaryStreamingReset,
+            m_inspectorDock, &ContextInspectorDock::resetLiveSummary);
 }
 
 void MainWindow::updateCentralViewState() {
@@ -331,6 +350,7 @@ void MainWindow::onOpenFolder() {
 }
 
 void MainWindow::onCloseAllProjects() {
+    m_taskQueue->cancelAllBackgroundTasks();
     if (!m_tabWidget->closeAllDocuments()) return;
     m_projectMgr->closeProject();
     ConfigManager::instance().setLastProjectPath({});
@@ -427,11 +447,15 @@ void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const
                               ? (customInstruction + "\nIf modifying code, output ONLY raw code without markdown fences:")
                               : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
 
+    const auto& cfg = ConfigManager::instance().aiConfig();
+
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
     task.targetType = (action == AiEditAction::ExplainCode) ? TaskTargetType::ExplainToDialog : TaskTargetType::ModifyEditorCode;
     task.targetEditor = editor;
     task.filePath = editor->filePath();
+    task.llmModel = cfg.llmIdentifier();
+    task.maxOutputTokens = cfg.maxOutputCodeTokens;
     task.systemPrompt = sysCtx;
     task.userPrompt = instruction + "\n\n" + selectedText;
     task.stream = true;

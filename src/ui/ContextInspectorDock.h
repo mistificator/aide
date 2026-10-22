@@ -1,6 +1,7 @@
 // src/ui/ContextInspectorDock.h
 #pragma once
 #include <QDockWidget>
+#include <QMap>
 #include <QString>
 
 class QPlainTextEdit;
@@ -19,6 +20,7 @@ public:
 
 public slots:
     void appendLiveSummaryChunk(const QString& relFilePath, bool isProjectSummary, const QString& chunk);
+    void resetLiveSummary(const QString& relFilePath, bool isProjectSummary);
 
 signals:
     void rebuildFileSummaryClicked(const QString& filePath);
@@ -31,12 +33,13 @@ private:
 
     ProjectManager* m_projectMgr = nullptr;
     QString m_activeFilePath;
-    QString m_liveFileMarkdown;
+    QMap<QString, QString> m_liveFileMarkdownByPath;
     QString m_liveProjectMarkdown;
     bool m_updatingUi = false;
     bool m_editingProjectMarkdown = false;
 
     QLabel* m_fileHeaderLabel = nullptr;
+    QLabel* m_fileMetaLabel = nullptr;
     QLabel* m_tokenEstimateLabel = nullptr;
     QPlainTextEdit* m_projectPromptEdit = nullptr;
     QTextEdit* m_projectSummaryView = nullptr;

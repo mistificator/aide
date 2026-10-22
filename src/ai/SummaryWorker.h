@@ -18,12 +18,15 @@ public slots:
 
 signals:
     void summaryStreamingChunk(const QString& filePath, bool isProjectSummary, const QString& chunk);
+    void summaryStreamingReset(const QString& filePath, bool isProjectSummary);
 
 private slots:
     void onPeriodicTimerTimeout();
+    void onTaskStarted(const AiTask& task);
     void onTaskStreamChunk(const AiTask& task, const QString& chunk);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
+    void onTaskCancelled(const AiTask& task);
 
 private:
     void updateTimerInterval();

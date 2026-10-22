@@ -23,9 +23,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docTopLay->setContentsMargins(6, 6, 6, 6);
     m_fileHeaderLabel = new QLabel("Document: None", docTop);
     m_fileHeaderLabel->setStyleSheet("font-weight: bold;");
+    m_fileMetaLabel = new QLabel("LLM: - | SHA-256: -", docTop);
+    m_fileMetaLabel->setStyleSheet("color: #888899; font-size: 11px;");
     m_filePromptEdit = new QPlainTextEdit(docTop);
     m_filePromptEdit->setPlaceholderText("Enter specific AI instructions for this file...");
     docTopLay->addWidget(m_fileHeaderLabel);
+    docTopLay->addWidget(m_fileMetaLabel);
     docTopLay->addWidget(new QLabel("Document Prompt / Instructions:", docTop));
     docTopLay->addWidget(m_filePromptEdit);
 
@@ -105,7 +108,6 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         updateEffectivePreview();
     });
 
-    // Переключение между просмотром отформатированного Markdown и редактированием исходного текста
     connect(m_editProjSummaryBtn, &QPushButton::toggled, this, [this](bool editMode) {
         m_editingProjectMarkdown = editMode;
         m_updatingUi = true;
@@ -131,7 +133,8 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     connect(m_rebuildFileBtn, &QPushButton::clicked, this, [this]() {
         if (!m_activeFilePath.isEmpty()) {
-            m_liveFileMarkdown.clear();
+            QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
+            m_liveFileMarkdownByPath.remove(rel);
             m_fileSummaryView->clear();
             emit rebuildFileSummaryClicked(m_activeFilePath);
         }
@@ -144,8 +147,17 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         emit rebuildProjectSummaryClicked();
     });
 
-    connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) { refreshDisplay(); });
-    connect(m_projectMgr, &ProjectManager::projectContextChanged, this, &ContextInspectorDock::refreshDisplay);
+    connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString& relPath) {
+        if (!m_projectMgr->fileContext(relPath).isSummaryPending) {
+            m_liveFileMarkdownByPath.remove(relPath);
+        }
+        refreshDisplay();
+    });
+
+    connect(m_projectMgr, &ProjectManager::projectContextChanged, this, [this]() {
+        m_liveProjectMarkdown.clear();
+        refreshDisplay();
+    });
 }
 
 void ContextInspectorDock::setupMarkdownViewerStyle(QTextEdit* viewer) {
@@ -172,9 +184,15 @@ void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer, con
 }
 
 void ContextInspectorDock::setActiveFile(const QString& filePath) {
-    if (m_activeFilePath != filePath) {
-        m_activeFilePath = filePath;
-        m_liveFileMarkdown.clear();
+    m_activeFilePath = filePath;
+    refreshDisplay();
+}
+
+void ContextInspectorDock::resetLiveSummary(const QString& relFilePath, bool isProjectSummary) {
+    if (isProjectSummary) {
+        m_liveProjectMarkdown.clear();
+    } else if (!relFilePath.isEmpty()) {
+        m_liveFileMarkdownByPath.remove(relFilePath);
     }
     refreshDisplay();
 }
@@ -186,9 +204,14 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bo
         if (!m_editingProjectMarkdown) {
             renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
         }
-    } else if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == relFilePath) {
-        m_liveFileMarkdown += chunk;
-        renderMarkdownPreservingScroll(m_fileSummaryView, m_liveFileMarkdown, true);
+    } else if (!relFilePath.isEmpty()) {
+        // Всегда накапливаем чанки в буфере конкретного файла, даже если сейчас открыта другая вкладка
+        QString& liveBuf = m_liveFileMarkdownByPath[relFilePath];
+        liveBuf += chunk;
+
+        if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == relFilePath) {
+            renderMarkdownPreservingScroll(m_fileSummaryView, liveBuf, true);
+        }
     }
     m_updatingUi = false;
 }
@@ -198,12 +221,12 @@ void ContextInspectorDock::refreshDisplay() {
     if (m_projectPromptEdit->toPlainText() != m_projectMgr->projectSystemPrompt())
         m_projectPromptEdit->setPlainText(m_projectMgr->projectSystemPrompt());
 
-    if (!m_editingProjectMarkdown && m_liveProjectMarkdown.isEmpty()) {
-        renderMarkdownPreservingScroll(m_projectSummaryView, m_projectMgr->projectSummary());
-    } else if (!m_projectMgr->isProjectSummaryDirty() && !m_projectMgr->projectSummary().isEmpty()) {
-        m_liveProjectMarkdown.clear();
-        if (!m_editingProjectMarkdown)
+    if (!m_editingProjectMarkdown) {
+        if (!m_liveProjectMarkdown.isEmpty()) {
+            renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
+        } else {
             renderMarkdownPreservingScroll(m_projectSummaryView, m_projectMgr->projectSummary());
+        }
     }
 
     bool hasFile = !m_activeFilePath.isEmpty();
@@ -213,20 +236,34 @@ void ContextInspectorDock::refreshDisplay() {
     if (hasFile) {
         auto fc = m_projectMgr->fileContext(m_activeFilePath);
         m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, fc.isSummaryPending ? " [Indexing...]" : ""));
+
+        QString llmInfo = fc.isSummaryPending
+                              ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
+                              : (fc.llmModel.isEmpty() ? "-" : fc.llmModel);
+        QString shaInfo = fc.isSummaryPending
+                              ? (fc.pendingSha256.isEmpty() ? "-" : fc.pendingSha256.left(12))
+                              : (fc.sha256.isEmpty() ? "-" : fc.sha256.left(12));
+        m_fileMetaLabel->setText(QString("LLM: %1 | SHA-256: %2").arg(llmInfo, shaInfo));
+
         if (m_filePromptEdit->toPlainText() != fc.userPrompt)
             m_filePromptEdit->setPlainText(fc.userPrompt);
 
         if (!fc.isSummaryPending) {
-            m_liveFileMarkdown.clear();
+            m_liveFileMarkdownByPath.remove(fc.relativePath);
             renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
-        } else if (m_liveFileMarkdown.isEmpty()) {
-            m_fileSummaryView->clear();
+        } else {
+            const QString liveMd = m_liveFileMarkdownByPath.value(fc.relativePath);
+            if (!liveMd.isEmpty()) {
+                renderMarkdownPreservingScroll(m_fileSummaryView, liveMd, true);
+            } else {
+                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+            }
         }
     } else {
         m_fileHeaderLabel->setText("Document: None (Unsaved or Closed)");
+        m_fileMetaLabel->setText("LLM: - | SHA-256: -");
         m_filePromptEdit->clear();
         m_fileSummaryView->clear();
-        m_liveFileMarkdown.clear();
     }
 
     updateEffectivePreview();
