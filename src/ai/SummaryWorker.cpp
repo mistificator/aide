@@ -6,6 +6,7 @@
 SummaryWorker::SummaryWorker(ProjectManager* projMgr, AiTaskQueue* queue, QObject* parent)
     : QObject(parent), m_projectMgr(projMgr), m_taskQueue(queue) {
     connect(&m_projectRebuildTimer, &QTimer::timeout, this, &SummaryWorker::onPeriodicTimerTimeout);
+    connect(m_taskQueue, &AiTaskQueue::taskStreamChunk, this, &SummaryWorker::onTaskStreamChunk);
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &SummaryWorker::onTaskCompleted);
     connect(m_taskQueue, &AiTaskQueue::taskFailed, this, &SummaryWorker::onTaskFailed);
     connect(&ConfigManager::instance(), &ConfigManager::aiConfigChanged, this, [this](const AiConnectionConfig&) {
@@ -37,8 +38,8 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath, const QByte
     task.fileSha256 = ProjectManager::computeSha256(content);
     task.systemPrompt = m_projectMgr->projectSystemPrompt();
     task.userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
-                    + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
-    task.stream = false;
+                      + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
+    task.stream = true; // Stream-режим предотвращает вылет по 120с таймауту на оффлайн-моделях
 
     m_taskQueue->enqueueTask(task);
 }
@@ -53,7 +54,7 @@ void SummaryWorker::forceRebuildProjectSummary() {
     task.filePath = "__PROJECT_SUMMARY__";
     task.systemPrompt = m_projectMgr->projectSystemPrompt();
     task.userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
-    task.stream = false;
+    task.stream = true; // Stream-режим для синтеза саммари проекта
 
     m_taskQueue->enqueueTask(task);
 }
@@ -61,6 +62,13 @@ void SummaryWorker::forceRebuildProjectSummary() {
 void SummaryWorker::onPeriodicTimerTimeout() {
     if (m_projectMgr->isProjectSummaryDirty() && m_taskQueue->isIdle())
         forceRebuildProjectSummary();
+}
+
+void SummaryWorker::onTaskStreamChunk(const AiTask& task, const QString& chunk) {
+    if (task.targetType == TaskTargetType::FileSummary)
+        emit summaryStreamingChunk(task.filePath, false, chunk);
+    else if (task.targetType == TaskTargetType::ProjectSummary)
+        emit summaryStreamingChunk({}, true, chunk);
 }
 
 void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultText) {

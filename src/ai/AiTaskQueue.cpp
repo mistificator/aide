@@ -10,10 +10,16 @@ AiTaskQueue::AiTaskQueue(AiProvider* provider, QObject* parent)
     connect(m_provider, &AiProvider::streamChunkReceived, this, &AiTaskQueue::onProviderChunk);
     connect(m_provider, &AiProvider::requestFinished, this, &AiTaskQueue::onProviderFinished);
     connect(m_provider, &AiProvider::requestError, this, &AiTaskQueue::onProviderError);
+    connect(m_provider, &AiProvider::requestTimedOut, this, &AiTaskQueue::onProviderTimedOut);
 }
 
 void AiTaskQueue::emitStatus() {
-    emit queueStatusChanged(m_highQueue.size(), m_lowQueue.size(), m_isProcessing);
+    // Учитываем активную выполняющуюся задачу в соответствующем счётчике!
+    int activeHigh = (m_isProcessing && m_currentTask.priority == TaskPriority::High_UserAction) ? 1 : 0;
+    int activeLow  = (m_isProcessing && m_currentTask.priority == TaskPriority::Low_BackgroundSummary) ? 1 : 0;
+    emit queueStatusChanged(m_highQueue.size() + activeHigh,
+                            m_lowQueue.size() + activeLow,
+                            m_isProcessing);
 }
 
 QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
@@ -25,7 +31,6 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
             task.targetEditor->setAiBusy(true, (m_isProcessing || !m_highQueue.isEmpty()) ? "Queued..." : "Generating...");
         m_highQueue.enqueue(task);
     } else {
-        // Дедупликация фоновых задач в очереди по filePath и targetType
         for (auto& existing : m_lowQueue) {
             if (existing.targetType == task.targetType && existing.filePath == task.filePath) {
                 existing.fileSha256 = task.fileSha256;
@@ -60,10 +65,28 @@ void AiTaskQueue::cancelTaskForEditor(CodeEditor* editor) {
     }
 }
 
+void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
+    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
+    // Логика при таймауте полностью идентична нажатию Cancel:
+    // откатываем незавершённую правку, разблокируем редактор и переходим к следующей задаче.
+    AiTask timedOutTask = m_currentTask;
+    m_isProcessing = false;
+
+    if (timedOutTask.targetEditor) {
+        if (timedOutTask.targetType == TaskTargetType::ModifyEditorCode)
+            timedOutTask.targetEditor->cancelAndRollbackAiEdit();
+        else
+            timedOutTask.targetEditor->setAiBusy(false);
+    }
+
+    emit taskFailed(timedOutTask, "Request timed out (automatically cancelled and rolled back).");
+    emitStatus();
+    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+}
+
 void AiTaskQueue::processNext() {
     if (m_isProcessing) return;
 
-    // Пропускаем закрытые пользователем вкладки
     while (!m_highQueue.isEmpty() && m_highQueue.head().priority == TaskPriority::High_UserAction && !m_highQueue.head().targetEditor)
         m_highQueue.dequeue();
 
@@ -89,6 +112,8 @@ void AiTaskQueue::onProviderChunk(const QString& taskId, const QString& chunk) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
     if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode && m_currentTask.targetEditor)
         m_currentTask.targetEditor->appendAiStreamChunk(chunk);
+
+    emit taskStreamChunk(m_currentTask, chunk);
 }
 
 void AiTaskQueue::onProviderFinished(const QString& taskId, const QString& fullText) {
@@ -105,7 +130,7 @@ void AiTaskQueue::onProviderFinished(const QString& taskId, const QString& fullT
 
     emit taskCompleted(finished, fullText.trimmed());
     emitStatus();
-    processNext();
+    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
 }
 
 void AiTaskQueue::onProviderError(const QString& taskId, const QString& error) {
@@ -122,5 +147,5 @@ void AiTaskQueue::onProviderError(const QString& taskId, const QString& error) {
 
     emit taskFailed(failed, error);
     emitStatus();
-    processNext();
+    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
 }

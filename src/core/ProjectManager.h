@@ -20,7 +20,9 @@ public:
     bool openProjectFolder(const QString& folderPath);
     bool loadProjectFile(const QString& aideFilePath);
     bool saveProjectFile();
+    void closeProject();
 
+    bool hasOpenProject() const { return !m_rootPath.isEmpty(); }
     QString projectRootPath() const { return m_rootPath; }
     QString projectFilePath() const { return m_aideFilePath; }
 
@@ -46,6 +48,7 @@ public:
 
 signals:
     void projectLoaded(const QString& rootPath);
+    void projectClosed();
     void fileContextChanged(const QString& relativePath);
     void projectContextChanged();
 

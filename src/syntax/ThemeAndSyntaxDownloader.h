@@ -5,6 +5,7 @@
 #include <QQueue>
 #include <QPair>
 #include <QUrl>
+#include <QStringList>
 
 class ThemeAndSyntaxDownloader : public QObject {
     Q_OBJECT
@@ -13,17 +14,20 @@ public:
 
     void ensureResourcesPresent();
     void forceDownloadAll();
+    void downloadSpecificSyntaxFiles(const QStringList& fileNames, bool overwrite = true);
+    void fetchKdeSyntaxRepositoryIndex();
 
 signals:
     void downloadProgress(int completed, int total, const QString& currentFile);
     void allDownloadsFinished();
+    void kdeSyntaxIndexFetched(const QStringList& xmlFileNames, const QString& errorText);
 
 private slots:
     void startNextDownload();
 
 private:
     void generateBuiltInThemesOnDisk();
-    void enqueueSyntaxFiles(bool overwrite);
+    void registerDownloadedSyntaxMetadata(const QString& localXmlPath);
 
     QNetworkAccessManager m_net;
     QQueue<QPair<QUrl, QString>> m_downloadQueue;

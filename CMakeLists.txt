@@ -1,7 +1,7 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 project(AIDE
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "AI Development Environment - Multi-Document Qt6 Code Editor"
     HOMEPAGE_URL "https://github.com/your-org/aide"
     LANGUAGES CXX
@@ -15,7 +15,6 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
-# Обход удаления AGL.framework в свежих macOS SDK (QTBUG-137687)
 if(APPLE AND TARGET WrapOpenGL::WrapOpenGL)
     get_target_property(_gl_libs WrapOpenGL::WrapOpenGL INTERFACE_LINK_LIBRARIES)
     if(_gl_libs)
@@ -52,6 +51,12 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/ContextInspectorDock.cpp
     src/ui/AiPreferencesDialog.h
     src/ui/AiPreferencesDialog.cpp
+    src/ui/EditorPreferencesDialog.h
+    src/ui/EditorPreferencesDialog.cpp
+    src/ui/AiDebugConsoleDock.h
+    src/ui/AiDebugConsoleDock.cpp
+    src/ui/DiffViewerDialog.h
+    src/ui/DiffViewerDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     .github/workflows/ci.yml

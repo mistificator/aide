@@ -16,8 +16,12 @@ public slots:
     void forceRebuildFileSummary(const QString& filePath, const QByteArray& content);
     void forceRebuildProjectSummary();
 
+signals:
+    void summaryStreamingChunk(const QString& filePath, bool isProjectSummary, const QString& chunk);
+
 private slots:
     void onPeriodicTimerTimeout();
+    void onTaskStreamChunk(const AiTask& task, const QString& chunk);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
 

@@ -1,34 +1,51 @@
 // src/syntax/LexicalHighlighter.cpp
 #include "LexicalHighlighter.h"
 #include "../core/ConfigManager.h"
-#include <QFileInfo>
 #include <QFile>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
+#include <QFileInfo>
 #include <QXmlStreamReader>
-#include <ranges>
+#include <QDir>
 
 LexicalHighlighter::LexicalHighlighter(QTextDocument* parent)
-    : QSyntaxHighlighter(parent), m_scheme(ColorScheme::loadByName(ConfigManager::instance().activeTheme())) {
+    : QSyntaxHighlighter(parent),
+    m_scheme(ColorScheme::loadByName(ConfigManager::instance().activeTheme())) {
     rebuildRules();
 }
 
+KdeSyntaxMetadata LexicalHighlighter::inspectSyntaxXml(const QString& xmlFilePath) {
+    KdeSyntaxMetadata meta;
+    QFile f(xmlFilePath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return meta;
+
+    QXmlStreamReader xml(&f);
+    while (!xml.atEnd() && !xml.hasError()) {
+        if (xml.readNext() == QXmlStreamReader::StartElement && xml.name() == QLatin1String("language")) {
+            meta.name = xml.attributes().value("name").toString().trimmed();
+            meta.section = xml.attributes().value("section").toString().trimmed();
+            QString extStr = xml.attributes().value("extensions").toString();
+            const auto parts = extStr.split(';', Qt::SkipEmptyParts);
+            for (QString p : parts) {
+                p = p.trimmed();
+                if (p.startsWith("*.")) p = p.mid(2);
+                else if (p.startsWith('*')) p = p.mid(1);
+                if (!p.isEmpty() && !meta.extensions.contains(p.toLower()))
+                    meta.extensions.append(p.toLower());
+            }
+            meta.valid = !meta.name.isEmpty();
+            break;
+        }
+    }
+    return meta;
+}
+
 void LexicalHighlighter::setLanguageByFilePath(const QString& filePath) {
-    QString ext = QFileInfo(filePath).suffix().toLower();
-    QString fileName = QFileInfo(filePath).fileName().toLower();
-    if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "hpp" || ext == "hxx" || ext == "h") setLanguage("cpp");
-    else if (ext == "c") setLanguage("c");
-    else if (ext == "py" || ext == "pyw") setLanguage("python");
-    else if (ext == "sh" || ext == "bash" || fileName == ".bashrc") setLanguage("bash");
-    else if (ext == "sql") setLanguage("sql");
-    else if (ext == "js" || ext == "mjs" || ext == "cjs" || ext == "json") setLanguage("javascript");
-    else setLanguage("cpp");
+    setLanguage(ConfigManager::instance().languageIdForFile(filePath));
 }
 
 void LexicalHighlighter::setLanguage(const QString& langId) {
-    if (m_langId == langId && !m_rules.isEmpty()) return;
-    m_langId = langId.toLower();
+    QString clean = langId.toLower().trimmed();
+    if (clean.isEmpty()) clean = "cpp";
+    m_langId = clean;
     rebuildRules();
     rehighlight();
 }
@@ -38,123 +55,120 @@ void LexicalHighlighter::setColorScheme(const ColorScheme& scheme) {
     rehighlight();
 }
 
-bool LexicalHighlighter::loadRulesFromSyntaxFile(const QString& langId, QStringList& keywords, QStringList& types, QStringList& builtins) {
-    QString baseDir = ConfigManager::instance().syntaxDirPath();
-    QFile jsonFile(baseDir + "/" + langId + ".json");
-    if (jsonFile.open(QIODevice::ReadOnly)) {
-        auto obj = QJsonDocument::fromJson(jsonFile.readAll()).object();
-        for (const auto& v : obj["keywords"].toArray()) keywords << v.toString();
-        for (const auto& v : obj["types"].toArray())    types << v.toString();
-        for (const auto& v : obj["builtins"].toArray()) builtins << v.toString();
-        return !keywords.isEmpty();
-    }
+bool LexicalHighlighter::loadRulesFromSyntaxFile(
+    const QString& syntaxFilePath,
+    QStringList& keywords, QStringList& types, QStringList& builtins,
+    QString& singleLineComment, QString& multiLineStart, QString& multiLineEnd)
+{
+    QFile f(syntaxFilePath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
 
-    QFile xmlFile(baseDir + "/" + langId + ".xml");
-    if (xmlFile.open(QIODevice::ReadOnly)) {
-        QXmlStreamReader xml(&xmlFile);
-        QString currentList;
-        while (!xml.atEnd() && !xml.hasError()) {
-            auto token = xml.readNext();
-            if (token == QXmlStreamReader::StartElement) {
-                if (xml.name() == QStringLiteral("list"))
-                    currentList = xml.attributes().value("name").toString().toLower();
-                else if (xml.name() == QStringLiteral("item") && !currentList.isEmpty()) {
-                    QString word = xml.readElementText().trimmed();
-                    if (currentList.contains("type")) types << word;
-                    else if (currentList.contains("builtin") || currentList.contains("func")) builtins << word;
-                    else keywords << word;
+    QXmlStreamReader xml(&f);
+    QString currentListName;
+    while (!xml.atEnd() && !xml.hasError()) {
+        auto token = xml.readNext();
+        if (token == QXmlStreamReader::StartElement) {
+            if (xml.name() == QLatin1String("list")) {
+                currentListName = xml.attributes().value("name").toString().toLower();
+            } else if (xml.name() == QLatin1String("item") && !currentListName.isEmpty()) {
+                QString word = xml.readElementText().trimmed();
+                if (word.isEmpty()) continue;
+                if (currentListName.contains("type") || currentListName.contains("data"))
+                    types.append(QRegularExpression::escape(word));
+                else if (currentListName.contains("builtin") || currentListName.contains("func") || currentListName.contains("std"))
+                    builtins.append(QRegularExpression::escape(word));
+                else
+                    keywords.append(QRegularExpression::escape(word));
+            } else if (xml.name() == QLatin1String("comment")) {
+                QString cname = xml.attributes().value("name").toString().toLower();
+                if (cname == "singleline") {
+                    singleLineComment = xml.attributes().value("start").toString();
+                } else if (cname == "multiline") {
+                    multiLineStart = xml.attributes().value("start").toString();
+                    multiLineEnd = xml.attributes().value("end").toString();
                 }
-            } else if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("list")) {
-                currentList.clear();
             }
+        } else if (token == QXmlStreamReader::EndElement && xml.name() == QLatin1String("list")) {
+            currentListName.clear();
         }
-        return !keywords.isEmpty();
     }
-    return false;
-}
-
-void LexicalHighlighter::populateFallbackLists(const QString& langId, QStringList& keywords, QStringList& types, QStringList& builtins) {
-    if (langId == "cpp" || langId == "c") {
-        keywords = {"alignas", "alignof", "and", "asm", "Break", "case", "catch", "class", "co_await", "co_return",
-                    "co_yield", "concept", "const", "consteval", "constexpr", "constinit", "const_cast", "continue",
-                    "decltype", "default", "delete", "do", "dynamic_cast", "else", "enum", "explicit", "export",
-                    "extern", "false", "final", "for", "friend", "goto", "if", "inline", "mutable", "namespace",
-                    "new", "noexcept", "not", "nullptr", "operator", "or", "override", "private", "protected",
-                    "public", "register", "reinterpret_cast", "requires", "return", "sizeof", "static", "static_assert",
-                    "static_cast", "struct", "switch", "template", "this", "thread_local", "throw", "true", "try",
-                    "typedef", "typeid", "typename", "union", "using", "virtual", "volatile", "while", "signals", "slots", "emit"};
-        types = {"auto", "bool", "char", "char8_t", "char16_t", "char32_t", "double", "float", "int", "long", "short",
-                 "signed", "unsigned", "void", "wchar_t", "size_t", "int8_t", "int16_t", "int32_t", "int64_t",
-                 "uint8_t", "uint16_t", "uint32_t", "uint64_t", "QString", "QObject", "QWidget", "QByteArray",
-                 "QList", "QVector", "QMap", "QHash", "QVariant", "QJsonObject", "QTextCursor", "std", "string", "vector"};
-    } else if (langId == "python") {
-        keywords = {"and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
-                    "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is",
-                    "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield", "self"};
-        types = {"int", "float", "str", "bool", "list", "dict", "set", "tuple", "bytes", "object", "Callable", "Optional", "Any"};
-        builtins = {"print", "len", "range", "enumerate", "zip", "map", "filter", "open", "super", "isinstance", "getattr", "setattr"};
-    } else if (langId == "bash") {
-        keywords = {"if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
-                    "done", "in", "function", "time", "coproc", "return", "exit", "break", "continue", "local", "export", "readonly", "declare"};
-        builtins = {"echo", "printf", "read", "cd", "pwd", "pushd", "popd", "dirs", "let", "eval", "set", "unset",
-                    "shift", "source", "grep", "awk", "sed", "find", "xargs", "tar", "curl", "wget", "chmod", "chown"};
-    } else if (langId == "sql") {
-        keywords = {"SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE",
-                    "DROP", "ALTER", "INDEX", "VIEW", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON", "AS",
-                    "DISTINCT", "GROUP", "BY", "ORDER", "ASC", "DESC", "HAVING", "LIMIT", "OFFSET", "UNION", "ALL",
-                    "EXISTS", "IN", "BETWEEN", "LIKE", "IS", "NULL", "NOT", "AND", "OR", "PRIMARY", "KEY", "FOREIGN",
-                    "REFERENCES", "DEFAULT", "CONSTRAINT", "UNIQUE", "CHECK", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION"};
-        types = {"INT", "INTEGER", "BIGINT", "SMALLINT", "DECIMAL", "NUMERIC", "FLOAT", "REAL", "DOUBLE", "VARCHAR",
-                 "CHAR", "TEXT", "DATE", "TIME", "TIMESTAMP", "BOOLEAN", "BLOB", "JSON", "UUID", "SERIAL"};
-        builtins = {"COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF", "CAST", "NOW", "UPPER", "LOWER", "SUBSTRING"};
-    } else if (langId == "javascript") {
-        keywords = {"async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-                    "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function", "if",
-                    "import", "in", "instanceof", "let", "new", "null", "of", "return", "static", "super", "switch",
-                    "this", "throw", "true", "try", "typeof", "undefined", "var", "void", "while", "with", "yield"};
-        types = {"Array", "Boolean", "Date", "Error", "Function", "JSON", "Map", "Math", "Number", "Object", "Promise",
-                 "Proxy", "RegExp", "Set", "String", "Symbol", "WeakMap", "WeakSet", "console", "window", "document"};
-    }
+    return !keywords.isEmpty() || !types.isEmpty() || !singleLineComment.isEmpty();
 }
 
 void LexicalHighlighter::rebuildRules() {
     m_rules.clear();
     QStringList keywords, types, builtins;
-    if (!loadRulesFromSyntaxFile(m_langId, keywords, types, builtins))
-        populateFallbackLists(m_langId, keywords, types, builtins);
+    QString singleComment = "//";
+    QString multiStart = "/*", multiEnd = "*/";
 
-    auto opt = (m_langId == "sql") ? QRegularExpression::CaseInsensitiveOption : QRegularExpression::NoPatternOption;
-    auto addWordList = [&](const QStringList& words, TokenRole role) {
-        for (const auto& w : words | std::views::filter([](const QString& s) { return !s.isEmpty(); }))
-            m_rules.append({QRegularExpression(QStringLiteral("\\b%1\\b").arg(QRegularExpression::escape(w)), opt), role});
+    auto ruleCfg = ConfigManager::instance().ruleForLanguage(m_langId);
+    QString syntaxPath = ConfigManager::instance().syntaxDirPath() + "/" + ruleCfg.syntaxFile;
+    if (!QFile::exists(syntaxPath)) {
+        syntaxPath = ConfigManager::instance().syntaxDirPath() + "/" + m_langId + ".xml";
+    }
+
+    bool loadedFromDisk = loadRulesFromSyntaxFile(
+        syntaxPath, keywords, types, builtins, singleComment, multiStart, multiEnd);
+
+    if (!loadedFromDisk && keywords.isEmpty()) {
+        // Минимальный универсальный набор на случай работы без интернета до первой загрузки XML
+        keywords = {"if", "else", "for", "while", "do", "switch", "case", "break", "continue",
+                    "return", "class", "struct", "public", "private", "protected", "virtual",
+                    "override", "const", "constexpr", "static", "namespace", "using", "template",
+                    "typename", "try", "catch", "throw", "new", "delete", "def", "import", "from",
+                    "as", "pass", "lambda", "yield", "async", "await", "function", "let", "var",
+                    "select", "where", "insert", "update", "join", "group", "order", "by", "fi", "done"};
+        types = {"void", "bool", "char", "short", "int", "long", "float", "double", "unsigned",
+                 "signed", "size_t", "auto", "string", "vector", "map", "set", "QString", "QList",
+                 "QVector", "QMap", "QObject", "QWidget", "str", "list", "dict", "tuple", "int64"};
+        builtins = {"std", "printf", "cout", "endl", "print", "len", "range", "console", "connect", "emit"};
+        if (m_langId == "python" || m_langId == "bash") {
+            singleComment = "#";
+            multiStart.clear();
+            multiEnd.clear();
+        } else if (m_langId == "sql") {
+            singleComment = "--";
+        }
+    }
+
+    keywords.removeDuplicates();
+    types.removeDuplicates();
+    builtins.removeDuplicates();
+
+    auto addWordRules = [this](const QStringList& words, TokenRole role) {
+        // Группируем по 80 слов, чтобы не превышать лимиты регулярного выражения на огромных XML
+        for (int i = 0; i < words.size(); i += 80) {
+            QStringList slice = words.mid(i, 80);
+            QRegularExpression rx(QString("\\b(?:%1)\\b").arg(slice.join('|')));
+            if (rx.isValid()) m_rules.append({rx, role});
+        }
     };
 
-    addWordList(keywords, TokenRole::Keyword);
-    addWordList(types, TokenRole::DataType);
-    addWordList(builtins, TokenRole::BuiltinFunction);
+    addWordRules(keywords, TokenRole::Keyword);
+    addWordRules(types, TokenRole::DataType);
+    addWordRules(builtins, TokenRole::BuiltinFunction);
 
-    // Вызовы функций, числа, директивы препроцессора, строки, однострочные комментарии
-    m_rules.append({QRegularExpression(R"(\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\())"), TokenRole::BuiltinFunction});
-    m_rules.append({QRegularExpression(R"(\b(?:0[xX][0-9a-fA-F]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?[uUlLfF]*)\b)"), TokenRole::Number});
+    // Вызовы функций: identifier(...)
+    m_rules.append({QRegularExpression("\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"), TokenRole::BuiltinFunction});
+    // Числа
+    m_rules.append({QRegularExpression("\\b(?:0x[0-9A-Fa-f]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[fFlLuU]*)\\b"), TokenRole::Number});
+    // Директивы препроцессора / декораторы
+    m_rules.append({QRegularExpression("^\\s*(?:#\\s*[a-zA-Z_]+|@[a-zA-Z_][a-zA-Z0-9_.]*)"), TokenRole::Preprocessor});
+    // Строки в двойных и одинарных кавычках
+    m_rules.append({QRegularExpression("\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"), TokenRole::String});
 
-    if (m_langId == "cpp" || m_langId == "c")
-        m_rules.append({QRegularExpression(R"(^\s*#\s*[a-zA-Z_]+.*)"), TokenRole::Preprocessor});
-    else if (m_langId == "bash")
-        m_rules.append({QRegularExpression(R"(\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]+\})"), TokenRole::Preprocessor});
+    // Однострочные комментарии
+    if (!singleComment.isEmpty()) {
+        m_rules.append({QRegularExpression(QRegularExpression::escape(singleComment) + "[^\n]*"), TokenRole::Comment});
+    }
 
-    m_rules.append({QRegularExpression(R"("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|`([^`\\]|\\.)*`)"), TokenRole::String});
-
-    if (m_langId == "python" || m_langId == "bash")
-        m_rules.append({QRegularExpression(R"(#[^\n]*)"), TokenRole::Comment});
-    else if (m_langId == "sql")
-        m_rules.append({QRegularExpression(R"(--[^\n]*)"), TokenRole::Comment});
-    else
-        m_rules.append({QRegularExpression(R"(//[^\n]*)"), TokenRole::Comment});
-
-    m_hasMultiLineComments = (m_langId == "cpp" || m_langId == "c" || m_langId == "javascript" || m_langId == "sql");
-    if (m_hasMultiLineComments) {
-        m_multiLineCommentStart = QRegularExpression(R"(/\*)");
-        m_multiLineCommentEnd   = QRegularExpression(R"(\*/)");
+    // Многострочные комментарии
+    if (!multiStart.isEmpty() && !multiEnd.isEmpty()) {
+        m_hasMultiLineComments = true;
+        m_multiLineCommentStart = QRegularExpression(QRegularExpression::escape(multiStart));
+        m_multiLineCommentEnd = QRegularExpression(QRegularExpression::escape(multiEnd));
+    } else {
+        m_hasMultiLineComments = false;
     }
 }
 
@@ -168,12 +182,18 @@ void LexicalHighlighter::highlightBlock(const QString& text) {
     }
 
     if (!m_hasMultiLineComments) return;
-    setCurrentBlockState(0);
 
-    int startIndex = (previousBlockState() != 1) ? text.indexOf(m_multiLineCommentStart) : 0;
+    setCurrentBlockState(0);
+    int startIndex = 0;
+    if (previousBlockState() != 1) {
+        auto m = m_multiLineCommentStart.match(text);
+        startIndex = m.hasMatch() ? m.capturedStart() : -1;
+    }
+
     while (startIndex >= 0) {
-        auto endMatch = m_multiLineCommentEnd.match(text, startIndex);
-        int endIndex = endMatch.capturedStart(), commentLength = 0;
+        auto endMatch = m_multiLineCommentEnd.match(text, startIndex + (previousBlockState() == 1 && startIndex == 0 ? 0 : m_multiLineCommentStart.pattern().length()));
+        int endIndex = endMatch.hasMatch() ? endMatch.capturedStart() : -1;
+        int commentLength = 0;
         if (endIndex == -1) {
             setCurrentBlockState(1);
             commentLength = text.length() - startIndex;
@@ -181,6 +201,7 @@ void LexicalHighlighter::highlightBlock(const QString& text) {
             commentLength = endIndex - startIndex + endMatch.capturedLength();
         }
         setFormat(startIndex, commentLength, m_scheme.formats.value(TokenRole::Comment));
-        startIndex = text.indexOf(m_multiLineCommentStart, startIndex + commentLength);
+        auto nextStart = m_multiLineCommentStart.match(text, startIndex + commentLength);
+        startIndex = nextStart.hasMatch() ? nextStart.capturedStart() : -1;
     }
 }

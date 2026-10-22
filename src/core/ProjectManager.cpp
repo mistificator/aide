@@ -96,6 +96,20 @@ bool ProjectManager::saveProjectFile() {
     return f.commit();
 }
 
+void ProjectManager::closeProject() {
+    if (!m_rootPath.isEmpty()) {
+        saveProjectFile();
+    }
+    m_rootPath.clear();
+    m_aideFilePath.clear();
+    m_projectSystemPrompt.clear();
+    m_projectSummary.clear();
+    m_projectSummaryDirty = false;
+    m_files.clear();
+    emit projectClosed();
+    emit projectContextChanged();
+}
+
 void ProjectManager::setProjectSystemPrompt(const QString& prompt) {
     if (m_projectSystemPrompt == prompt) return;
     m_projectSystemPrompt = prompt;

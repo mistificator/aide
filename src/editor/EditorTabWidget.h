@@ -26,6 +26,7 @@ signals:
     void documentSaved(const QString& filePath, const QByteArray& content);
     void aiActionTriggered(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void cancelAiTriggered(CodeEditor* editor);
+    void diffRequested(CodeEditor* editor);
 
 private:
     void registerEditor(CodeEditor* editor);

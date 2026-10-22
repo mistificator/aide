@@ -25,10 +25,12 @@ public:
 
     QString enqueueTask(const AiTask& task);
     void cancelTaskForEditor(CodeEditor* editor);
+    void cancelCurrentTaskByTimeout();
     bool isIdle() const { return !m_isProcessing && m_highQueue.isEmpty() && m_lowQueue.isEmpty(); }
 
 signals:
     void taskStarted(const AiTask& task);
+    void taskStreamChunk(const AiTask& task, const QString& chunk);
     void taskCompleted(const AiTask& task, const QString& resultText);
     void taskFailed(const AiTask& task, const QString& errorText);
     void queueStatusChanged(int highCount, int lowCount, bool busy);
@@ -38,6 +40,7 @@ private slots:
     void onProviderChunk(const QString& taskId, const QString& chunk);
     void onProviderFinished(const QString& taskId, const QString& fullText);
     void onProviderError(const QString& taskId, const QString& error);
+    void onProviderTimedOut(const QString& taskId);
 
 private:
     void emitStatus();

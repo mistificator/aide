@@ -23,6 +23,7 @@ public:
     bool saveFile();
     bool saveFileAs(const QString& newFilePath);
     QString filePath() const { return m_filePath; }
+    QString savedDiskContent() const { return m_savedDiskContent; }
     QString displayName() const;
 
     void applyColorScheme(const ColorScheme& scheme);
@@ -44,6 +45,7 @@ public:
 signals:
     void aiActionRequested(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void cancelAiRequested(CodeEditor* editor);
+    void diffRequested(CodeEditor* editor);
     void fileSaved(const QString& filePath, const QByteArray& content);
     void busyStateChanged(CodeEditor* editor, bool busy);
 
@@ -60,6 +62,7 @@ private:
     void setupOverlayBanner();
 
     QString m_filePath;
+    QString m_savedDiskContent;
     QWidget* m_lineNumberArea = nullptr;
     LexicalHighlighter* m_highlighter = nullptr;
     ColorScheme m_scheme;

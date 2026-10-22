@@ -68,6 +68,7 @@ void EditorTabWidget::registerEditor(CodeEditor* ed) {
     });
     connect(ed, &CodeEditor::aiActionRequested, this, &EditorTabWidget::aiActionTriggered);
     connect(ed, &CodeEditor::cancelAiRequested, this, &EditorTabWidget::cancelAiTriggered);
+    connect(ed, &CodeEditor::diffRequested, this, &EditorTabWidget::diffRequested);
 }
 
 void EditorTabWidget::updateTabTitle(CodeEditor* ed) {
@@ -110,8 +111,8 @@ bool EditorTabWidget::maybeSave(CodeEditor* ed) {
     if (!ed || !ed->document()->isModified()) return true;
     setCurrentWidget(ed);
     auto btn = QMessageBox::warning(this, "Unsaved Changes",
-        QString("Document '%1' has unsaved changes.\nDo you want to save them?").arg(ed->displayName()),
-        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+                                    QString("Document '%1' has unsaved changes.\nDo you want to save them?").arg(ed->displayName()),
+                                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
     if (btn == QMessageBox::Save) return saveCurrentDocument();
     return btn != QMessageBox::Cancel;
 }
@@ -121,8 +122,8 @@ bool EditorTabWidget::closeDocument(int index) {
     if (!ed) return false;
     if (ed->isAiBusy()) {
         auto res = QMessageBox::question(this, "AI Operation in Progress",
-            "An AI operation is currently running on this document. Cancel it and close?",
-            QMessageBox::Yes | QMessageBox::No);
+                                         "An AI operation is currently running on this document. Cancel it and close?",
+                                         QMessageBox::Yes | QMessageBox::No);
         if (res == QMessageBox::No) return false;
         emit cancelAiTriggered(ed);
     }
