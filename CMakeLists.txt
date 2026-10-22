@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(AIDE
     VERSION 1.1.0
     DESCRIPTION "AI Development Environment - Multi-Document Qt6 Code Editor"
-    HOMEPAGE_URL "https://github.com/your-org/aide"
+    HOMEPAGE_URL "https://github.com/mistificator/aide"
     LANGUAGES CXX
 )
 

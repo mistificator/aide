@@ -90,9 +90,10 @@ void MainWindow::setupUiAndDocks() {
     auto* welcomeLay = new QVBoxLayout(m_welcomeWidget);
     auto* welcomeLabel = new QLabel(
         "<div align='center'>"
-        "<h2 style='color:#bd93f9;'>No Project Open</h2>"
+        "<h2 style='color:#bd93f9;'>No Project or File open</h2>"
         "<p style='color:#888899; font-size:14px;'>"
         "Open a project folder via <b>File &rarr; Open Folder / Project... (Ctrl+Shift+O)</b><br>"
+        "or open a file via <b>File &rarr; Open File... (Ctrl+O)</b><br>"
         "or <b>drag and drop</b> a project folder or source files into this area."
         "</p></div>",
         m_welcomeWidget);
