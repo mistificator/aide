@@ -115,7 +115,7 @@ add_executable(aide WIN32 MACOSX_BUNDLE
 
     ${AIDE_PLATFORM_SOURCES}
 
-    .github./workflows/ci.yml
+    .github/workflows/ci.yml
 )
 
 target_compile_definitions(aide PRIVATE
