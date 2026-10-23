@@ -50,7 +50,6 @@ bool ProjectManager::openProjectFolder(const QString& folderPath) {
 bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
     QFile f(aideFilePath);
     if (!f.open(QIODevice::ReadOnly)) return false;
-
     QFileInfo fi(aideFilePath);
     m_aideFilePath = fi.absoluteFilePath();
     m_rootPath = fi.absolutePath();
@@ -62,6 +61,7 @@ bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
     m_projectSummaryDirty = root["project_summary_dirty"].toBool(false);
 
     QString defaultLlm = ConfigManager::instance().aiConfig().llmIdentifier();
+
     m_files.clear();
     auto filesObj = root["files"].toObject();
     for (auto it = filesObj.begin(); it != filesObj.end(); ++it) {
@@ -101,7 +101,9 @@ bool ProjectManager::saveProjectFile() {
         };
     }
     QJsonArray ignoredArr;
-    for (const auto& d : m_ignoredDirs) ignoredArr.append(d);
+    for (const auto& d : ConfigManager::instance().aiBehavior().summaryIgnoredDirs) {
+        ignoredArr.append(d);
+    }
 
     QJsonObject root{
         {"project_name", QDir(m_rootPath).dirName()},
@@ -113,7 +115,6 @@ bool ProjectManager::saveProjectFile() {
         {"updated_at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
         {"files", filesObj}
     };
-
     QSaveFile f(m_aideFilePath);
     if (!f.open(QIODevice::WriteOnly)) return false;
     f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -153,6 +154,12 @@ void ProjectManager::setProjectSummary(const QString& summary, const QString& ll
 FileContextData ProjectManager::fileContext(const QString& absoluteOrRelPath) const {
     auto rel = toRelativePath(absoluteOrRelPath);
     return m_files.value(rel, FileContextData{.relativePath = rel});
+}
+
+bool ProjectManager::hasFileSummary(const QString& absoluteOrRelPath) const {
+    auto rel = toRelativePath(absoluteOrRelPath);
+    if (!m_files.contains(rel)) return false;
+    return !m_files[rel].aiSummary.trimmed().isEmpty();
 }
 
 void ProjectManager::updateFileUserPrompt(const QString& filePath, const QString& prompt) {
@@ -198,22 +205,14 @@ void ProjectManager::setFileSummaryPending(const QString& filePath, bool pending
     emit fileContextChanged(rel);
 }
 
-bool ProjectManager::isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent, const QString& currentLlmModel) const {
+bool ProjectManager::isFileSummaryOutdated(const QString& filePath, const QByteArray& /*currentContent*/, const QString& /*currentLlmModel*/) const {
     auto rel = toRelativePath(filePath);
     if (!m_files.contains(rel)) return true;
-
     const auto& entry = m_files[rel];
-    const QString currentSha = computeSha256(currentContent);
 
-    // Если саммари для этой же версии файла и этой же LLM уже генерируется или стоит в очереди — не ставим повторно
-    if (entry.isSummaryPending && entry.pendingSha256 == currentSha && entry.pendingLlmModel == currentLlmModel) {
-        return false;
-    }
-
-    // Если саммари уже готово и совпадают контрольная сумма файла + модель LLM — перегенерация не нужна
-    if (!entry.aiSummary.isEmpty() && entry.sha256 == currentSha && entry.llmModel == currentLlmModel) {
-        return false;
-    }
+    // Если саммари уже генерируется или уже существует — не пересоздаём автоматически
+    if (entry.isSummaryPending) return false;
+    if (!entry.aiSummary.trimmed().isEmpty()) return false;
 
     return true;
 }

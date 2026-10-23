@@ -20,6 +20,9 @@ public:
     bool closeDocument(int index);
     bool closeAllDocuments();
 
+    static void openContainingFolder(const QString& fileOrDirPath);
+    static void openTerminalAtFolder(const QString& dirPath);
+
 signals:
     void activeEditorChanged(CodeEditor* editor);
     void documentOpened(const QString& filePath, const QByteArray& content);
@@ -27,6 +30,9 @@ signals:
     void aiActionTriggered(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void cancelAiTriggered(CodeEditor* editor);
     void diffRequested(CodeEditor* editor);
+
+private slots:
+    void onTabBarContextMenu(const QPoint& pos);
 
 private:
     void registerEditor(CodeEditor* editor);

@@ -68,4 +68,5 @@ private:
     QCheckBox* m_useSyntaxExtensionsCheck = nullptr;
     QLineEdit* m_allowedFilenamesEdit = nullptr;
     QPlainTextEdit* m_allowedExtensionsEdit = nullptr;
+    QPlainTextEdit* m_ignoredDirsEdit = nullptr;
 };

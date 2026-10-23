@@ -38,6 +38,8 @@ private slots:
     void onFindReplaceDialog();
     void onEditorPreferences();
     void onAiPreferences();
+    void onRecursiveProjectSummary(const QString& startDir = {});
+    void onProjectTreeContextMenu(const QPoint& pos);
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
@@ -53,6 +55,7 @@ private:
     void setupConnections();
     void openProjectAtPath(const QString& dirPath);
     void updateCentralViewState();
+    void rebuildSingleFileSummary(const QString& filePath);
     static QString actionKeyForEnum(AiEditAction action);
 
     ProjectManager* m_projectMgr = nullptr;
@@ -67,8 +70,10 @@ private:
 
     QDockWidget* m_projectDock = nullptr;
     QStackedWidget* m_projectDockStack = nullptr;
+    QLabel* m_projectPathLabel = nullptr;
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
+
     ContextInspectorDock* m_inspectorDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;

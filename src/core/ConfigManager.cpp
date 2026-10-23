@@ -66,6 +66,27 @@ AiBehaviorConfig ConfigManager::defaultAiBehavior() {
         "py", "pyw", "pyi", "sh", "bash", "zsh",
         "sql", "ddl", "dml", "js", "mjs", "cjs", "jsx", "ts", "tsx", "cmake"
     };
+    b.summaryIgnoredDirs = {
+        ".*",
+        "build",
+        "build-*",
+        "cmake-build-*",
+        "out",
+        "dist",
+        "bin",
+        "obj",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        ".venv",
+        "vendor",
+        "third_party",
+        "3rdparty",
+        "external",
+        "target",
+        "Debug",
+        "Release"
+    };
     return b;
 }
 
@@ -151,6 +172,8 @@ void ConfigManager::loadConfig() {
         m_lastProjectPath = obj["lastProjectPath"].toString();
         m_lastDialogDir = obj["lastDialogDir"].toString();
         m_lastCustomPrompt = obj["lastCustomPrompt"].toString();
+        m_windowGeometry = QByteArray::fromBase64(obj["windowGeometry"].toString().toLatin1());
+        m_windowState = QByteArray::fromBase64(obj["windowState"].toString().toLatin1());
         m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
 
         m_recentProjects.clear();
@@ -160,7 +183,6 @@ void ConfigManager::loadConfig() {
                 m_recentProjects.append(p);
         }
 
-        // Загрузка профилей AI
         m_aiProfiles.clear();
         if (obj.contains("aiProfiles") && obj["aiProfiles"].isArray()) {
             for (const auto& item : obj["aiProfiles"].toArray()) {
@@ -194,7 +216,6 @@ void ConfigManager::loadConfig() {
             }
         }
 
-        // Загрузка настроек поведения AI
         m_aiBehavior = defaultAiBehavior();
         if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
             auto beh = obj["aiBehavior"].toObject();
@@ -215,6 +236,13 @@ void ConfigManager::loadConfig() {
                     QString ext = e.toString().trimmed().toLower();
                     if (ext.startsWith('.')) ext.remove(0, 1);
                     if (!ext.isEmpty()) m_aiBehavior.summaryAllowedExtensions.append(ext);
+                }
+            }
+            if (beh.contains("summaryIgnoredDirs")) {
+                m_aiBehavior.summaryIgnoredDirs.clear();
+                for (const auto& d : beh["summaryIgnoredDirs"].toArray()) {
+                    QString dirPat = d.toString().trimmed();
+                    if (!dirPat.isEmpty()) m_aiBehavior.summaryIgnoredDirs.append(dirPat);
                 }
             }
         }
@@ -255,12 +283,16 @@ void ConfigManager::saveConfig() {
     QJsonArray allowedExtsArr;
     for (const QString& ext : m_aiBehavior.summaryAllowedExtensions) allowedExtsArr.append(ext);
 
+    QJsonArray ignoredDirsArr;
+    for (const QString& dirPat : m_aiBehavior.summaryIgnoredDirs) ignoredDirsArr.append(dirPat);
+
     QJsonObject behaviorObj{
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"summaryAllowedFilenames", allowedFilesArr},
-        {"summaryAllowedExtensions", allowedExtsArr}
+        {"summaryAllowedExtensions", allowedExtsArr},
+        {"summaryIgnoredDirs", ignoredDirsArr}
     };
 
     QJsonArray recentArr;
@@ -284,6 +316,8 @@ void ConfigManager::saveConfig() {
         {"lastDialogDir", m_lastDialogDir},
         {"recentProjects", recentArr},
         {"lastCustomPrompt", m_lastCustomPrompt},
+        {"windowGeometry", QString::fromLatin1(m_windowGeometry.toBase64())},
+        {"windowState", QString::fromLatin1(m_windowState.toBase64())},
         {"syntaxBaseUrl", m_syntaxBaseUrl},
         {"fileTypes", typesArr},
         {"activeAiProfile", m_aiConfig.profileName},
@@ -361,7 +395,6 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
     QString fileName = fi.fileName();
     QString ext = fi.suffix().toLower();
 
-    // 1. Проверка по списку точных имён файлов или масок (например, CMakeLists.txt, Makefile)
     for (const QString& pattern : m_aiBehavior.summaryAllowedFilenames) {
         QString cleanPat = pattern.trimmed();
         if (cleanPat.isEmpty()) continue;
@@ -371,7 +404,6 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
         }
     }
 
-    // 2. Проверка по явному списку разрешённых расширений
     if (!ext.isEmpty()) {
         for (const QString& allowedExt : m_aiBehavior.summaryAllowedExtensions) {
             if (ext.compare(allowedExt.trimmed(), Qt::CaseInsensitive) == 0) {
@@ -379,7 +411,6 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
             }
         }
 
-        // 3. Проверка по расширениям из загруженных файлов подсветки синтаксиса
         if (m_aiBehavior.summaryUseSyntaxExtensions) {
             const QStringList synExts = extensionsFromLoadedSyntaxes();
             if (synExts.contains(ext, Qt::CaseInsensitive)) {
@@ -396,6 +427,26 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
                                      "- **Extension:** `%2` *(not in allowed summary extensions)*\n\n"
                                      "*You can add `%1` or `%2` in `AI -> Preferences -> Behavior & Summary Rules`, or click **Regenerate** to force summary creation manually.*")
                                      .arg(fileName, ext.isEmpty() ? "(none)" : "." + ext);
+    }
+    return false;
+}
+
+bool ConfigManager::isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const {
+    if (dirNameOrPath.isEmpty()) return false;
+    QString clean = QDir::cleanPath(dirNameOrPath);
+    QString dirName = QFileInfo(clean).fileName();
+    if (dirName.isEmpty()) dirName = clean;
+
+    for (const QString& patRaw : m_aiBehavior.summaryIgnoredDirs) {
+        QString pat = patRaw.trimmed();
+        if (pat.isEmpty()) continue;
+        if ((pat == ".*" || pat == ".") && dirName.startsWith('.')) {
+            return true;
+        }
+        if (dirName.compare(pat, Qt::CaseInsensitive) == 0 ||
+            QDir::match(pat, dirName)) {
+            return true;
+        }
     }
     return false;
 }
@@ -464,6 +515,12 @@ void ConfigManager::clearRecentProjects() {
 
 void ConfigManager::setLastCustomPrompt(const QString& prompt) {
     m_lastCustomPrompt = prompt;
+    saveConfig();
+}
+
+void ConfigManager::setWindowGeometryAndState(const QByteArray& geometry, const QByteArray& state) {
+    m_windowGeometry = geometry;
+    m_windowState = state;
     saveConfig();
 }
 

@@ -13,7 +13,6 @@ struct FileContextData {
     QString userPrompt;
     QString aiSummary;
     QDateTime updatedAt;
-
     bool isSummaryPending = false;
     QString pendingSha256;
     QString pendingLlmModel;
@@ -28,8 +27,8 @@ public:
     bool loadProjectFile(const QString& aideFilePath);
     bool saveProjectFile();
     void closeProject();
-    bool hasOpenProject() const { return !m_rootPath.isEmpty(); }
 
+    bool hasOpenProject() const { return !m_rootPath.isEmpty(); }
     QString projectRootPath() const { return m_rootPath; }
     QString projectFilePath() const { return m_aideFilePath; }
 
@@ -41,6 +40,7 @@ public:
     void setProjectSummary(const QString& summary, const QString& llmModel = {});
 
     FileContextData fileContext(const QString& absoluteOrRelPath) const;
+    bool hasFileSummary(const QString& absoluteOrRelPath) const;
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
     void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
     void setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256 = {}, const QString& pendingLlmModel = {});
@@ -62,7 +62,6 @@ signals:
 
 private:
     QString m_rootPath, m_aideFilePath, m_projectSystemPrompt, m_projectSummary, m_projectSummaryLlmModel;
-    QStringList m_ignoredDirs = {".git", "build", "__pycache__", "node_modules", ".aide"};
     bool m_projectSummaryDirty = false;
     QMap<QString, FileContextData> m_files;
 };

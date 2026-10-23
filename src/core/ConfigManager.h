@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QByteArray>
 #include <QJsonObject>
 #include <QVector>
 
@@ -37,6 +38,7 @@ struct AiBehaviorConfig {
     bool summaryUseSyntaxExtensions = true;
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
+    QStringList summaryIgnoredDirs;
 };
 
 struct FileTypeRule {
@@ -55,7 +57,7 @@ public:
     void loadConfig();
     void saveConfig();
 
-    // Профили подключения AI
+    // Профили и конфигурация подключения к ИИ
     AiConnectionConfig aiConfig() const { return m_aiConfig; }
     void setAiConfig(const AiConnectionConfig& cfg);
 
@@ -64,15 +66,15 @@ public:
     void setAiProfiles(const QVector<AiConnectionConfig>& profiles, const QString& activeProfileName);
     static QVector<AiConnectionConfig> defaultAiProfiles();
 
-    // Настройки поведения AI и фильтрации саммари
+    // Настройки поведения ИИ и правил генерации саммари
     AiBehaviorConfig aiBehavior() const { return m_aiBehavior; }
     void setAiBehavior(const AiBehaviorConfig& behavior);
     static AiBehaviorConfig defaultAiBehavior();
-
     QStringList extensionsFromLoadedSyntaxes() const;
     bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
+    bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
 
-    // Темы и пути
+    // Тема, пути, геометрия окна и док-панелей
     QString activeTheme() const { return m_activeTheme; }
     void setActiveTheme(const QString& themeName);
 
@@ -90,18 +92,22 @@ public:
     QString lastCustomPrompt() const { return m_lastCustomPrompt; }
     void setLastCustomPrompt(const QString& prompt);
 
-    // Подсветка синтаксиса
+    QByteArray windowGeometry() const { return m_windowGeometry; }
+    QByteArray windowState() const { return m_windowState; }
+    void setWindowGeometryAndState(const QByteArray& geometry, const QByteArray& state);
+
+    // Типы файлов и синтаксис
     QString syntaxBaseUrl() const { return m_syntaxBaseUrl; }
     void setSyntaxBaseUrl(const QString& url);
 
     QVector<FileTypeRule> fileTypeRules() const { return m_fileTypes; }
     void setFileTypeRules(const QVector<FileTypeRule>& rules);
     void upsertFileTypeRule(const FileTypeRule& rule);
-
     QString languageIdForFile(const QString& filePath) const;
     FileTypeRule ruleForLanguage(const QString& langId) const;
 
     QString promptTemplate(const QString& actionKey) const;
+
     QString configDirPath() const;
     QString syntaxDirPath() const { return configDirPath() + "/syntax"; }
     QString themesDirPath() const { return configDirPath() + "/themes"; }
@@ -129,6 +135,8 @@ private:
     QString m_lastDialogDir;
     QStringList m_recentProjects;
     QString m_lastCustomPrompt;
+    QByteArray m_windowGeometry;
+    QByteArray m_windowState;
     QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;

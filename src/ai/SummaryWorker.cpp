@@ -25,21 +25,22 @@ void SummaryWorker::updateTimerInterval() {
 void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content) {
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
 
-    // Проверяем, нужно ли составлять саммари для этого файла/расширения согласно настройкам
+    // Если у файла уже есть Summary — не пересоздаём его, пока пользователь явно не нажмёт Regenerate
+    if (m_projectMgr->hasFileSummary(filePath)) {
+        return;
+    }
+
     if (!ConfigManager::instance().shouldGenerateSummaryForFile(filePath)) {
         return;
     }
 
-    const auto& cfg = ConfigManager::instance().aiConfig();
-    QString currentLlm = cfg.llmIdentifier();
     QString relPath = m_projectMgr->toRelativePath(filePath);
-    QString sha256 = ProjectManager::computeSha256(content);
-
-    if (m_taskQueue->hasPendingOrActiveTask(TaskTargetType::FileSummary, relPath, sha256, currentLlm)) {
+    if (m_taskQueue->hasPendingOrActiveTask(TaskTargetType::FileSummary, relPath)) {
         return;
     }
 
-    if (m_projectMgr->isFileSummaryOutdated(filePath, content, currentLlm)) {
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    if (m_projectMgr->isFileSummaryOutdated(filePath, content, cfg.llmIdentifier())) {
         forceRebuildFileSummary(filePath, content);
     }
 }
@@ -74,6 +75,7 @@ void SummaryWorker::forceRebuildProjectSummary() {
     if (digest.trimmed().isEmpty()) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
+
     AiTask task;
     task.priority = TaskPriority::Low_BackgroundSummary;
     task.targetType = TaskTargetType::ProjectSummary;
