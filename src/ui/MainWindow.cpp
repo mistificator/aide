@@ -1,8 +1,10 @@
 // src/ui/MainWindow.cpp
 #include "MainWindow.h"
+#include "AppIcon.h"
 #include "ContextInspectorDock.h"
 #include "AiPreferencesDialog.h"
 #include "EditorPreferencesDialog.h"
+#include "RecursiveSummaryDialog.h"
 #include "AiDebugConsoleDock.h"
 #include "AiTaskQueueDock.h"
 #include "DiffViewerDialog.h"
@@ -28,6 +30,7 @@
 #include <QStackedWidget>
 #include <QLabel>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QDialog>
 #include <QVBoxLayout>
@@ -54,7 +57,7 @@ public:
                     return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
                 if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
                     return "AI Summary: Not required according to AI Behavior settings";
-                return "AI Summary: Not indexed yet (open file to index)";
+                return "AI Summary: Not indexed yet (open file or run recursive summary)";
             }
         }
         return QFileSystemModel::data(index, role);
@@ -71,12 +74,23 @@ MainWindow::MainWindow(QWidget* parent)
     m_summaryWorker(new SummaryWorker(m_projectMgr, m_taskQueue, this)),
     m_downloader(new ThemeAndSyntaxDownloader(this)) {
     setWindowTitle("AIDE - AI Development Environment");
+    setWindowIcon(AppIcon::appIcon());
     resize(1400, 860);
     setAcceptDrops(true);
 
     setupUiAndDocks();
     setupMenus();
     setupConnections();
+
+    // Восстановление геометрии главного окна и состояния док-панелей
+    const QByteArray savedGeom = ConfigManager::instance().windowGeometry();
+    if (!savedGeom.isEmpty()) {
+        restoreGeometry(savedGeom);
+    }
+    const QByteArray savedState = ConfigManager::instance().windowState();
+    if (!savedState.isEmpty()) {
+        restoreState(savedState);
+    }
 
     m_downloader->ensureResourcesPresent();
 
@@ -93,6 +107,10 @@ void MainWindow::setupUiAndDocks() {
 
     m_welcomeWidget = new QWidget(m_centralStack);
     auto* welcomeLay = new QVBoxLayout(m_welcomeWidget);
+    auto* welcomeIconLabel = new QLabel(m_welcomeWidget);
+    welcomeIconLabel->setPixmap(AppIcon::renderIconPixmap(72));
+    welcomeIconLabel->setAlignment(Qt::AlignCenter);
+
     auto* welcomeLabel = new QLabel(
         "<div align='center'>"
         "<h2 style='color:#bd93f9;'>No Project or File open</h2>"
@@ -104,6 +122,7 @@ void MainWindow::setupUiAndDocks() {
         m_welcomeWidget);
     welcomeLabel->setAlignment(Qt::AlignCenter);
     welcomeLay->addStretch();
+    welcomeLay->addWidget(welcomeIconLabel);
     welcomeLay->addWidget(welcomeLabel);
     welcomeLay->addStretch();
 
@@ -112,32 +131,66 @@ void MainWindow::setupUiAndDocks() {
     m_centralStack->addWidget(m_tabWidget);
     setCentralWidget(m_centralStack);
 
+    // Док 1: Project Explorer с отображением пути к проекту
     m_projectDock = new QDockWidget("Project Explorer", this);
+    m_projectDock->setObjectName("ProjectExplorerDock");
     m_projectDockStack = new QStackedWidget(m_projectDock);
     auto* noProjExplorerLabel = new QLabel("No project loaded.\nUse File -> Open Folder / Project...", m_projectDockStack);
     noProjExplorerLabel->setAlignment(Qt::AlignCenter);
     noProjExplorerLabel->setStyleSheet("color: #777;");
 
-    m_projectTree = new QTreeView(m_projectDockStack);
+    auto* projExplorerPage = new QWidget(m_projectDockStack);
+    auto* projExplorerLay = new QVBoxLayout(projExplorerPage);
+    projExplorerLay->setContentsMargins(0, 0, 0, 0);
+    projExplorerLay->setSpacing(0);
+
+    auto* pathHeaderBox = new QWidget(projExplorerPage);
+    pathHeaderBox->setStyleSheet(
+        "QWidget { background-color: rgba(128, 128, 150, 0.12); border-bottom: 1px solid rgba(128, 128, 150, 0.25); }");
+    auto* pathHeaderLay = new QVBoxLayout(pathHeaderBox);
+    pathHeaderLay->setContentsMargins(8, 5, 8, 5);
+    pathHeaderLay->setSpacing(1);
+
+    auto* pathTitleLbl = new QLabel("PROJECT PATH:", pathHeaderBox);
+    pathTitleLbl->setStyleSheet("color: #888899; font-size: 9px; font-weight: bold; border: none; background: transparent;");
+    m_projectPathLabel = new QLabel("-", pathHeaderBox);
+    m_projectPathLabel->setStyleSheet("color: #bd93f9; font-size: 11px; font-weight: bold; border: none; background: transparent;");
+    m_projectPathLabel->setWordWrap(true);
+    m_projectPathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    pathHeaderLay->addWidget(pathTitleLbl);
+    pathHeaderLay->addWidget(m_projectPathLabel);
+
+    m_projectTree = new QTreeView(projExplorerPage);
     m_fsModel = new ProjectTreeModel(m_projectMgr, this);
     m_fsModel->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
     m_projectTree->setModel(m_fsModel);
     for (int col = 1; col < 4; ++col) m_projectTree->hideColumn(col);
     m_projectTree->header()->hide();
+    m_projectTree->setContextMenuPolicy(Qt::CustomContextMenu);
+
+    projExplorerLay->addWidget(pathHeaderBox);
+    projExplorerLay->addWidget(m_projectTree, 1);
 
     m_projectDockStack->addWidget(noProjExplorerLabel);
-    m_projectDockStack->addWidget(m_projectTree);
+    m_projectDockStack->addWidget(projExplorerPage);
     m_projectDock->setWidget(m_projectDockStack);
     addDockWidget(Qt::LeftDockWidgetArea, m_projectDock);
 
+    // Док 2: AI Context Inspector
     m_inspectorDock = new ContextInspectorDock(m_projectMgr, this);
+    m_inspectorDock->setObjectName("ContextInspectorDock");
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
 
+    // Док 3: AI Task Queue
     m_taskQueueDock = new AiTaskQueueDock(m_taskQueue, this);
+    m_taskQueueDock->setObjectName("AiTaskQueueDock");
     addDockWidget(Qt::BottomDockWidgetArea, m_taskQueueDock);
 
+    // Док 4: AI API Debug Console
     m_debugConsoleDock = new AiDebugConsoleDock(this);
+    m_debugConsoleDock->setObjectName("AiDebugConsoleDock");
     addDockWidget(Qt::BottomDockWidgetArea, m_debugConsoleDock);
+
     tabifyDockWidget(m_taskQueueDock, m_debugConsoleDock);
     m_debugConsoleDock->hide();
 
@@ -163,8 +216,10 @@ void MainWindow::setupMenus() {
     });
     fileMenu->addAction("Open File...", QKeySequence::Open, this, &MainWindow::onOpenFile);
     fileMenu->addAction("Open Folder / Project...", QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onOpenFolder);
+
     m_recentProjectsMenu = fileMenu->addMenu("Recent Projects");
     connect(m_recentProjectsMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentProjectsMenu);
+
     fileMenu->addAction("Close All Projects", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::onCloseAllProjects);
     fileMenu->addSeparator();
     fileMenu->addAction("Save", QKeySequence::Save, m_tabWidget, &EditorTabWidget::saveCurrentDocument);
@@ -209,8 +264,10 @@ void MainWindow::setupMenus() {
     viewMenu->addSeparator();
     m_themeMenu = viewMenu->addMenu("Color Scheme");
     connect(m_themeMenu, &QMenu::aboutToShow, this, &MainWindow::populateThemeMenu);
+
     m_langMenu = viewMenu->addMenu("Syntax Highlighting");
     connect(m_langMenu, &QMenu::aboutToShow, this, &MainWindow::populateSyntaxMenu);
+
     viewMenu->addSeparator();
     viewMenu->addAction("Zoom In", QKeySequence::ZoomIn, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomIn(1); });
     viewMenu->addAction("Zoom Out", QKeySequence::ZoomOut, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomOut(1); });
@@ -234,6 +291,9 @@ void MainWindow::setupMenus() {
     aiMenu->addAction("Rebuild File Summary", this, [this]() {
         if (auto* e = m_tabWidget->currentEditor(); e && !e->filePath().isEmpty())
             m_summaryWorker->forceRebuildFileSummary(e->filePath(), e->toPlainText().toUtf8());
+    });
+    aiMenu->addAction("Generate Summaries for Project Files (Recursive)...", this, [this]() {
+        onRecursiveProjectSummary();
     });
     aiMenu->addAction("Rebuild Project Summary", m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
     aiMenu->addAction("Cancel All Background Tasks", m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
@@ -259,14 +319,16 @@ void MainWindow::setupMenus() {
     // 6. HELP
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About AIDE", this, [this]() {
-        QMessageBox::about(
-            this,
-            "About AIDE",
+        QMessageBox aboutBox(this);
+        aboutBox.setWindowTitle("About AIDE");
+        aboutBox.setIconPixmap(AppIcon::renderIconPixmap(64));
+        aboutBox.setText(
             QString("<b>AIDE (AI Development Environment)</b><br>"
                     "<b>Version:</b> %1<br><br>"
                     "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
                     "Dynamic KDE Syntax Highlighting, Side-by-Side Diff, and Two-Tier Priority Queue.")
                 .arg(QApplication::applicationVersion()));
+        aboutBox.exec();
     });
     helpMenu->addAction("About Qt", qApp, &QApplication::aboutQt);
 }
@@ -278,6 +340,8 @@ void MainWindow::setupConnections() {
             updateCentralViewState();
         }
     });
+
+    connect(m_projectTree, &QTreeView::customContextMenuRequested, this, &MainWindow::onProjectTreeContextMenu);
 
     connect(m_tabWidget, &EditorTabWidget::activeEditorChanged, this, [this](CodeEditor* ed) {
         onActiveEditorChanged(ed);
@@ -291,10 +355,7 @@ void MainWindow::setupConnections() {
 
     connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 
-    connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, [this](const QString& path) {
-        if (auto* ed = m_tabWidget->findEditorByPath(path))
-            m_summaryWorker->forceRebuildFileSummary(path, ed->toPlainText().toUtf8());
-    });
+    connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, &MainWindow::rebuildSingleFileSummary);
     connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
@@ -322,6 +383,79 @@ void MainWindow::setupConnections() {
             m_inspectorDock, &ContextInspectorDock::resetLiveSummary);
 }
 
+void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    if (auto* ed = m_tabWidget->findEditorByPath(filePath)) {
+        m_summaryWorker->forceRebuildFileSummary(filePath, ed->toPlainText().toUtf8());
+        return;
+    }
+    QFile f(filePath);
+    if (f.open(QIODevice::ReadOnly)) {
+        m_summaryWorker->forceRebuildFileSummary(filePath, f.readAll());
+    }
+}
+
+void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
+    if (!m_projectMgr->hasOpenProject()) {
+        QMessageBox::information(this, "Recursive Summary", "Please open a project folder first.");
+        return;
+    }
+
+    QString targetDir = startDir.isEmpty() ? m_projectMgr->projectRootPath() : startDir;
+    RecursiveSummaryDialog dlg(m_projectMgr, targetDir, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QStringList files = dlg.selectedFilePaths();
+    int scheduled = 0;
+    for (const QString& path : files) {
+        rebuildSingleFileSummary(path);
+        ++scheduled;
+    }
+
+    if (scheduled > 0) {
+        statusBar()->showMessage(QString("Queued %1 file(s) for background AI summary generation.").arg(scheduled), 5000);
+    }
+}
+
+void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
+    if (!m_projectMgr->hasOpenProject()) return;
+
+    QModelIndex idx = m_projectTree->indexAt(pos);
+    QString clickedPath = idx.isValid() ? m_fsModel->filePath(idx) : m_projectMgr->projectRootPath();
+    bool isDir = !idx.isValid() || m_fsModel->isDir(idx);
+    QString folderPath = isDir ? clickedPath : QFileInfo(clickedPath).absolutePath();
+
+    QMenu menu(this);
+    if (!isDir) {
+        menu.addAction("Open File", this, [this, clickedPath]() {
+            m_tabWidget->openFile(clickedPath);
+            updateCentralViewState();
+        });
+        menu.addAction("Generate / Regenerate File Summary", this, [this, clickedPath]() {
+            rebuildSingleFileSummary(clickedPath);
+        });
+        menu.addSeparator();
+    }
+
+    if (isDir && clickedPath != m_projectMgr->projectRootPath()) {
+        menu.addAction(QString("Generate Summaries in '%1' (Recursive)...").arg(QFileInfo(clickedPath).fileName()),
+                       this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
+    }
+    menu.addAction("Generate Summaries for Entire Project (Recursive)...", this, [this]() {
+        onRecursiveProjectSummary(m_projectMgr->projectRootPath());
+    });
+
+    menu.addSeparator();
+    menu.addAction("Open Folder in Explorer / File Manager", this, [clickedPath]() {
+        EditorTabWidget::openContainingFolder(clickedPath);
+    });
+    menu.addAction("Open Console Terminal Here", this, [folderPath]() {
+        EditorTabWidget::openTerminalAtFolder(folderPath);
+    });
+
+    menu.exec(m_projectTree->viewport()->mapToGlobal(pos));
+}
+
 void MainWindow::updateCentralViewState() {
     bool hasTabs = (m_tabWidget->count() > 0);
     bool hasProj = m_projectMgr->hasOpenProject();
@@ -332,6 +466,10 @@ void MainWindow::updateCentralViewState() {
 void MainWindow::openProjectAtPath(const QString& dirPath) {
     if (dirPath.isEmpty() || !QDir(dirPath).exists()) return;
     if (m_projectMgr->openProjectFolder(dirPath)) {
+        QString nativePath = QDir::toNativeSeparators(m_projectMgr->projectRootPath());
+        m_projectPathLabel->setText(nativePath);
+        m_projectPathLabel->setToolTip(nativePath);
+
         m_fsModel->setRootPath(dirPath);
         m_projectTree->setRootIndex(m_fsModel->index(dirPath));
         m_inspectorDock->refreshDisplay();
@@ -371,6 +509,8 @@ void MainWindow::onCloseAllProjects() {
     m_taskQueue->cancelAllBackgroundTasks();
     if (!m_tabWidget->closeAllDocuments()) return;
     m_projectMgr->closeProject();
+    m_projectPathLabel->setText("-");
+    m_projectPathLabel->setToolTip({});
     ConfigManager::instance().setLastProjectPath({});
     m_inspectorDock->setActiveFile({});
     updateCentralViewState();
@@ -509,6 +649,7 @@ void MainWindow::onAiPreferences() {
         cfgMgr.setAiProfiles(dlg.resultProfiles(), dlg.resultActiveProfileName());
         cfgMgr.setAiConfig(dlg.resultConfig());
         cfgMgr.setAiBehavior(dlg.resultBehavior());
+        m_projectMgr->saveProjectFile();
         m_inspectorDock->refreshDisplay();
         m_projectTree->viewport()->update();
     }
@@ -609,6 +750,7 @@ void MainWindow::dropEvent(QDropEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    ConfigManager::instance().setWindowGeometryAndState(saveGeometry(), saveState());
     m_projectMgr->saveProjectFile();
     if (m_tabWidget->closeAllDocuments()) event->accept();
     else event->ignore();

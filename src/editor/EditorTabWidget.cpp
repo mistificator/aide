@@ -5,11 +5,21 @@
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QDir>
+#include <QTabBar>
+#include <QMenu>
+#include <QProcess>
+#include <QDesktopServices>
+#include <QStandardPaths>
+#include <QUrl>
 
 EditorTabWidget::EditorTabWidget(QWidget* parent) : QTabWidget(parent) {
     setTabsClosable(true);
     setMovable(true);
     setDocumentMode(true);
+
+    tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tabBar(), &QTabBar::customContextMenuRequested, this, &EditorTabWidget::onTabBarContextMenu);
+
     connect(this, &QTabWidget::tabCloseRequested, this, &EditorTabWidget::closeDocument);
     connect(this, &QTabWidget::currentChanged, this, [this](int) { emit activeEditorChanged(currentEditor()); });
 }
@@ -22,6 +32,75 @@ CodeEditor* EditorTabWidget::findEditorByPath(const QString& filePath) const {
     for (int i = 0; i < count(); ++i)
         if (auto* ed = editorAt(i); ed && ed->filePath() == clean) return ed;
     return nullptr;
+}
+
+void EditorTabWidget::openContainingFolder(const QString& fileOrDirPath) {
+    if (fileOrDirPath.isEmpty()) return;
+    QFileInfo fi(fileOrDirPath);
+    QString dirPath = fi.isDir() ? fi.absoluteFilePath() : fi.absolutePath();
+
+#if defined(Q_OS_WIN)
+    if (fi.exists() && fi.isFile()) {
+        QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(fi.absoluteFilePath())});
+        return;
+    }
+#elif defined(Q_OS_MAC)
+    if (fi.exists() && fi.isFile()) {
+        QProcess::startDetached("open", {"-R", fi.absoluteFilePath()});
+        return;
+    }
+#endif
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dirPath));
+}
+
+void EditorTabWidget::openTerminalAtFolder(const QString& dirPath) {
+    if (dirPath.isEmpty() || !QDir(dirPath).exists()) return;
+
+#if defined(Q_OS_WIN)
+    QString wt = QStandardPaths::findExecutable("wt");
+    if (!wt.isEmpty()) {
+        QProcess::startDetached(wt, {"-d", QDir::toNativeSeparators(dirPath)}, dirPath);
+        return;
+    }
+    QProcess::startDetached("cmd.exe",
+                            {"/C", "start", "", "/D", QDir::toNativeSeparators(dirPath), "cmd.exe"},
+                            dirPath);
+#elif defined(Q_OS_MAC)
+    QProcess::startDetached("open", {"-a", "Terminal", dirPath});
+#else
+    const QStringList terminals = {
+        "x-terminal-emulator", "konsole", "gnome-terminal", "xfce4-terminal",
+        "alacritty", "kitty", "tilix", "mate-terminal", "lxterminal", "xterm"
+    };
+    for (const QString& term : terminals) {
+        QString exe = QStandardPaths::findExecutable(term);
+        if (!exe.isEmpty()) {
+            QProcess::startDetached(exe, {}, dirPath);
+            return;
+        }
+    }
+#endif
+}
+
+void EditorTabWidget::onTabBarContextMenu(const QPoint& pos) {
+    int idx = tabBar()->tabAt(pos);
+    if (idx < 0) return;
+
+    CodeEditor* ed = editorAt(idx);
+    // Контекстное меню показываем только для сохранённых на диске файлов
+    if (!ed || ed->filePath().isEmpty()) return;
+
+    QString filePath = ed->filePath();
+    QString folderPath = QFileInfo(filePath).absolutePath();
+
+    QMenu menu(this);
+    menu.addAction("Open Folder in Explorer / File Manager", this, [filePath]() {
+        openContainingFolder(filePath);
+    });
+    menu.addAction("Open Console Terminal Here", this, [folderPath]() {
+        openTerminalAtFolder(folderPath);
+    });
+    menu.exec(tabBar()->mapToGlobal(pos));
 }
 
 CodeEditor* EditorTabWidget::newDocument() {
@@ -93,7 +172,6 @@ bool EditorTabWidget::saveCurrentDocumentAs() {
     auto* ed = currentEditor();
     if (!ed) return false;
 
-    // Если файл уже сохранён — предлагаем его текущий путь; иначе — папку открытого проекта или последнюю папку
     QString initialPath = ed->filePath().isEmpty()
                               ? ConfigManager::instance().resolveInitialDialogDir()
                               : ed->filePath();

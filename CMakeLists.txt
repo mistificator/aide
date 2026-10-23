@@ -10,7 +10,6 @@ set(GIT_TAG_VER "0.0.0")
 set(GIT_COMMIT_COUNT "0")
 
 if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-    # Получаем последний тег (например, v1.2.3 или 1.2.3)
     execute_process(
         COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -24,7 +23,6 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         set(GIT_TAG_VER "${CMAKE_MATCH_1}.0")
     endif()
 
-    # Абсолютный порядковый номер коммита по всем веткам
     execute_process(
         COMMAND "${GIT_EXECUTABLE}" rev-list --all --count
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -55,7 +53,6 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
-# Обход удаления AGL.framework в свежих macOS SDK (QTBUG-137687)
 if(APPLE AND TARGET WrapOpenGL::WrapOpenGL)
     get_target_property(_gl_libs WrapOpenGL::WrapOpenGL INTERFACE_LINK_LIBRARIES)
     if(_gl_libs)
@@ -66,12 +63,32 @@ endif()
 
 include(GNUInstallDirs)
 
+# ==============================================================================
+# Генерация иконок приложения (aide.ico и aide.svg) для ресурсов и пакета CPack
+# ==============================================================================
+set(AIDE_GENERATED_ICO "${CMAKE_CURRENT_BINARY_DIR}/aide.ico")
+set(AIDE_GENERATED_SVG "${CMAKE_CURRENT_BINARY_DIR}/aide.svg")
+
+add_executable(aide_icon_gen src/tools/IconGenerator.cpp)
+set_target_properties(aide_icon_gen PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+
+add_custom_command(
+    OUTPUT "${AIDE_GENERATED_ICO}" "${AIDE_GENERATED_SVG}"
+    COMMAND aide_icon_gen "${AIDE_GENERATED_ICO}" "${AIDE_GENERATED_SVG}"
+    DEPENDS aide_icon_gen
+    COMMENT "Generating AIDE multi-resolution .ico and .svg icons..."
+)
+add_custom_target(aide_icons ALL DEPENDS "${AIDE_GENERATED_ICO}" "${AIDE_GENERATED_SVG}")
+
 set(AIDE_PLATFORM_SOURCES)
 if(WIN32)
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/version.rc.in"
         "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
         @ONLY
+    )
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/version.rc"
+        PROPERTIES OBJECT_DEPENDS "${AIDE_GENERATED_ICO}"
     )
     list(APPEND AIDE_PLATFORM_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 endif()
@@ -112,17 +129,23 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/AiTaskQueueDock.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
+    src/ui/AppIcon.h
+    src/ui/AppIcon.cpp
+    src/ui/RecursiveSummaryDialog.h
+    src/ui/RecursiveSummaryDialog.cpp
 
     ${AIDE_PLATFORM_SOURCES}
 
     .github/workflows/ci.yml
 )
 
+add_dependencies(aide aide_icons)
+
 target_compile_definitions(aide PRIVATE
     AIDE_VERSION_STRING="${PROJECT_VERSION}"
 )
 
-target_include_directories(aide PRIVATE src)
+target_include_directories(aide PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(aide PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
 
 set_target_properties(aide PROPERTIES
@@ -136,6 +159,29 @@ install(TARGETS aide
     BUNDLE  DESTINATION . COMPONENT Runtime
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime
 )
+
+if(UNIX AND NOT APPLE)
+    set(AIDE_DESKTOP_FILE "${CMAKE_CURRENT_BINARY_DIR}/org.aide.editor.desktop")
+    file(WRITE "${AIDE_DESKTOP_FILE}"
+"[Desktop Entry]\n"
+"Type=Application\n"
+"Name=AIDE\n"
+"GenericName=AI Code Editor\n"
+"Comment=${PROJECT_DESCRIPTION}\n"
+"Exec=aide %F\n"
+"Icon=aide\n"
+"Terminal=false\n"
+"Categories=Development;IDE;TextEditor;\n"
+    )
+    install(FILES "${AIDE_GENERATED_SVG}"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+        COMPONENT Runtime
+    )
+    install(FILES "${AIDE_DESKTOP_FILE}"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+        COMPONENT Runtime
+    )
+endif()
 
 if((WIN32 OR APPLE) AND COMMAND qt_generate_deploy_app_script)
     if(Qt6_VERSION VERSION_GREATER_EQUAL "6.5.0")
@@ -181,6 +227,9 @@ if(WIN32)
     set(CPACK_NSIS_PACKAGE_NAME "AIDE")
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
     set(CPACK_NSIS_MODIFY_PATH ON)
+    set(CPACK_NSIS_MUI_ICON "${AIDE_GENERATED_ICO}")
+    set(CPACK_NSIS_MUI_UNIICON "${AIDE_GENERATED_ICO}")
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\aide.exe")
     set(CPACK_PACKAGE_EXECUTABLES "aide" "AIDE")
 elseif(APPLE)
     if(NOT DEFINED CPACK_GENERATOR)
@@ -199,3 +248,4 @@ elseif(UNIX)
 endif()
 
 include(CPack)
+

@@ -21,7 +21,7 @@
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(600, 560);
+    resize(620, 620);
 
     auto& cfgMgr = ConfigManager::instance();
     m_profiles = cfgMgr.aiProfiles();
@@ -50,7 +50,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     connLay->addWidget(profileGroup);
 
     auto* form = new QFormLayout();
-
     m_backendCombo = new QComboBox(connPage);
     m_backendCombo->addItems({"Ollama (Native API)", "KoboldCpp (Native / SSE)", "OpenAI-Compatible (/v1/chat/completions)"});
 
@@ -67,7 +66,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     modelRow->addWidget(m_fetchBtn);
 
     m_statusLabel = new QLabel(connPage);
-
     m_tempSpin = new QDoubleSpinBox(connPage);
     m_tempSpin->setRange(0.0, 2.0);
     m_tempSpin->setSingleStep(0.05);
@@ -111,7 +109,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     form->addRow("Project Summary Rebuild:", m_summaryIntervalSpin);
     connLay->addLayout(form);
     connLay->addStretch();
-
     tabs->addTab(connPage, "Connection && Profiles");
 
     // =========================================================================
@@ -119,7 +116,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     // =========================================================================
     auto* behPage = new QWidget(tabs);
     auto* behLay = new QVBoxLayout(behPage);
-
     auto behCfg = cfgMgr.aiBehavior();
 
     auto* promptGroup = new QGroupBox("System Prompt Context Composition (When Working with a Document)", behPage);
@@ -132,7 +128,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     promptLay->addWidget(m_useProjSummaryCheck);
     behLay->addWidget(promptGroup);
 
-    auto* filterGroup = new QGroupBox("Automatic File Summary Generation Rules", behPage);
+    auto* filterGroup = new QGroupBox("Automatic & Recursive File Summary Generation Rules", behPage);
     auto* filterLay = new QVBoxLayout(filterGroup);
 
     m_useSyntaxExtensionsCheck = new QCheckBox(
@@ -156,12 +152,19 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
 
     m_allowedExtensionsEdit = new QPlainTextEdit(behCfg.summaryAllowedExtensions.join(", "), filterGroup);
     m_allowedExtensionsEdit->setPlaceholderText("cpp, h, c, py, sh, sql, js, ts...");
-    m_allowedExtensionsEdit->setMaximumHeight(110);
+    m_allowedExtensionsEdit->setMaximumHeight(85);
     filterLay->addWidget(m_allowedExtensionsEdit);
+
+    filterLay->addWidget(new QLabel(
+        "Ignored Folders for Recursive Summary (comma-separated names or wildcards, e.g. .*, build, node_modules):",
+        filterGroup));
+    m_ignoredDirsEdit = new QPlainTextEdit(behCfg.summaryIgnoredDirs.join(", "), filterGroup);
+    m_ignoredDirsEdit->setPlaceholderText(".*, build, build-*, cmake-build-*, out, dist, bin, obj, node_modules, __pycache__, venv...");
+    m_ignoredDirsEdit->setMaximumHeight(75);
+    filterLay->addWidget(m_ignoredDirsEdit);
 
     behLay->addWidget(filterGroup);
     behLay->addStretch();
-
     tabs->addTab(behPage, "Behavior && Summary Rules");
 
     mainLay->addWidget(tabs, 1);
@@ -169,7 +172,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     mainLay->addWidget(btns);
 
-    // Заполняем список профилей
     m_updatingProfileUi = true;
     QString activeName = cfgMgr.activeAiProfileName();
     int activeIdx = 0;
@@ -281,7 +283,6 @@ void AiPreferencesDialog::onNewProfileClicked() {
 
 void AiPreferencesDialog::onDeleteProfileClicked() {
     if (m_profiles.size() <= 1 || m_currentProfileIndex < 0) return;
-m_UpdatingProfileUi:
     m_updatingProfileUi = true;
     m_profiles.removeAt(m_currentProfileIndex);
     m_profileCombo->removeItem(m_currentProfileIndex);
@@ -384,5 +385,6 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
         if (!ext.isEmpty() && !b.summaryAllowedExtensions.contains(ext))
             b.summaryAllowedExtensions.append(ext);
     }
+    b.summaryIgnoredDirs = splitCommaSeparated(m_ignoredDirsEdit->toPlainText());
     return b;
 }

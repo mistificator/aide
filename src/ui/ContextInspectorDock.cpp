@@ -15,10 +15,13 @@
 
 ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* parent)
     : QDockWidget("AI Context Inspector", parent), m_projectMgr(projMgr) {
+    setObjectName("ContextInspectorDock");
+
     auto* tabs = new QTabWidget(this);
 
-    // Вкладка 1: Контекст текущего документа
+    // Вкладка 1: Документ (сверху 2/3 высоты — Summary, снизу 1/3 высоты — Document Prompt)
     auto* docSplit = new QSplitter(Qt::Vertical, tabs);
+
     auto* docTop = new QWidget(docSplit);
     auto* docTopLay = new QVBoxLayout(docTop);
     docTopLay->setContentsMargins(6, 6, 6, 6);
@@ -26,29 +29,34 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_fileHeaderLabel->setStyleSheet("font-weight: bold;");
     m_fileMetaLabel = new QLabel("LLM: - | SHA-256: -", docTop);
     m_fileMetaLabel->setStyleSheet("color: #888899; font-size: 11px;");
-    m_filePromptEdit = new QPlainTextEdit(docTop);
-    m_filePromptEdit->setPlaceholderText("Enter specific AI instructions for this file...");
+
+    auto* docSumHdr = new QHBoxLayout();
+    m_rebuildFileBtn = new QPushButton("Regenerate", docTop);
+    docSumHdr->addWidget(new QLabel("Document AI Summary (Markdown):", docTop));
+    docSumHdr->addStretch();
+    docSumHdr->addWidget(m_rebuildFileBtn);
+
+    m_fileSummaryView = new QTextEdit(docTop);
+    m_fileSummaryView->setReadOnly(true);
+    m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
+    setupMarkdownViewerStyle(m_fileSummaryView);
+
     docTopLay->addWidget(m_fileHeaderLabel);
     docTopLay->addWidget(m_fileMetaLabel);
-    docTopLay->addWidget(new QLabel("Document Prompt / Instructions:", docTop));
-    docTopLay->addWidget(m_filePromptEdit);
+    docTopLay->addLayout(docSumHdr);
+    docTopLay->addWidget(m_fileSummaryView, 1);
 
     auto* docBot = new QWidget(docSplit);
     auto* docBotLay = new QVBoxLayout(docBot);
     docBotLay->setContentsMargins(6, 6, 6, 6);
-    auto* docSumHdr = new QHBoxLayout();
-    m_rebuildFileBtn = new QPushButton("Regenerate", docBot);
-    docSumHdr->addWidget(new QLabel("Document AI Summary (Markdown):", docBot));
-    docSumHdr->addStretch();
-    docSumHdr->addWidget(m_rebuildFileBtn);
+    m_filePromptEdit = new QPlainTextEdit(docBot);
+    m_filePromptEdit->setPlaceholderText("Enter specific AI instructions for this file...");
+    docBotLay->addWidget(new QLabel("Document Prompt / Instructions:", docBot));
+    docBotLay->addWidget(m_filePromptEdit, 1);
 
-    m_fileSummaryView = new QTextEdit(docBot);
-    m_fileSummaryView->setReadOnly(true);
-    m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on open/save...");
-    setupMarkdownViewerStyle(m_fileSummaryView);
-
-    docBotLay->addLayout(docSumHdr);
-    docBotLay->addWidget(m_fileSummaryView);
+    docSplit->setStretchFactor(0, 2);
+    docSplit->setStretchFactor(1, 1);
+    docSplit->setSizes({420, 210});
     tabs->addTab(docSplit, "Document");
 
     // Вкладка 2: Глобальный контекст проекта
@@ -210,10 +218,8 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bo
             renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
         }
     } else if (!relFilePath.isEmpty()) {
-        // Всегда накапливаем чанки в буфере конкретного файла, даже если сейчас открыта другая вкладка
         QString& liveBuf = m_liveFileMarkdownByPath[relFilePath];
         liveBuf += chunk;
-
         if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == relFilePath) {
             renderMarkdownPreservingScroll(m_fileSummaryView, liveBuf, true);
         }
