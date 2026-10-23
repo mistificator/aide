@@ -2,6 +2,10 @@
 #include "MainWindow.h"
 #include "ContextInspectorDock.h"
 #include "AiPreferencesDialog.h"
+#include "EditorPreferencesDialog.h"
+#include "AiDebugConsoleDock.h"
+#include "AiTaskQueueDock.h"
+#include "DiffViewerDialog.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
 #include "../editor/EditorTabWidget.h"
@@ -17,30 +21,39 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QCloseEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
+#include <QStackedWidget>
 #include <QLabel>
 #include <QDir>
+#include <QFileInfo>
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QHeaderView>
 #include <QApplication>
 
-// Кастомная модель дерева файлов с цветовой и текстовой индикацией статуса ИИ-саммари
 class ProjectTreeModel : public QFileSystemModel {
 public:
     ProjectTreeModel(ProjectManager* pm, QObject* parent = nullptr) : QFileSystemModel(parent), m_pm(pm) {}
     QVariant data(const QModelIndex& index, int role) const override {
         if (index.column() == 0 && !isDir(index)) {
-            auto fc = m_pm->fileContext(filePath(index));
+            QString path = filePath(index);
+            auto fc = m_pm->fileContext(path);
             if (role == Qt::ForegroundRole) {
                 if (fc.isSummaryPending) return QColor("#ffb86c");
                 if (!fc.aiSummary.isEmpty()) return QColor("#50fa7b");
             } else if (role == Qt::ToolTipRole) {
                 if (fc.isSummaryPending) return "AI Summary: Indexing in background...";
-                if (!fc.aiSummary.isEmpty()) return "AI Summary Ready:\n" + fc.aiSummary.left(300);
+                if (!fc.aiSummary.isEmpty())
+                    return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
+                if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
+                    return "AI Summary: Not required according to AI Behavior settings";
                 return "AI Summary: Not indexed yet (open file to index)";
             }
         }
@@ -52,51 +65,107 @@ private:
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
-      m_projectMgr(new ProjectManager(this)),
-      m_aiProvider(new AiProvider(this)),
-      m_taskQueue(new AiTaskQueue(m_aiProvider, this)),
-      m_summaryWorker(new SummaryWorker(m_projectMgr, m_taskQueue, this)),
-      m_downloader(new ThemeAndSyntaxDownloader(this)) {
+    m_projectMgr(new ProjectManager(this)),
+    m_aiProvider(new AiProvider(this)),
+    m_taskQueue(new AiTaskQueue(m_aiProvider, this)),
+    m_summaryWorker(new SummaryWorker(m_projectMgr, m_taskQueue, this)),
+    m_downloader(new ThemeAndSyntaxDownloader(this)) {
     setWindowTitle("AIDE - AI Development Environment");
     resize(1400, 860);
+    setAcceptDrops(true);
 
     setupUiAndDocks();
     setupMenus();
     setupConnections();
 
     m_downloader->ensureResourcesPresent();
-    m_tabWidget->newDocument();
+
+    QString lastProj = ConfigManager::instance().lastProjectPath();
+    if (!lastProj.isEmpty() && QDir(lastProj).exists()) {
+        openProjectAtPath(lastProj);
+    } else {
+        updateCentralViewState();
+    }
 }
 
 void MainWindow::setupUiAndDocks() {
-    m_tabWidget = new EditorTabWidget(this);
-    setCentralWidget(m_tabWidget);
+    m_centralStack = new QStackedWidget(this);
+
+    m_welcomeWidget = new QWidget(m_centralStack);
+    auto* welcomeLay = new QVBoxLayout(m_welcomeWidget);
+    auto* welcomeLabel = new QLabel(
+        "<div align='center'>"
+        "<h2 style='color:#bd93f9;'>No Project or File open</h2>"
+        "<p style='color:#888899; font-size:14px;'>"
+        "Open a project folder via <b>File &rarr; Open Folder / Project... (Ctrl+Shift+O)</b><br>"
+        "or open a file via <b>File &rarr; Open File... (Ctrl+O)</b><br>"
+        "or <b>drag and drop</b> a project folder or source files into this area."
+        "</p></div>",
+        m_welcomeWidget);
+    welcomeLabel->setAlignment(Qt::AlignCenter);
+    welcomeLay->addStretch();
+    welcomeLay->addWidget(welcomeLabel);
+    welcomeLay->addStretch();
+
+    m_tabWidget = new EditorTabWidget(m_centralStack);
+    m_centralStack->addWidget(m_welcomeWidget);
+    m_centralStack->addWidget(m_tabWidget);
+    setCentralWidget(m_centralStack);
 
     m_projectDock = new QDockWidget("Project Explorer", this);
-    m_projectTree = new QTreeView(m_projectDock);
+    m_projectDockStack = new QStackedWidget(m_projectDock);
+    auto* noProjExplorerLabel = new QLabel("No project loaded.\nUse File -> Open Folder / Project...", m_projectDockStack);
+    noProjExplorerLabel->setAlignment(Qt::AlignCenter);
+    noProjExplorerLabel->setStyleSheet("color: #777;");
+
+    m_projectTree = new QTreeView(m_projectDockStack);
     m_fsModel = new ProjectTreeModel(m_projectMgr, this);
     m_fsModel->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
     m_projectTree->setModel(m_fsModel);
     for (int col = 1; col < 4; ++col) m_projectTree->hideColumn(col);
     m_projectTree->header()->hide();
-    m_projectDock->setWidget(m_projectTree);
+
+    m_projectDockStack->addWidget(noProjExplorerLabel);
+    m_projectDockStack->addWidget(m_projectTree);
+    m_projectDock->setWidget(m_projectDockStack);
     addDockWidget(Qt::LeftDockWidgetArea, m_projectDock);
 
     m_inspectorDock = new ContextInspectorDock(m_projectMgr, this);
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
 
-    m_queueStatusLabel = new QLabel("AI: Idle", this);
-    m_langStatusLabel = new QLabel("Lang: cpp", this);
+    m_taskQueueDock = new AiTaskQueueDock(m_taskQueue, this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_taskQueueDock);
+
+    m_debugConsoleDock = new AiDebugConsoleDock(this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_debugConsoleDock);
+    tabifyDockWidget(m_taskQueueDock, m_debugConsoleDock);
+    m_debugConsoleDock->hide();
+
+    m_queueStatusBtn = new QPushButton("AI: Idle", this);
+    m_queueStatusBtn->setFlat(true);
+    m_queueStatusBtn->setToolTip("Click to open AI Task Queue");
+    connect(m_queueStatusBtn, &QPushButton::clicked, this, [this]() {
+        m_taskQueueDock->show();
+        m_taskQueueDock->raise();
+    });
+
+    m_langStatusLabel = new QLabel("Lang: -", this);
     statusBar()->addPermanentWidget(m_langStatusLabel);
-    statusBar()->addPermanentWidget(m_queueStatusLabel);
+    statusBar()->addPermanentWidget(m_queueStatusBtn);
 }
 
 void MainWindow::setupMenus() {
     // 1. FILE
     QMenu* fileMenu = menuBar()->addMenu("&File");
-    fileMenu->addAction("New File", QKeySequence::New, m_tabWidget, &EditorTabWidget::newDocument);
+    fileMenu->addAction("New File", QKeySequence::New, this, [this]() {
+        m_tabWidget->newDocument();
+        updateCentralViewState();
+    });
     fileMenu->addAction("Open File...", QKeySequence::Open, this, &MainWindow::onOpenFile);
     fileMenu->addAction("Open Folder / Project...", QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onOpenFolder);
+    m_recentProjectsMenu = fileMenu->addMenu("Recent Projects");
+    connect(m_recentProjectsMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentProjectsMenu);
+    fileMenu->addAction("Close All Projects", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::onCloseAllProjects);
     fileMenu->addSeparator();
     fileMenu->addAction("Save", QKeySequence::Save, m_tabWidget, &EditorTabWidget::saveCurrentDocument);
     fileMenu->addAction("Save As...", QKeySequence::SaveAs, m_tabWidget, &EditorTabWidget::saveCurrentDocumentAs);
@@ -105,8 +174,15 @@ void MainWindow::setupMenus() {
         if (m_projectMgr->saveProjectFile()) statusBar()->showMessage("Project .aide file saved.", 3000);
     });
     fileMenu->addSeparator();
+    fileMenu->addAction("Compare Unsaved Changes (Diff)...", QKeySequence("Ctrl+D"), this, [this]() {
+        onCompareUnsavedDiff(m_tabWidget->currentEditor());
+    });
+    fileMenu->addSeparator();
     fileMenu->addAction("Close Document", QKeySequence::Close, this, [this]() {
-        if (m_tabWidget->currentIndex() != -1) m_tabWidget->closeDocument(m_tabWidget->currentIndex());
+        if (m_tabWidget->currentIndex() != -1) {
+            m_tabWidget->closeDocument(m_tabWidget->currentIndex());
+            updateCentralViewState();
+        }
     });
     fileMenu->addAction("Exit", QKeySequence::Quit, this, &QWidget::close);
 
@@ -121,24 +197,20 @@ void MainWindow::setupMenus() {
     editMenu->addAction("Select All", QKeySequence::SelectAll, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->selectAll(); });
     editMenu->addSeparator();
     editMenu->addAction("Find / Replace...", QKeySequence::Find, this, &MainWindow::onFindReplaceDialog);
+    editMenu->addSeparator();
+    editMenu->addAction("Preferences...", this, &MainWindow::onEditorPreferences);
 
     // 3. VIEW
     QMenu* viewMenu = menuBar()->addMenu("&View");
     viewMenu->addAction(m_projectDock->toggleViewAction());
     viewMenu->addAction(m_inspectorDock->toggleViewAction());
+    viewMenu->addAction(m_taskQueueDock->toggleViewAction());
+    viewMenu->addAction(m_debugConsoleDock->toggleViewAction());
     viewMenu->addSeparator();
     m_themeMenu = viewMenu->addMenu("Color Scheme");
     connect(m_themeMenu, &QMenu::aboutToShow, this, &MainWindow::populateThemeMenu);
-
-    QMenu* langMenu = viewMenu->addMenu("Syntax Highlighting");
-    for (const QString& lang : {"cpp", "c", "python", "bash", "sql", "javascript"}) {
-        langMenu->addAction(lang.toUpper(), this, [this, lang]() {
-            if (auto* e = m_tabWidget->currentEditor()) {
-                e->setSyntaxLanguage(lang);
-                m_langStatusLabel->setText("Lang: " + lang);
-            }
-        });
-    }
+    m_langMenu = viewMenu->addMenu("Syntax Highlighting");
+    connect(m_langMenu, &QMenu::aboutToShow, this, &MainWindow::populateSyntaxMenu);
     viewMenu->addSeparator();
     viewMenu->addAction("Zoom In", QKeySequence::ZoomIn, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomIn(1); });
     viewMenu->addAction("Zoom Out", QKeySequence::ZoomOut, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomOut(1); });
@@ -164,9 +236,18 @@ void MainWindow::setupMenus() {
             m_summaryWorker->forceRebuildFileSummary(e->filePath(), e->toPlainText().toUtf8());
     });
     aiMenu->addAction("Rebuild Project Summary", m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
+    aiMenu->addAction("Cancel All Background Tasks", m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
     aiMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
         statusBar()->showMessage("Downloading syntax & theme files...", 3000);
         m_downloader->forceDownloadAll();
+    });
+    aiMenu->addAction("Show AI Task Queue", this, [this]() {
+        m_taskQueueDock->show();
+        m_taskQueueDock->raise();
+    });
+    aiMenu->addAction("Show AI API Debug Console", this, [this]() {
+        m_debugConsoleDock->show();
+        m_debugConsoleDock->raise();
     });
     aiMenu->addSeparator();
     aiMenu->addAction("Preferences...", this, &MainWindow::onAiPreferences);
@@ -178,24 +259,37 @@ void MainWindow::setupMenus() {
     // 6. HELP
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About AIDE", this, [this]() {
-        QMessageBox::about(this, "About AIDE",
-            "<b>AIDE (AI Development Environment)</b><br>"
-            "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
-            "Two-Tier Priority Queue, and Automatic Hierarchical Project Context (.aide).");
+        QMessageBox::about(
+            this,
+            "About AIDE",
+            QString("<b>AIDE (AI Development Environment)</b><br>"
+                    "<b>Version:</b> %1<br><br>"
+                    "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
+                    "Dynamic KDE Syntax Highlighting, Side-by-Side Diff, and Two-Tier Priority Queue.")
+                .arg(QApplication::applicationVersion()));
     });
     helpMenu->addAction("About Qt", qApp, &QApplication::aboutQt);
 }
 
 void MainWindow::setupConnections() {
     connect(m_projectTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
-        if (!m_fsModel->isDir(idx)) m_tabWidget->openFile(m_fsModel->filePath(idx));
+        if (!m_fsModel->isDir(idx)) {
+            m_tabWidget->openFile(m_fsModel->filePath(idx));
+            updateCentralViewState();
+        }
     });
 
-    connect(m_tabWidget, &EditorTabWidget::activeEditorChanged, this, &MainWindow::onActiveEditorChanged);
+    connect(m_tabWidget, &EditorTabWidget::activeEditorChanged, this, [this](CodeEditor* ed) {
+        onActiveEditorChanged(ed);
+        updateCentralViewState();
+    });
     connect(m_tabWidget, &EditorTabWidget::documentOpened, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
     connect(m_tabWidget, &EditorTabWidget::documentSaved, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
     connect(m_tabWidget, &EditorTabWidget::aiActionTriggered, this, &MainWindow::onEditorAiAction);
     connect(m_tabWidget, &EditorTabWidget::cancelAiTriggered, m_taskQueue, &AiTaskQueue::cancelTaskForEditor);
+    connect(m_tabWidget, &EditorTabWidget::diffRequested, this, &MainWindow::onCompareUnsavedDiff);
+
+    connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 
     connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, [this](const QString& path) {
         if (auto* ed = m_tabWidget->findEditorByPath(path))
@@ -208,8 +302,10 @@ void MainWindow::setupConnections() {
     });
 
     connect(m_taskQueue, &AiTaskQueue::queueStatusChanged, this, [this](int high, int low, bool busy) {
-        if (!busy && high == 0 && low == 0) m_queueStatusLabel->setText("AI: Idle");
-        else m_queueStatusLabel->setText(QString("AI: Busy (User Queue: %1 | Background: %2)").arg(high).arg(low));
+        if (!busy && high == 0 && low == 0)
+            m_queueStatusBtn->setText("AI: Idle");
+        else
+            m_queueStatusBtn->setText(QString("AI: Busy (User: %1 | Background: %2)").arg(high).arg(low));
     });
 
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &MainWindow::onTaskCompleted);
@@ -219,21 +315,122 @@ void MainWindow::setupConnections() {
         statusBar()->showMessage("Syntax definitions and color schemes are up to date.", 4000);
         if (auto* e = m_tabWidget->currentEditor()) e->setSyntaxLanguage(e->syntaxLanguage());
     });
+
+    connect(m_summaryWorker, &SummaryWorker::summaryStreamingChunk,
+            m_inspectorDock, &ContextInspectorDock::appendLiveSummaryChunk);
+    connect(m_summaryWorker, &SummaryWorker::summaryStreamingReset,
+            m_inspectorDock, &ContextInspectorDock::resetLiveSummary);
+}
+
+void MainWindow::updateCentralViewState() {
+    bool hasTabs = (m_tabWidget->count() > 0);
+    bool hasProj = m_projectMgr->hasOpenProject();
+    m_projectDockStack->setCurrentIndex(hasProj ? 1 : 0);
+    m_centralStack->setCurrentWidget(hasTabs ? static_cast<QWidget*>(m_tabWidget) : m_welcomeWidget);
+}
+
+void MainWindow::openProjectAtPath(const QString& dirPath) {
+    if (dirPath.isEmpty() || !QDir(dirPath).exists()) return;
+    if (m_projectMgr->openProjectFolder(dirPath)) {
+        m_fsModel->setRootPath(dirPath);
+        m_projectTree->setRootIndex(m_fsModel->index(dirPath));
+        m_inspectorDock->refreshDisplay();
+        ConfigManager::instance().addRecentProject(dirPath);
+        updateCentralViewState();
+        statusBar()->showMessage("Opened project: " + dirPath, 4000);
+    }
 }
 
 void MainWindow::onOpenFile() {
-    QString path = QFileDialog::getOpenFileName(this, "Open File", m_projectMgr->projectRootPath());
-    if (!path.isEmpty()) m_tabWidget->openFile(path);
+    QString preferred;
+    if (auto* ed = m_tabWidget->currentEditor(); ed && !ed->filePath().isEmpty()) {
+        preferred = QFileInfo(ed->filePath()).absolutePath();
+    } else if (m_projectMgr->hasOpenProject()) {
+        preferred = m_projectMgr->projectRootPath();
+    }
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(preferred);
+    QString path = QFileDialog::getOpenFileName(this, "Open File", startDir);
+    if (!path.isEmpty()) {
+        ConfigManager::instance().setLastDialogDir(path);
+        m_tabWidget->openFile(path);
+        updateCentralViewState();
+    }
 }
 
 void MainWindow::onOpenFolder() {
-    QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder", QDir::homePath());
-    if (dir.isEmpty()) return;
-    if (m_projectMgr->openProjectFolder(dir)) {
-        m_fsModel->setRootPath(dir);
-        m_projectTree->setRootIndex(m_fsModel->index(dir));
-        m_inspectorDock->refreshDisplay();
-        statusBar()->showMessage("Opened project: " + dir, 4000);
+    QString preferred = m_projectMgr->hasOpenProject() ? m_projectMgr->projectRootPath() : QString();
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(preferred);
+    QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder", startDir);
+    if (!dir.isEmpty()) {
+        ConfigManager::instance().setLastDialogDir(dir);
+        openProjectAtPath(dir);
+    }
+}
+
+void MainWindow::onCloseAllProjects() {
+    m_taskQueue->cancelAllBackgroundTasks();
+    if (!m_tabWidget->closeAllDocuments()) return;
+    m_projectMgr->closeProject();
+    ConfigManager::instance().setLastProjectPath({});
+    m_inspectorDock->setActiveFile({});
+    updateCentralViewState();
+    statusBar()->showMessage("All projects closed.", 3000);
+}
+
+void MainWindow::onCompareUnsavedDiff(CodeEditor* targetEditor) {
+    CodeEditor* ed = targetEditor ? targetEditor : m_tabWidget->currentEditor();
+    if (!ed) {
+        QMessageBox::information(this, "Diff Viewer", "No active document to compare.");
+        return;
+    }
+    DiffViewerDialog dlg(ed->displayName(), ed->savedDiskContent(), ed->toPlainText(), ed->syntaxLanguage(), this);
+    dlg.exec();
+}
+
+void MainWindow::onEditorPreferences() {
+    EditorPreferencesDialog dlg(m_downloader, this);
+    if (dlg.exec() == QDialog::Accepted) {
+        for (int i = 0; i < m_tabWidget->count(); ++i) {
+            if (auto* ed = m_tabWidget->editorAt(i)) {
+                if (!ed->filePath().isEmpty())
+                    ed->setSyntaxLanguage(ConfigManager::instance().languageIdForFile(ed->filePath()));
+            }
+        }
+    }
+}
+
+void MainWindow::populateRecentProjectsMenu() {
+    m_recentProjectsMenu->clear();
+    const QStringList recents = ConfigManager::instance().recentProjects();
+    if (recents.isEmpty()) {
+        QAction* emptyAct = m_recentProjectsMenu->addAction("(No recent projects)");
+        emptyAct->setEnabled(false);
+        return;
+    }
+    for (const QString& path : recents) {
+        m_recentProjectsMenu->addAction(path, this, [this, path]() { openProjectAtPath(path); });
+    }
+    m_recentProjectsMenu->addSeparator();
+    m_recentProjectsMenu->addAction("Clear Recent Projects", this, []() {
+        ConfigManager::instance().clearRecentProjects();
+    });
+}
+
+void MainWindow::populateSyntaxMenu() {
+    m_langMenu->clear();
+    const auto rules = ConfigManager::instance().fileTypeRules();
+    for (const auto& r : rules) {
+        QAction* act = m_langMenu->addAction(QString("%1 (%2)").arg(r.displayName, r.langId));
+        if (auto* e = m_tabWidget->currentEditor()) {
+            act->setCheckable(true);
+            act->setChecked(e->syntaxLanguage() == r.langId);
+        }
+        connect(act, &QAction::triggered, this, [this, lang = r.langId]() {
+            if (auto* e = m_tabWidget->currentEditor()) {
+                e->setSyntaxLanguage(lang);
+                m_langStatusLabel->setText("Lang: " + lang);
+            }
+        });
     }
 }
 
@@ -249,14 +446,14 @@ void MainWindow::onActiveEditorChanged(CodeEditor* editor) {
 
 QString MainWindow::actionKeyForEnum(AiEditAction action) {
     switch (action) {
-        case AiEditAction::ExplainCode:         return "ExplainCode";
-        case AiEditAction::RefactorCode:        return "RefactorCode";
-        case AiEditAction::FindBugs:            return "FindBugs";
-        case AiEditAction::OptimizePerformance: return "OptimizePerformance";
-        case AiEditAction::AddDocumentation:    return "AddDocumentation";
-        case AiEditAction::GenerateUnitTests:   return "GenerateUnitTests";
-        case AiEditAction::CompleteCode:        return "CompleteCode";
-        case AiEditAction::CustomPrompt:        return "CustomPrompt";
+    case AiEditAction::ExplainCode:         return "ExplainCode";
+    case AiEditAction::RefactorCode:        return "RefactorCode";
+    case AiEditAction::FindBugs:            return "FindBugs";
+    case AiEditAction::OptimizePerformance: return "OptimizePerformance";
+    case AiEditAction::AddDocumentation:    return "AddDocumentation";
+    case AiEditAction::GenerateUnitTests:   return "GenerateUnitTests";
+    case AiEditAction::CompleteCode:        return "CompleteCode";
+    case AiEditAction::CustomPrompt:        return "CustomPrompt";
     }
     return "RefactorCode";
 }
@@ -265,17 +462,21 @@ void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const
     if (!editor) return;
     QString sysCtx = m_projectMgr->buildEffectiveSystemContext(editor->filePath());
     QString instruction = (action == AiEditAction::CustomPrompt)
-        ? (customInstruction + "\nIf modifying code, output ONLY raw code without markdown fences:")
-        : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
+                              ? (customInstruction + "\nIf modifying code, output ONLY raw code without markdown fences:")
+                              : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
 
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
     task.targetType = (action == AiEditAction::ExplainCode) ? TaskTargetType::ExplainToDialog : TaskTargetType::ModifyEditorCode;
     task.targetEditor = editor;
     task.filePath = editor->filePath();
+    task.llmModel = cfg.llmIdentifier();
+    task.maxOutputTokens = cfg.maxOutputCodeTokens;
     task.systemPrompt = sysCtx;
     task.userPrompt = instruction + "\n\n" + selectedText;
-    task.stream = (task.targetType == TaskTargetType::ModifyEditorCode);
+    task.stream = true;
 
     m_taskQueue->enqueueTask(task);
 }
@@ -285,10 +486,12 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle("AI Code Explanation");
-    dlg->resize(680, 500);
+    dlg->resize(720, 540);
     auto* lay = new QVBoxLayout(dlg);
-    auto* view = new QPlainTextEdit(resultText, dlg);
+    auto* view = new QTextEdit(dlg);
     view->setReadOnly(true);
+    view->document()->setIndentWidth(16);
+    view->setMarkdown(resultText);
     lay->addWidget(view);
     dlg->show();
 }
@@ -301,8 +504,14 @@ void MainWindow::onTaskFailed(const AiTask& task, const QString& errorText) {
 
 void MainWindow::onAiPreferences() {
     AiPreferencesDialog dlg(m_aiProvider, this);
-    if (dlg.exec() == QDialog::Accepted)
-        ConfigManager::instance().setAiConfig(dlg.resultConfig());
+    if (dlg.exec() == QDialog::Accepted) {
+        auto& cfgMgr = ConfigManager::instance();
+        cfgMgr.setAiProfiles(dlg.resultProfiles(), dlg.resultActiveProfileName());
+        cfgMgr.setAiConfig(dlg.resultConfig());
+        cfgMgr.setAiBehavior(dlg.resultBehavior());
+        m_inspectorDock->refreshDisplay();
+        m_projectTree->viewport()->update();
+    }
 }
 
 void MainWindow::onFindReplaceDialog() {
@@ -362,7 +571,10 @@ void MainWindow::populateWindowMenu() {
     m_windowMenu->addAction("Previous Document", QKeySequence("Ctrl+Shift+Tab"), this, [this]() {
         if (m_tabWidget->count() > 1) m_tabWidget->setCurrentIndex((m_tabWidget->currentIndex() - 1 + m_tabWidget->count()) % m_tabWidget->count());
     });
-    m_windowMenu->addAction("Close All Documents", m_tabWidget, &EditorTabWidget::closeAllDocuments);
+    m_windowMenu->addAction("Close All Documents", this, [this]() {
+        m_tabWidget->closeAllDocuments();
+        updateCentralViewState();
+    });
     m_windowMenu->addSeparator();
 
     for (int i = 0; i < m_tabWidget->count(); ++i) {
@@ -372,6 +584,27 @@ void MainWindow::populateWindowMenu() {
         act->setCheckable(true);
         act->setChecked(i == m_tabWidget->currentIndex());
         connect(act, &QAction::triggered, this, [this, i]() { m_tabWidget->setCurrentIndex(i); });
+    }
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event->mimeData()->hasUrls()) event->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    const QList<QUrl> urls = event->mimeData()->urls();
+    for (const QUrl& url : urls) {
+        QString localPath = url.toLocalFile();
+        if (localPath.isEmpty()) continue;
+        QFileInfo fi(localPath);
+        if (fi.isDir()) {
+            openProjectAtPath(localPath);
+        } else if (fi.suffix().compare("aide", Qt::CaseInsensitive) == 0) {
+            openProjectAtPath(fi.absolutePath());
+        } else if (fi.isFile()) {
+            m_tabWidget->openFile(localPath);
+            updateCentralViewState();
+        }
     }
 }
 

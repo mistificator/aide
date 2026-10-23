@@ -1,5 +1,6 @@
 // src/editor/EditorTabWidget.cpp
 #include "EditorTabWidget.h"
+#include "../core/ConfigManager.h"
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QFileInfo>
@@ -34,6 +35,7 @@ CodeEditor* EditorTabWidget::newDocument() {
 CodeEditor* EditorTabWidget::openFile(const QString& filePath) {
     if (auto* existing = findEditorByPath(filePath)) {
         setCurrentWidget(existing);
+        ConfigManager::instance().setLastDialogDir(filePath);
         return existing;
     }
     if (count() == 1) {
@@ -41,6 +43,7 @@ CodeEditor* EditorTabWidget::openFile(const QString& filePath) {
         if (first && first->filePath().isEmpty() && !first->document()->isModified() && first->toPlainText().isEmpty()) {
             if (first->loadFile(filePath)) {
                 updateTabTitle(first);
+                ConfigManager::instance().setLastDialogDir(filePath);
                 emit documentOpened(first->filePath(), first->toPlainText().toUtf8());
                 emit activeEditorChanged(first);
                 return first;
@@ -55,6 +58,7 @@ CodeEditor* EditorTabWidget::openFile(const QString& filePath) {
     registerEditor(ed);
     setCurrentIndex(addTab(ed, ed->displayName()));
     updateTabTitle(ed);
+    ConfigManager::instance().setLastDialogDir(filePath);
     emit documentOpened(ed->filePath(), ed->toPlainText().toUtf8());
     return ed;
 }
@@ -68,6 +72,7 @@ void EditorTabWidget::registerEditor(CodeEditor* ed) {
     });
     connect(ed, &CodeEditor::aiActionRequested, this, &EditorTabWidget::aiActionTriggered);
     connect(ed, &CodeEditor::cancelAiRequested, this, &EditorTabWidget::cancelAiTriggered);
+    connect(ed, &CodeEditor::diffRequested, this, &EditorTabWidget::diffRequested);
 }
 
 void EditorTabWidget::updateTabTitle(CodeEditor* ed) {
@@ -87,10 +92,21 @@ bool EditorTabWidget::saveCurrentDocument() {
 bool EditorTabWidget::saveCurrentDocumentAs() {
     auto* ed = currentEditor();
     if (!ed) return false;
-    QString path = QFileDialog::getSaveFileName(this, "Save File As", ed->filePath().isEmpty() ? QDir::homePath() : ed->filePath());
+
+    // Если файл уже сохранён — предлагаем его текущий путь; иначе — папку открытого проекта или последнюю папку
+    QString initialPath = ed->filePath().isEmpty()
+                              ? ConfigManager::instance().resolveInitialDialogDir()
+                              : ed->filePath();
+
+    QString path = QFileDialog::getSaveFileName(this, "Save File As", initialPath);
     if (path.isEmpty()) return false;
+
+    ConfigManager::instance().setLastDialogDir(path);
     bool ok = ed->saveFileAs(path);
     updateTabTitle(ed);
+    if (ok) {
+        emit activeEditorChanged(ed);
+    }
     return ok;
 }
 
@@ -110,8 +126,8 @@ bool EditorTabWidget::maybeSave(CodeEditor* ed) {
     if (!ed || !ed->document()->isModified()) return true;
     setCurrentWidget(ed);
     auto btn = QMessageBox::warning(this, "Unsaved Changes",
-        QString("Document '%1' has unsaved changes.\nDo you want to save them?").arg(ed->displayName()),
-        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+                                    QString("Document '%1' has unsaved changes.\nDo you want to save them?").arg(ed->displayName()),
+                                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
     if (btn == QMessageBox::Save) return saveCurrentDocument();
     return btn != QMessageBox::Cancel;
 }
@@ -121,8 +137,8 @@ bool EditorTabWidget::closeDocument(int index) {
     if (!ed) return false;
     if (ed->isAiBusy()) {
         auto res = QMessageBox::question(this, "AI Operation in Progress",
-            "An AI operation is currently running on this document. Cancel it and close?",
-            QMessageBox::Yes | QMessageBox::No);
+                                         "An AI operation is currently running on this document. Cancel it and close?",
+                                         QMessageBox::Yes | QMessageBox::No);
         if (res == QMessageBox::No) return false;
         emit cancelAiTriggered(ed);
     }

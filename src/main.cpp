@@ -1,41 +1,17 @@
-/*
-// src/main.cpp
-#include <QApplication>
-#include <QMainWindow>
-#include "core/ConfigManager.h"
-#include "syntax/ThemeAndSyntaxDownloader.h"
-
-int main(int argc, char *argv[]) {
-    QApplication app(argc, argv);
-    QApplication::setApplicationName("AIDE");
-    QApplication::setOrganizationName("AIDE");
-
-    auto& cfg = ConfigManager::instance();
-    cfg.initializeStorage();
-    cfg.loadConfig();
-
-    ThemeAndSyntaxDownloader downloader;
-    downloader.ensureResourcesPresent();
-
-    // Временное окно до подключения полного MainWindow на Этапе 4
-    QMainWindow win;
-    win.setWindowTitle("AIDE - AI Development Environment");
-    win.resize(1280, 800);
-    win.show();
-
-    return app.exec();
-}
-*/
-
 // src/main.cpp
 #include <QApplication>
 #include "core/ConfigManager.h"
 #include "ui/MainWindow.h"
 
+#ifndef AIDE_VERSION_STRING
+#define AIDE_VERSION_STRING "0.0.0.0"
+#endif
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("AIDE");
     QApplication::setOrganizationName("AIDE");
+    QApplication::setApplicationVersion(QStringLiteral(AIDE_VERSION_STRING));
 
     auto& cfg = ConfigManager::instance();
     cfg.initializeStorage();

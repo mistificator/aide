@@ -7,9 +7,16 @@
 #include <QDateTime>
 
 struct FileContextData {
-    QString relativePath, sha256, userPrompt, aiSummary;
+    QString relativePath;
+    QString sha256;
+    QString llmModel;
+    QString userPrompt;
+    QString aiSummary;
     QDateTime updatedAt;
+
     bool isSummaryPending = false;
+    QString pendingSha256;
+    QString pendingLlmModel;
 };
 
 class ProjectManager : public QObject {
@@ -20,6 +27,8 @@ public:
     bool openProjectFolder(const QString& folderPath);
     bool loadProjectFile(const QString& aideFilePath);
     bool saveProjectFile();
+    void closeProject();
+    bool hasOpenProject() const { return !m_rootPath.isEmpty(); }
 
     QString projectRootPath() const { return m_rootPath; }
     QString projectFilePath() const { return m_aideFilePath; }
@@ -28,14 +37,15 @@ public:
     void setProjectSystemPrompt(const QString& prompt);
 
     QString projectSummary() const { return m_projectSummary; }
-    void setProjectSummary(const QString& summary);
+    QString projectSummaryLlmModel() const { return m_projectSummaryLlmModel; }
+    void setProjectSummary(const QString& summary, const QString& llmModel = {});
 
     FileContextData fileContext(const QString& absoluteOrRelPath) const;
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
-    void updateFileSummary(const QString& filePath, const QString& sha256, const QString& summary);
-    void setFileSummaryPending(const QString& filePath, bool pending);
+    void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
+    void setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256 = {}, const QString& pendingLlmModel = {});
 
-    bool isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent) const;
+    bool isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent, const QString& currentLlmModel) const;
     bool isProjectSummaryDirty() const { return m_projectSummaryDirty; }
 
     QString toRelativePath(const QString& path) const;
@@ -46,11 +56,12 @@ public:
 
 signals:
     void projectLoaded(const QString& rootPath);
+    void projectClosed();
     void fileContextChanged(const QString& relativePath);
     void projectContextChanged();
 
 private:
-    QString m_rootPath, m_aideFilePath, m_projectSystemPrompt, m_projectSummary;
+    QString m_rootPath, m_aideFilePath, m_projectSystemPrompt, m_projectSummary, m_projectSummaryLlmModel;
     QStringList m_ignoredDirs = {".git", "build", "__pycache__", "node_modules", ".aide"};
     bool m_projectSummaryDirty = false;
     QMap<QString, FileContextData> m_files;

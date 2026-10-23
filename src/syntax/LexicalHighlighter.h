@@ -5,17 +5,26 @@
 #include <QVector>
 #include "ColorScheme.h"
 
+struct KdeSyntaxMetadata {
+    QString name;
+    QString section;
+    QStringList extensions;
+    bool valid = false;
+};
+
 class LexicalHighlighter : public QSyntaxHighlighter {
     Q_OBJECT
 public:
     explicit LexicalHighlighter(QTextDocument* parent = nullptr);
 
     void setLanguageByFilePath(const QString& filePath);
-    void setLanguage(const QString& langId); // "cpp", "c", "python", "bash", "sql", "javascript"
+    void setLanguage(const QString& langId);
     QString language() const { return m_langId; }
 
     void setColorScheme(const ColorScheme& scheme);
     ColorScheme colorScheme() const { return m_scheme; }
+
+    static KdeSyntaxMetadata inspectSyntaxXml(const QString& xmlFilePath);
 
 protected:
     void highlightBlock(const QString& text) override;
@@ -27,8 +36,13 @@ private:
     };
 
     void rebuildRules();
-    bool loadRulesFromSyntaxFile(const QString& langId, QStringList& keywords, QStringList& types, QStringList& builtins);
-    void populateFallbackLists(const QString& langId, QStringList& keywords, QStringList& types, QStringList& builtins);
+    bool loadRulesFromSyntaxFile(const QString& syntaxFilePath,
+                                 QStringList& keywords,
+                                 QStringList& types,
+                                 QStringList& builtins,
+                                 QString& singleLineComment,
+                                 QString& multiLineStart,
+                                 QString& multiLineEnd);
 
     QString m_langId = "cpp";
     ColorScheme m_scheme;
