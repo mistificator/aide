@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ---------------- Linux Setup ----------------
       - name: Install Qt6 & Dependencies on Linux

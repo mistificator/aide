@@ -174,9 +174,11 @@ void EditorPreferencesDialog::onDownloadSelectedKdeSyntax() {
 }
 
 void EditorPreferencesDialog::onImportLocalSyntaxFile() {
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir();
     QString path = QFileDialog::getOpenFileName(this, "Import Syntax Highlighting XML File",
-                                                QString(), "Syntax Files (*.xml *.json);;All Files (*)");
+                                                startDir, "Syntax Files (*.xml *.json);;All Files (*)");
     if (path.isEmpty()) return;
+    ConfigManager::instance().setLastDialogDir(path);
 
     QFileInfo fi(path);
     QString destPath = ConfigManager::instance().syntaxDirPath() + "/" + fi.fileName();

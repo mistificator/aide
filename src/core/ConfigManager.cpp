@@ -11,6 +11,9 @@
 ConfigManager::ConfigManager(QObject* parent) : QObject(parent) {
     initDefaultPrompts();
     initDefaultFileTypes();
+    m_aiProfiles = defaultAiProfiles();
+    m_aiConfig = m_aiProfiles.first();
+    m_aiBehavior = defaultAiBehavior();
 }
 
 ConfigManager& ConfigManager::instance() {
@@ -20,6 +23,50 @@ ConfigManager& ConfigManager::instance() {
 
 QString ConfigManager::configDirPath() const {
     return QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/.aide";
+}
+
+QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
+    AiConnectionConfig ollamaLocal;
+    ollamaLocal.profileName = "Ollama (Offline)";
+    ollamaLocal.backend = AiBackendType::Ollama;
+    ollamaLocal.endpointUrl = "http://127.0.0.1:11434";
+    ollamaLocal.modelName = "qwen2.5-coder:7b";
+    ollamaLocal.maxOutputCodeTokens = 2048;
+    ollamaLocal.maxOutputSummaryTokens = 256;
+
+    AiConnectionConfig koboldLocal;
+    koboldLocal.profileName = "KoboldCpp (Offline)";
+    koboldLocal.backend = AiBackendType::KoboldCpp;
+    koboldLocal.endpointUrl = "http://127.0.0.1:5001";
+    koboldLocal.modelName = "";
+    koboldLocal.maxOutputCodeTokens = 2048;
+    koboldLocal.maxOutputSummaryTokens = 256;
+
+    AiConnectionConfig ollamaOnline;
+    ollamaOnline.profileName = "Ollama.com (Online)";
+    ollamaOnline.backend = AiBackendType::Ollama;
+    ollamaOnline.endpointUrl = "https://ollama.com";
+    ollamaOnline.modelName = "qwen2.5-coder:7b";
+    ollamaOnline.maxOutputCodeTokens = 2048;
+    ollamaOnline.maxOutputSummaryTokens = 256;
+
+    return {ollamaLocal, koboldLocal, ollamaOnline};
+}
+
+AiBehaviorConfig ConfigManager::defaultAiBehavior() {
+    AiBehaviorConfig b;
+    b.includeDocumentSummaryInPrompt = true;
+    b.includeProjectSummaryInPrompt = true;
+    b.summaryUseSyntaxExtensions = true;
+    b.summaryAllowedFilenames = {
+        "CMakeLists.txt", "Makefile", "GNUmakefile", "Dockerfile", "meson.build", "SConstruct"
+    };
+    b.summaryAllowedExtensions = {
+        "cpp", "cxx", "cc", "hpp", "hxx", "hh", "h", "c",
+        "py", "pyw", "pyi", "sh", "bash", "zsh",
+        "sql", "ddl", "dml", "js", "mjs", "cjs", "jsx", "ts", "tsx", "cmake"
+    };
+    return b;
 }
 
 bool ConfigManager::initializeStorage() {
@@ -61,12 +108,48 @@ void ConfigManager::initDefaultFileTypes() {
     };
 }
 
+QJsonObject ConfigManager::serializeAiConfig(const AiConnectionConfig& cfg) {
+    return QJsonObject{
+        {"profileName", cfg.profileName},
+        {"backend", static_cast<int>(cfg.backend)},
+        {"endpointUrl", cfg.endpointUrl},
+        {"apiKey", cfg.apiKey},
+        {"modelName", cfg.modelName},
+        {"temperature", cfg.temperature},
+        {"topP", cfg.topP},
+        {"maxOutputCodeTokens", cfg.maxOutputCodeTokens},
+        {"maxOutputSummaryTokens", cfg.maxOutputSummaryTokens},
+        {"contextWindow", cfg.contextWindow},
+        {"timeoutSec", cfg.timeoutSec},
+        {"projectSummaryIntervalMin", cfg.projectSummaryIntervalMin}
+    };
+}
+
+AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, const QString& fallbackName) {
+    AiConnectionConfig cfg;
+    cfg.profileName = ai["profileName"].toString(fallbackName);
+    cfg.backend = static_cast<AiBackendType>(ai["backend"].toInt(0));
+    cfg.endpointUrl = ai["endpointUrl"].toString("http://127.0.0.1:11434");
+    cfg.apiKey = ai["apiKey"].toString();
+    cfg.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
+    cfg.temperature = ai["temperature"].toDouble(0.2);
+    cfg.topP = ai["topP"].toDouble(0.9);
+    int legacyMaxTokens = ai["maxOutputTokens"].toInt(2048);
+    cfg.maxOutputCodeTokens = ai["maxOutputCodeTokens"].toInt(legacyMaxTokens);
+    cfg.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(256);
+    cfg.contextWindow = ai["contextWindow"].toInt(8192);
+    cfg.timeoutSec = ai["timeoutSec"].toInt(120);
+    cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+    return cfg;
+}
+
 void ConfigManager::loadConfig() {
     QFile cfgFile(configDirPath() + "/config.json");
     if (cfgFile.open(QIODevice::ReadOnly)) {
         auto obj = QJsonDocument::fromJson(cfgFile.readAll()).object();
         m_activeTheme = obj["activeTheme"].toString("dracula");
         m_lastProjectPath = obj["lastProjectPath"].toString();
+        m_lastDialogDir = obj["lastDialogDir"].toString();
         m_lastCustomPrompt = obj["lastCustomPrompt"].toString();
         m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
 
@@ -77,21 +160,64 @@ void ConfigManager::loadConfig() {
                 m_recentProjects.append(p);
         }
 
-        auto ai = obj["ai"].toObject();
-        m_aiConfig.backend = static_cast<AiBackendType>(ai["backend"].toInt(0));
-        m_aiConfig.endpointUrl = ai["endpointUrl"].toString("http://127.0.0.1:11434");
-        m_aiConfig.apiKey = ai["apiKey"].toString();
-        m_aiConfig.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
-        m_aiConfig.temperature = ai["temperature"].toDouble(0.2);
-        m_aiConfig.topP = ai["topP"].toDouble(0.9);
+        // Загрузка профилей AI
+        m_aiProfiles.clear();
+        if (obj.contains("aiProfiles") && obj["aiProfiles"].isArray()) {
+            for (const auto& item : obj["aiProfiles"].toArray()) {
+                if (item.isObject()) {
+                    m_aiProfiles.append(deserializeAiConfig(item.toObject()));
+                }
+            }
+        }
+        if (m_aiProfiles.isEmpty()) {
+            m_aiProfiles = defaultAiProfiles();
+            if (obj.contains("ai") && obj["ai"].isObject()) {
+                AiConnectionConfig legacy = deserializeAiConfig(obj["ai"].toObject(), "Ollama (Offline)");
+                m_aiProfiles[0] = legacy;
+            }
+        }
 
-        int legacyMaxTokens = ai["maxOutputTokens"].toInt(2048);
-        m_aiConfig.maxOutputCodeTokens = ai["maxOutputCodeTokens"].toInt(legacyMaxTokens);
-        m_aiConfig.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(1024);
+        QString activeProfName = obj["activeAiProfile"].toString();
+        bool foundActive = false;
+        for (const auto& p : m_aiProfiles) {
+            if (p.profileName == activeProfName) {
+                m_aiConfig = p;
+                foundActive = true;
+                break;
+            }
+        }
+        if (!foundActive) {
+            if (obj.contains("ai") && obj["ai"].isObject()) {
+                m_aiConfig = deserializeAiConfig(obj["ai"].toObject(), m_aiProfiles.first().profileName);
+            } else {
+                m_aiConfig = m_aiProfiles.first();
+            }
+        }
 
-        m_aiConfig.contextWindow = ai["contextWindow"].toInt(8192);
-        m_aiConfig.timeoutSec = ai["timeoutSec"].toInt(120);
-        m_aiConfig.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+        // Загрузка настроек поведения AI
+        m_aiBehavior = defaultAiBehavior();
+        if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
+            auto beh = obj["aiBehavior"].toObject();
+            m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
+            m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
+            m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
+
+            if (beh.contains("summaryAllowedFilenames")) {
+                m_aiBehavior.summaryAllowedFilenames.clear();
+                for (const auto& f : beh["summaryAllowedFilenames"].toArray()) {
+                    QString fn = f.toString().trimmed();
+                    if (!fn.isEmpty()) m_aiBehavior.summaryAllowedFilenames.append(fn);
+                }
+            }
+            if (beh.contains("summaryAllowedExtensions")) {
+                m_aiBehavior.summaryAllowedExtensions.clear();
+                for (const auto& e : beh["summaryAllowedExtensions"].toArray()) {
+                    QString ext = e.toString().trimmed().toLower();
+                    if (ext.startsWith('.')) ext.remove(0, 1);
+                    if (!ext.isEmpty()) m_aiBehavior.summaryAllowedExtensions.append(ext);
+                }
+            }
+        }
 
         if (obj.contains("fileTypes")) {
             QVector<FileTypeRule> loadedRules;
@@ -118,18 +244,23 @@ void ConfigManager::loadConfig() {
 }
 
 void ConfigManager::saveConfig() {
-    QJsonObject ai {
-        {"backend", static_cast<int>(m_aiConfig.backend)},
-        {"endpointUrl", m_aiConfig.endpointUrl},
-        {"apiKey", m_aiConfig.apiKey},
-        {"modelName", m_aiConfig.modelName},
-        {"temperature", m_aiConfig.temperature},
-        {"topP", m_aiConfig.topP},
-        {"maxOutputCodeTokens", m_aiConfig.maxOutputCodeTokens},
-        {"maxOutputSummaryTokens", m_aiConfig.maxOutputSummaryTokens},
-        {"contextWindow", m_aiConfig.contextWindow},
-        {"timeoutSec", m_aiConfig.timeoutSec},
-        {"projectSummaryIntervalMin", m_aiConfig.projectSummaryIntervalMin}
+    QJsonArray profilesArr;
+    for (const auto& p : m_aiProfiles) {
+        profilesArr.append(serializeAiConfig(p));
+    }
+
+    QJsonArray allowedFilesArr;
+    for (const QString& fn : m_aiBehavior.summaryAllowedFilenames) allowedFilesArr.append(fn);
+
+    QJsonArray allowedExtsArr;
+    for (const QString& ext : m_aiBehavior.summaryAllowedExtensions) allowedExtsArr.append(ext);
+
+    QJsonObject behaviorObj{
+        {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
+        {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
+        {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
+        {"summaryAllowedFilenames", allowedFilesArr},
+        {"summaryAllowedExtensions", allowedExtsArr}
     };
 
     QJsonArray recentArr;
@@ -147,14 +278,18 @@ void ConfigManager::saveConfig() {
         });
     }
 
-    QJsonObject root {
+    QJsonObject root{
         {"activeTheme", m_activeTheme},
         {"lastProjectPath", m_lastProjectPath},
+        {"lastDialogDir", m_lastDialogDir},
         {"recentProjects", recentArr},
         {"lastCustomPrompt", m_lastCustomPrompt},
         {"syntaxBaseUrl", m_syntaxBaseUrl},
         {"fileTypes", typesArr},
-        {"ai", ai}
+        {"activeAiProfile", m_aiConfig.profileName},
+        {"aiProfiles", profilesArr},
+        {"ai", serializeAiConfig(m_aiConfig)},
+        {"aiBehavior", behaviorObj}
     };
 
     QSaveFile f(configDirPath() + "/config.json");
@@ -166,8 +301,103 @@ void ConfigManager::saveConfig() {
 
 void ConfigManager::setAiConfig(const AiConnectionConfig& cfg) {
     m_aiConfig = cfg;
+    bool updated = false;
+    for (auto& p : m_aiProfiles) {
+        if (p.profileName == cfg.profileName) {
+            p = cfg;
+            updated = true;
+            break;
+        }
+    }
+    if (!updated) {
+        m_aiProfiles.append(cfg);
+    }
     saveConfig();
     emit aiConfigChanged(m_aiConfig);
+}
+
+void ConfigManager::setAiProfiles(const QVector<AiConnectionConfig>& profiles, const QString& activeProfileName) {
+    m_aiProfiles = profiles.isEmpty() ? defaultAiProfiles() : profiles;
+    bool found = false;
+    for (const auto& p : m_aiProfiles) {
+        if (p.profileName == activeProfileName) {
+            m_aiConfig = p;
+            found = true;
+            break;
+        }
+    }
+    if (!found) m_aiConfig = m_aiProfiles.first();
+    saveConfig();
+    emit aiConfigChanged(m_aiConfig);
+}
+
+void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
+    m_aiBehavior = behavior;
+    saveConfig();
+    emit aiBehaviorChanged(m_aiBehavior);
+}
+
+QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
+    QStringList result;
+    QString synDir = syntaxDirPath();
+    for (const auto& r : m_fileTypes) {
+        bool hasXml = !r.syntaxFile.isEmpty() && QFile::exists(synDir + "/" + r.syntaxFile);
+        if (hasXml || !r.extensions.isEmpty()) {
+            for (const QString& ext : r.extensions) {
+                QString clean = ext.trimmed().toLower();
+                if (!clean.isEmpty() && !result.contains(clean)) {
+                    result.append(clean);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown) const {
+    if (filePath.isEmpty()) return false;
+
+    QFileInfo fi(filePath);
+    QString fileName = fi.fileName();
+    QString ext = fi.suffix().toLower();
+
+    // 1. Проверка по списку точных имён файлов или масок (например, CMakeLists.txt, Makefile)
+    for (const QString& pattern : m_aiBehavior.summaryAllowedFilenames) {
+        QString cleanPat = pattern.trimmed();
+        if (cleanPat.isEmpty()) continue;
+        if (fileName.compare(cleanPat, Qt::CaseInsensitive) == 0 ||
+            QDir::match(cleanPat, fileName)) {
+            return true;
+        }
+    }
+
+    // 2. Проверка по явному списку разрешённых расширений
+    if (!ext.isEmpty()) {
+        for (const QString& allowedExt : m_aiBehavior.summaryAllowedExtensions) {
+            if (ext.compare(allowedExt.trimmed(), Qt::CaseInsensitive) == 0) {
+                return true;
+            }
+        }
+
+        // 3. Проверка по расширениям из загруженных файлов подсветки синтаксиса
+        if (m_aiBehavior.summaryUseSyntaxExtensions) {
+            const QStringList synExts = extensionsFromLoadedSyntaxes();
+            if (synExts.contains(ext, Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+    }
+
+    if (outSkipReasonMarkdown) {
+        *outSkipReasonMarkdown = QString(
+                                     "### Summary Not Required\n\n"
+                                     "AI summary generation is disabled for **`%1`** according to current **AI Preferences -> Behavior & Summary Rules**.\n\n"
+                                     "- **File Name:** `%1` *(not in allowed file names list)*\n"
+                                     "- **Extension:** `%2` *(not in allowed summary extensions)*\n\n"
+                                     "*You can add `%1` or `%2` in `AI -> Preferences -> Behavior & Summary Rules`, or click **Regenerate** to force summary creation manually.*")
+                                     .arg(fileName, ext.isEmpty() ? "(none)" : "." + ext);
+    }
+    return false;
 }
 
 void ConfigManager::setActiveTheme(const QString& themeName) {
@@ -178,9 +408,40 @@ void ConfigManager::setActiveTheme(const QString& themeName) {
 }
 
 void ConfigManager::setLastProjectPath(const QString& path) {
-    m_lastProjectPath = QDir::cleanPath(path);
-    if (path.isEmpty()) m_lastProjectPath.clear();
+    m_lastProjectPath = path.isEmpty() ? QString() : QDir::cleanPath(path);
+    if (!m_lastProjectPath.isEmpty()) {
+        m_lastDialogDir = m_lastProjectPath;
+    }
     saveConfig();
+}
+
+void ConfigManager::setLastDialogDir(const QString& dirOrFilePath) {
+    if (dirOrFilePath.isEmpty()) return;
+    QFileInfo fi(dirOrFilePath);
+    QString dirPath = fi.isDir() ? fi.absoluteFilePath() : fi.absolutePath();
+    if (!dirPath.isEmpty() && QDir(dirPath).exists()) {
+        m_lastDialogDir = QDir::cleanPath(dirPath);
+        saveConfig();
+    }
+}
+
+QString ConfigManager::resolveInitialDialogDir(const QString& preferredFileOrDir) const {
+    if (!preferredFileOrDir.isEmpty()) {
+        QFileInfo fi(preferredFileOrDir);
+        if (fi.exists() || QDir(fi.absolutePath()).exists()) {
+            return QDir::cleanPath(preferredFileOrDir);
+        }
+    }
+    if (!m_lastProjectPath.isEmpty() && QDir(m_lastProjectPath).exists()) {
+        return m_lastProjectPath;
+    }
+    if (!m_lastDialogDir.isEmpty() && QDir(m_lastDialogDir).exists()) {
+        return m_lastDialogDir;
+    }
+    if (!m_recentProjects.isEmpty() && QDir(m_recentProjects.first()).exists()) {
+        return m_recentProjects.first();
+    }
+    return QDir::homePath();
 }
 
 void ConfigManager::addRecentProject(const QString& path) {
@@ -190,6 +451,7 @@ void ConfigManager::addRecentProject(const QString& path) {
     m_recentProjects.prepend(clean);
     while (m_recentProjects.size() > 10) m_recentProjects.removeLast();
     m_lastProjectPath = clean;
+    m_lastDialogDir = clean;
     saveConfig();
     emit recentProjectsChanged();
 }

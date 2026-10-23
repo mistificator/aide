@@ -219,16 +219,20 @@ bool ProjectManager::isFileSummaryOutdated(const QString& filePath, const QByteA
 }
 
 QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) const {
+    const auto beh = ConfigManager::instance().aiBehavior();
     QStringList sections;
+
     if (!m_projectSystemPrompt.trimmed().isEmpty())
         sections << "=== PROJECT SYSTEM INSTRUCTIONS ===\n" + m_projectSystemPrompt.trimmed();
-    if (!m_projectSummary.trimmed().isEmpty())
+
+    if (beh.includeProjectSummaryInPrompt && !m_projectSummary.trimmed().isEmpty())
         sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + m_projectSummary.trimmed();
+
     if (!filePath.isEmpty()) {
         auto fc = fileContext(filePath);
         if (!fc.userPrompt.trimmed().isEmpty())
             sections << QString("=== DOCUMENT INSTRUCTIONS (%1) ===\n%2").arg(fc.relativePath, fc.userPrompt.trimmed());
-        if (!fc.aiSummary.trimmed().isEmpty())
+        if (beh.includeDocumentSummaryInPrompt && !fc.aiSummary.trimmed().isEmpty())
             sections << QString("=== DOCUMENT SUMMARY (%1) ===\n%2").arg(fc.relativePath, fc.aiSummary.trimmed());
     }
     return sections.join("\n\n");

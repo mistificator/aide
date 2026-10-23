@@ -25,12 +25,16 @@ void SummaryWorker::updateTimerInterval() {
 void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content) {
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
 
+    // Проверяем, нужно ли составлять саммари для этого файла/расширения согласно настройкам
+    if (!ConfigManager::instance().shouldGenerateSummaryForFile(filePath)) {
+        return;
+    }
+
     const auto& cfg = ConfigManager::instance().aiConfig();
     QString currentLlm = cfg.llmIdentifier();
     QString relPath = m_projectMgr->toRelativePath(filePath);
     QString sha256 = ProjectManager::computeSha256(content);
 
-    // Если задача для этого файла с такой же контрольной суммой и LLM уже в очереди или выполняется — ничего не делаем
     if (m_taskQueue->hasPendingOrActiveTask(TaskTargetType::FileSummary, relPath, sha256, currentLlm)) {
         return;
     }

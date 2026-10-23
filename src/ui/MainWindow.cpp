@@ -43,7 +43,8 @@ public:
     ProjectTreeModel(ProjectManager* pm, QObject* parent = nullptr) : QFileSystemModel(parent), m_pm(pm) {}
     QVariant data(const QModelIndex& index, int role) const override {
         if (index.column() == 0 && !isDir(index)) {
-            auto fc = m_pm->fileContext(filePath(index));
+            QString path = filePath(index);
+            auto fc = m_pm->fileContext(path);
             if (role == Qt::ForegroundRole) {
                 if (fc.isSummaryPending) return QColor("#ffb86c");
                 if (!fc.aiSummary.isEmpty()) return QColor("#50fa7b");
@@ -51,6 +52,8 @@ public:
                 if (fc.isSummaryPending) return "AI Summary: Indexing in background...";
                 if (!fc.aiSummary.isEmpty())
                     return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
+                if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
+                    return "AI Summary: Not required according to AI Behavior settings";
                 return "AI Summary: Not indexed yet (open file to index)";
             }
         }
@@ -256,10 +259,14 @@ void MainWindow::setupMenus() {
     // 6. HELP
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("About AIDE", this, [this]() {
-        QMessageBox::about(this, "About AIDE",
-                           "<b>AIDE (AI Development Environment)</b><br>"
-                           "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
-                           "Dynamic KDE Syntax Highlighting, Side-by-Side Diff, and Two-Tier Priority Queue.");
+        QMessageBox::about(
+            this,
+            "About AIDE",
+            QString("<b>AIDE (AI Development Environment)</b><br>"
+                    "<b>Version:</b> %1<br><br>"
+                    "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
+                    "Dynamic KDE Syntax Highlighting, Side-by-Side Diff, and Two-Tier Priority Queue.")
+                .arg(QApplication::applicationVersion()));
     });
     helpMenu->addAction("About Qt", qApp, &QApplication::aboutQt);
 }
@@ -335,18 +342,29 @@ void MainWindow::openProjectAtPath(const QString& dirPath) {
 }
 
 void MainWindow::onOpenFile() {
-    QString startDir = m_projectMgr->hasOpenProject() ? m_projectMgr->projectRootPath() : QDir::homePath();
+    QString preferred;
+    if (auto* ed = m_tabWidget->currentEditor(); ed && !ed->filePath().isEmpty()) {
+        preferred = QFileInfo(ed->filePath()).absolutePath();
+    } else if (m_projectMgr->hasOpenProject()) {
+        preferred = m_projectMgr->projectRootPath();
+    }
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(preferred);
     QString path = QFileDialog::getOpenFileName(this, "Open File", startDir);
     if (!path.isEmpty()) {
+        ConfigManager::instance().setLastDialogDir(path);
         m_tabWidget->openFile(path);
         updateCentralViewState();
     }
 }
 
 void MainWindow::onOpenFolder() {
-    QString startDir = m_projectMgr->hasOpenProject() ? m_projectMgr->projectRootPath() : QDir::homePath();
+    QString preferred = m_projectMgr->hasOpenProject() ? m_projectMgr->projectRootPath() : QString();
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(preferred);
     QString dir = QFileDialog::getExistingDirectory(this, "Open Project Folder", startDir);
-    if (!dir.isEmpty()) openProjectAtPath(dir);
+    if (!dir.isEmpty()) {
+        ConfigManager::instance().setLastDialogDir(dir);
+        openProjectAtPath(dir);
+    }
 }
 
 void MainWindow::onCloseAllProjects() {
@@ -486,8 +504,14 @@ void MainWindow::onTaskFailed(const AiTask& task, const QString& errorText) {
 
 void MainWindow::onAiPreferences() {
     AiPreferencesDialog dlg(m_aiProvider, this);
-    if (dlg.exec() == QDialog::Accepted)
-        ConfigManager::instance().setAiConfig(dlg.resultConfig());
+    if (dlg.exec() == QDialog::Accepted) {
+        auto& cfgMgr = ConfigManager::instance();
+        cfgMgr.setAiProfiles(dlg.resultProfiles(), dlg.resultActiveProfileName());
+        cfgMgr.setAiConfig(dlg.resultConfig());
+        cfgMgr.setAiBehavior(dlg.resultBehavior());
+        m_inspectorDock->refreshDisplay();
+        m_projectTree->viewport()->update();
+    }
 }
 
 void MainWindow::onFindReplaceDialog() {

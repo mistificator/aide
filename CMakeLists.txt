@@ -1,7 +1,47 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
+
+# ==============================================================================
+# Извлечение версии из Git-тегов и общего числа коммитов по всем веткам
+# ==============================================================================
+find_package(Git QUIET)
+
+set(GIT_TAG_VER "0.0.0")
+set(GIT_COMMIT_COUNT "0")
+
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    # Получаем последний тег (например, v1.2.3 или 1.2.3)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE RAW_GIT_TAG
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(RAW_GIT_TAG MATCHES "^[vV]?([0-9]+\\.[0-9]+\\.[0-9]+)")
+        set(GIT_TAG_VER "${CMAKE_MATCH_1}")
+    elseif(RAW_GIT_TAG MATCHES "^[vV]?([0-9]+\\.[0-9]+)")
+        set(GIT_TAG_VER "${CMAKE_MATCH_1}.0")
+    endif()
+
+    # Абсолютный порядковый номер коммита по всем веткам
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-list --all --count
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE RAW_COMMIT_COUNT
+        ERROR_QUIET
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(RAW_COMMIT_COUNT MATCHES "^[0-9]+$")
+        set(GIT_COMMIT_COUNT "${RAW_COMMIT_COUNT}")
+    endif()
+endif()
+
+set(AIDE_FULL_VERSION "${GIT_TAG_VER}.${GIT_COMMIT_COUNT}")
+message(STATUS "AIDE Version resolved from Git: ${AIDE_FULL_VERSION}")
+
 project(AIDE
-    VERSION 1.1.0
+    VERSION ${AIDE_FULL_VERSION}
     DESCRIPTION "AI Development Environment - Multi-Document Qt6 Code Editor"
     HOMEPAGE_URL "https://github.com/mistificator/aide"
     LANGUAGES CXX
@@ -15,6 +55,7 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
+# Обход удаления AGL.framework в свежих macOS SDK (QTBUG-137687)
 if(APPLE AND TARGET WrapOpenGL::WrapOpenGL)
     get_target_property(_gl_libs WrapOpenGL::WrapOpenGL INTERFACE_LINK_LIBRARIES)
     if(_gl_libs)
@@ -24,6 +65,16 @@ if(APPLE AND TARGET WrapOpenGL::WrapOpenGL)
 endif()
 
 include(GNUInstallDirs)
+
+set(AIDE_PLATFORM_SOURCES)
+if(WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/version.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
+        @ONLY
+    )
+    list(APPEND AIDE_PLATFORM_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
+endif()
 
 add_executable(aide WIN32 MACOSX_BUNDLE
     src/main.cpp
@@ -53,35 +104,39 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/AiPreferencesDialog.cpp
     src/ui/EditorPreferencesDialog.h
     src/ui/EditorPreferencesDialog.cpp
+    src/ui/DiffViewerDialog.h
+    src/ui/DiffViewerDialog.cpp
     src/ui/AiDebugConsoleDock.h
     src/ui/AiDebugConsoleDock.cpp
     src/ui/AiTaskQueueDock.h
     src/ui/AiTaskQueueDock.cpp
-    src/ui/DiffViewerDialog.h
-    src/ui/DiffViewerDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
-    .github/workflows/ci.yml
+
+    ${AIDE_PLATFORM_SOURCES}
+
+    .github./workflows/ci.yml
+)
+
+target_compile_definitions(aide PRIVATE
+    AIDE_VERSION_STRING="${PROJECT_VERSION}"
 )
 
 target_include_directories(aide PRIVATE src)
 target_link_libraries(aide PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
 
-# Метаданные для macOS App Bundle
 set_target_properties(aide PROPERTIES
     MACOSX_BUNDLE_GUI_IDENTIFIER "org.aide.editor"
     MACOSX_BUNDLE_BUNDLE_NAME "AIDE"
     MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
-    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}"
 )
 
-# Правила установки бинарника
 install(TARGETS aide
     BUNDLE  DESTINATION . COMPONENT Runtime
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Runtime
 )
 
-# Развёртывание рантайма Qt (windeployqt / macdeployqt)
 if((WIN32 OR APPLE) AND COMMAND qt_generate_deploy_app_script)
     if(Qt6_VERSION VERSION_GREATER_EQUAL "6.5.0")
         qt_generate_deploy_app_script(
@@ -104,9 +159,12 @@ endif()
 # ==============================================================================
 set(CPACK_PACKAGE_NAME "aide")
 set(CPACK_PACKAGE_VENDOR "AIDE Project")
-set(CPACK_PACKAGE_CONTACT "maintainer@aide.org")
+set(CPACK_PACKAGE_CONTACT "")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "AIDE")
 set(CPACK_STRIP_FILES TRUE)
 
@@ -123,7 +181,6 @@ if(WIN32)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
     set(CPACK_NSIS_MODIFY_PATH ON)
     set(CPACK_PACKAGE_EXECUTABLES "aide" "AIDE")
-    set(CPACK_NSIS_MENU_LINKS "https://github.com/your-org/aide" "AIDE Homepage")
 elseif(APPLE)
     if(NOT DEFINED CPACK_GENERATOR)
         set(CPACK_GENERATOR "DragNDrop;TGZ")

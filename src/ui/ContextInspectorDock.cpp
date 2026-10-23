@@ -1,6 +1,7 @@
 // src/ui/ContextInspectorDock.cpp
 #include "ContextInspectorDock.h"
 #include "../core/ProjectManager.h"
+#include "../core/ConfigManager.h"
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -158,6 +159,10 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         m_liveProjectMarkdown.clear();
         refreshDisplay();
     });
+
+    connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
+        refreshDisplay();
+    });
 }
 
 void ContextInspectorDock::setupMarkdownViewerStyle(QTextEdit* viewer) {
@@ -235,11 +240,16 @@ void ContextInspectorDock::refreshDisplay() {
 
     if (hasFile) {
         auto fc = m_projectMgr->fileContext(m_activeFilePath);
-        m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, fc.isSummaryPending ? " [Indexing...]" : ""));
+        QString skipReasonMd;
+        bool summaryAllowed = ConfigManager::instance().shouldGenerateSummaryForFile(m_activeFilePath, &skipReasonMd);
+
+        QString statusSuffix = fc.isSummaryPending ? " [Indexing...]"
+                                                   : (!summaryAllowed && fc.aiSummary.isEmpty() ? " [Summary Skipped]" : "");
+        m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, statusSuffix));
 
         QString llmInfo = fc.isSummaryPending
                               ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
-                              : (fc.llmModel.isEmpty() ? "-" : fc.llmModel);
+                              : (fc.llmModel.isEmpty() ? (summaryAllowed ? "-" : "Skipped by settings") : fc.llmModel);
         QString shaInfo = fc.isSummaryPending
                               ? (fc.pendingSha256.isEmpty() ? "-" : fc.pendingSha256.left(12))
                               : (fc.sha256.isEmpty() ? "-" : fc.sha256.left(12));
@@ -250,7 +260,13 @@ void ContextInspectorDock::refreshDisplay() {
 
         if (!fc.isSummaryPending) {
             m_liveFileMarkdownByPath.remove(fc.relativePath);
-            renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+            if (!fc.aiSummary.trimmed().isEmpty()) {
+                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+            } else if (!summaryAllowed) {
+                renderMarkdownPreservingScroll(m_fileSummaryView, skipReasonMd);
+            } else {
+                m_fileSummaryView->clear();
+            }
         } else {
             const QString liveMd = m_liveFileMarkdownByPath.value(fc.relativePath);
             if (!liveMd.isEmpty()) {
