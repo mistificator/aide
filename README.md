@@ -3,6 +3,8 @@
 AIDE is a cross-platform, multi-document code editor built with Qt6 and modern C++20, engineered for deep integration with local and remote Large Language Models (LLMs). It features non-blocking token streaming with single-step undo recovery, automatic background hierarchical project context summarization, and a two-tier priority execution queue.
 
 ---
+<img width="2099" height="1332" alt="image" src="https://github.com/user-attachments/assets/25d5cac2-f885-4ef9-b7cc-a7f1cb7637c9" />
+---
 
 ## Key Features
 
