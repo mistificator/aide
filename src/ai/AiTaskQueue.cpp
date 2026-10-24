@@ -7,6 +7,7 @@
 
 AiTaskQueue::AiTaskQueue(AiProvider* provider, QObject* parent)
     : QObject(parent), m_provider(provider) {
+    connect(m_provider, &AiProvider::thinkingStateChanged, this, &AiTaskQueue::onProviderThinkingChanged);
     connect(m_provider, &AiProvider::streamChunkReceived, this, &AiTaskQueue::onProviderChunk);
     connect(m_provider, &AiProvider::requestFinished, this, &AiTaskQueue::onProviderFinished);
     connect(m_provider, &AiProvider::requestError, this, &AiTaskQueue::onProviderError);
@@ -32,7 +33,6 @@ bool AiTaskQueue::hasPendingOrActiveTask(TaskTargetType targetType,
         if (!llmModel.isEmpty() && t.llmModel != llmModel) return false;
         return true;
     };
-
     if (m_isProcessing && matches(m_currentTask)) return true;
     for (const auto& t : m_lowQueue) {
         if (matches(t)) return true;
@@ -42,6 +42,7 @@ bool AiTaskQueue::hasPendingOrActiveTask(TaskTargetType targetType,
 
 QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
     AiTask task = inputTask;
+    task.isThinking = false;
     if (task.taskId.isEmpty()) task.taskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     if (task.llmModel.isEmpty()) task.llmModel = ConfigManager::instance().aiConfig().llmIdentifier();
     if (task.maxOutputTokens <= 0) {
@@ -55,7 +56,6 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
             task.targetEditor->setAiBusy(true, (m_isProcessing || !m_highQueue.isEmpty()) ? "Queued..." : "Generating...");
         m_highQueue.enqueue(task);
     } else {
-        // Если точно такая же задача уже выполняется сейчас, не ставим дубликат в очередь
         if (m_isProcessing &&
             m_currentTask.priority == TaskPriority::Low_BackgroundSummary &&
             m_currentTask.targetType == task.targetType &&
@@ -64,7 +64,6 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
             m_currentTask.llmModel == task.llmModel) {
             return m_currentTask.taskId;
         }
-
         for (auto& existing : m_lowQueue) {
             if (existing.targetType == task.targetType && existing.filePath == task.filePath) {
                 existing.fileSha256 = task.fileSha256;
@@ -108,7 +107,6 @@ void AiTaskQueue::cancelTaskForEditor(CodeEditor* editor) {
 
 void AiTaskQueue::cancelTaskById(const QString& taskId) {
     if (taskId.isEmpty()) return;
-
     for (int i = 0; i < m_highQueue.size(); ++i) {
         if (m_highQueue[i].taskId == taskId) {
             AiTask cancelled = m_highQueue.takeAt(i);
@@ -118,7 +116,6 @@ void AiTaskQueue::cancelTaskById(const QString& taskId) {
             return;
         }
     }
-
     for (int i = 0; i < m_lowQueue.size(); ++i) {
         if (m_lowQueue[i].taskId == taskId) {
             AiTask cancelled = m_lowQueue.takeAt(i);
@@ -127,7 +124,6 @@ void AiTaskQueue::cancelTaskById(const QString& taskId) {
             return;
         }
     }
-
     if (m_isProcessing && m_currentTask.taskId == taskId) {
         AiTask cancelled = m_currentTask;
         m_provider->abortActiveRequest();
@@ -188,17 +184,14 @@ void AiTaskQueue::cancelAllTasks() {
 
 void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-
     AiTask timedOutTask = m_currentTask;
     m_isProcessing = false;
-
     if (timedOutTask.targetEditor) {
         if (timedOutTask.targetType == TaskTargetType::ModifyEditorCode)
             timedOutTask.targetEditor->cancelAndRollbackAiEdit();
         else
             timedOutTask.targetEditor->setAiBusy(false);
     }
-
     emit taskFailed(timedOutTask, "Request timed out (automatically cancelled and rolled back).");
     emitStatus();
     QTimer::singleShot(0, this, &AiTaskQueue::processNext);
@@ -206,7 +199,6 @@ void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
 
 void AiTaskQueue::processNext() {
     if (m_isProcessing) return;
-
     while (!m_highQueue.isEmpty() && m_highQueue.head().priority == TaskPriority::High_UserAction && !m_highQueue.head().targetEditor)
         m_highQueue.dequeue();
 
@@ -214,6 +206,7 @@ void AiTaskQueue::processNext() {
     else if (!m_lowQueue.isEmpty()) m_currentTask = m_lowQueue.dequeue();
     else { emitStatus(); return; }
 
+    m_currentTask.isThinking = false;
     m_isProcessing = true;
     emitStatus();
 
@@ -240,10 +233,21 @@ void AiTaskQueue::processNext() {
                             maxTokens);
 }
 
+void AiTaskQueue::onProviderThinkingChanged(const QString& taskId, bool isThinking) {
+    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
+    if (m_currentTask.isThinking == isThinking) return;
+    m_currentTask.isThinking = isThinking;
+    if (m_currentTask.targetEditor) {
+        m_currentTask.targetEditor->setAiBusy(true, isThinking ? "Thinking..." : "Generating...");
+    }
+    emitStatus();
+}
+
 void AiTaskQueue::onProviderChunk(const QString& taskId, const QString& chunk) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
     if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode && m_currentTask.targetEditor)
         m_currentTask.targetEditor->appendAiStreamChunk(chunk);
+
     emit taskStreamChunk(m_currentTask, chunk);
 }
 

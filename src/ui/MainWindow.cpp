@@ -601,12 +601,12 @@ QString MainWindow::actionKeyForEnum(AiEditAction action) {
 void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction) {
     if (!editor) return;
     QString sysCtx = m_projectMgr->buildEffectiveSystemContext(editor->filePath());
+    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
     QString instruction = (action == AiEditAction::CustomPrompt)
-                              ? (customInstruction + "\nIf modifying code, output ONLY raw code without markdown fences:")
+                              ? (customSuffix.isEmpty() ? customInstruction : (customInstruction + "\n" + customSuffix))
                               : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
 
     const auto& cfg = ConfigManager::instance().aiConfig();
-
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
     task.targetType = (action == AiEditAction::ExplainCode) ? TaskTargetType::ExplainToDialog : TaskTargetType::ModifyEditorCode;
@@ -649,6 +649,7 @@ void MainWindow::onAiPreferences() {
         cfgMgr.setAiProfiles(dlg.resultProfiles(), dlg.resultActiveProfileName());
         cfgMgr.setAiConfig(dlg.resultConfig());
         cfgMgr.setAiBehavior(dlg.resultBehavior());
+        cfgMgr.setPromptTemplates(dlg.resultPrompts());
         m_projectMgr->saveProjectFile();
         m_inspectorDock->refreshDisplay();
         m_projectTree->viewport()->update();

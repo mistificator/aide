@@ -16,6 +16,7 @@ struct AiTask {
     QPointer<CodeEditor> targetEditor;
     int maxOutputTokens = 0;
     bool stream = true;
+    bool isThinking = false;
 };
 
 class AiProvider;
@@ -53,6 +54,7 @@ signals:
 
 private slots:
     void processNext();
+    void onProviderThinkingChanged(const QString& taskId, bool isThinking);
     void onProviderChunk(const QString& taskId, const QString& chunk);
     void onProviderFinished(const QString& taskId, const QString& fullText);
     void onProviderError(const QString& taskId, const QString& error);

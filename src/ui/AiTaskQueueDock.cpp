@@ -51,7 +51,6 @@ AiTaskQueueDock::AiTaskQueueDock(AiTaskQueue* taskQueue, QWidget* parent)
             m_taskQueue->cancelTaskById(taskId);
         }
     });
-
     connect(m_cancelBgBtn, &QPushButton::clicked, m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
     connect(m_cancelAllBtn, &QPushButton::clicked, m_taskQueue, &AiTaskQueue::cancelAllTasks);
     connect(m_taskQueue, &AiTaskQueue::queueChanged, this, &AiTaskQueueDock::refreshQueueView);
@@ -75,8 +74,15 @@ void AiTaskQueueDock::appendTaskRow(const AiTask& task, const QString& statusTex
 
     auto* statusItem = new QTableWidgetItem(statusText);
     statusItem->setData(Qt::UserRole, task.taskId);
-    statusItem->setForeground(isRunning ? QColor("#50fa7b")
-                                        : (task.priority == TaskPriority::High_UserAction ? QColor("#8be9fd") : QColor("#ffb86c")));
+    if (isRunning) {
+        // Голубой (#8be9fd) при Thinking, зелёный (#50fa7b) при генерации результата
+        statusItem->setForeground(task.isThinking ? QColor("#8be9fd") : QColor("#50fa7b"));
+        QFont f = statusItem->font();
+        f.setBold(true);
+        statusItem->setFont(f);
+    } else {
+        statusItem->setForeground(task.priority == TaskPriority::High_UserAction ? QColor("#bd93f9") : QColor("#ffb86c"));
+    }
 
     auto* typeItem = new QTableWidgetItem(targetTypeToString(task));
     auto* fileItem = new QTableWidgetItem(task.filePath.isEmpty() ? "(Untitled)" : task.filePath);
@@ -104,7 +110,8 @@ void AiTaskQueueDock::refreshQueueView() {
     const auto lowList = m_taskQueue->lowQueueTasks();
 
     if (running) {
-        appendTaskRow(m_taskQueue->currentTask(), "Running...", true);
+        const AiTask cur = m_taskQueue->currentTask();
+        appendTaskRow(cur, cur.isThinking ? "Thinking" : "Running...", true);
     }
     for (const auto& t : highList) {
         appendTaskRow(t, "Queued (High)", false);

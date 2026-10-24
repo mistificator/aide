@@ -16,10 +16,9 @@
 ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* parent)
     : QDockWidget("AI Context Inspector", parent), m_projectMgr(projMgr) {
     setObjectName("ContextInspectorDock");
-
     auto* tabs = new QTabWidget(this);
 
-    // Вкладка 1: Документ (сверху 2/3 высоты — Summary, снизу 1/3 высоты — Document Prompt)
+    // Вкладка 1: Документ (верхние 2/3 — Document Summary, нижняя 1/3 — Document Prompt)
     auto* docSplit = new QSplitter(Qt::Vertical, tabs);
 
     auto* docTop = new QWidget(docSplit);
@@ -59,38 +58,42 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setSizes({420, 210});
     tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Глобальный контекст проекта
+    // Вкладка 2: Проект (верхние 2/3 — Project Summary, нижняя 1/3 — Project System Prompt)
     auto* projSplit = new QSplitter(Qt::Vertical, tabs);
+
     auto* projTop = new QWidget(projSplit);
     auto* projTopLay = new QVBoxLayout(projTop);
     projTopLay->setContentsMargins(6, 6, 6, 6);
-    m_projectPromptEdit = new QPlainTextEdit(projTop);
-    m_projectPromptEdit->setPlaceholderText("Global project instructions (e.g. Use C++20, Qt6 style, no exceptions)...");
-    projTopLay->addWidget(new QLabel("Project System Prompt (Global):", projTop));
-    projTopLay->addWidget(m_projectPromptEdit);
-
-    auto* projBot = new QWidget(projSplit);
-    auto* projBotLay = new QVBoxLayout(projBot);
-    projBotLay->setContentsMargins(6, 6, 6, 6);
     auto* projSumHdr = new QHBoxLayout();
-    m_editProjSummaryBtn = new QPushButton("Edit Raw MD", projBot);
+    m_editProjSummaryBtn = new QPushButton("Edit Raw MD", projTop);
     m_editProjSummaryBtn->setCheckable(true);
-    m_rebuildProjBtn = new QPushButton("Rebuild Project Summary", projBot);
-    projSumHdr->addWidget(new QLabel("Project Architecture Summary (Markdown):", projBot));
+    m_rebuildProjBtn = new QPushButton("Rebuild Project Summary", projTop);
+    projSumHdr->addWidget(new QLabel("Project Architecture Summary (Markdown):", projTop));
     projSumHdr->addStretch();
     projSumHdr->addWidget(m_editProjSummaryBtn);
     projSumHdr->addWidget(m_rebuildProjBtn);
 
-    m_projectSummaryView = new QTextEdit(projBot);
+    m_projectSummaryView = new QTextEdit(projTop);
     m_projectSummaryView->setReadOnly(true);
     m_projectSummaryView->setPlaceholderText("Synthesized project architecture summary...");
     setupMarkdownViewerStyle(m_projectSummaryView);
+    projTopLay->addLayout(projSumHdr);
+    projTopLay->addWidget(m_projectSummaryView, 1);
 
-    projBotLay->addLayout(projSumHdr);
-    projBotLay->addWidget(m_projectSummaryView);
+    auto* projBot = new QWidget(projSplit);
+    auto* projBotLay = new QVBoxLayout(projBot);
+    projBotLay->setContentsMargins(6, 6, 6, 6);
+    m_projectPromptEdit = new QPlainTextEdit(projBot);
+    m_projectPromptEdit->setPlaceholderText("Global project instructions (e.g. Use C++20, Qt6 style, no exceptions)...");
+    projBotLay->addWidget(new QLabel("Project System Prompt (Global):", projBot));
+    projBotLay->addWidget(m_projectPromptEdit, 1);
+
+    projSplit->setStretchFactor(0, 2);
+    projSplit->setStretchFactor(1, 1);
+    projSplit->setSizes({420, 210});
     tabs->addTab(projSplit, "Project");
 
-    // Вкладка 3: Итоговый контекст, отправляемый в LLM
+    // Вкладка 3: Итоговый контекст LLM
     auto* effPage = new QWidget(tabs);
     auto* effLay = new QVBoxLayout(effPage);
     effLay->setContentsMargins(6, 6, 6, 6);
@@ -98,7 +101,6 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_effectiveContextPreview = new QTextEdit(effPage);
     m_effectiveContextPreview->setReadOnly(true);
     setupMarkdownViewerStyle(m_effectiveContextPreview);
-
     effLay->addWidget(m_tokenEstimateLabel);
     effLay->addWidget(m_effectiveContextPreview);
     tabs->addTab(effPage, "Effective Context");
@@ -162,12 +164,10 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         }
         refreshDisplay();
     });
-
     connect(m_projectMgr, &ProjectManager::projectContextChanged, this, [this]() {
         m_liveProjectMarkdown.clear();
         refreshDisplay();
     });
-
     connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
         refreshDisplay();
     });
@@ -183,16 +183,22 @@ void ContextInspectorDock::setupMarkdownViewerStyle(QTextEdit* viewer) {
 }
 
 void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer, const QString& markdownText, bool scrollToBottom) {
-    int oldScroll = viewer->verticalScrollBar()->value();
+    QScrollBar* vbar = viewer->verticalScrollBar();
+    int oldScroll = vbar->value();
+    int oldMax = vbar->maximum();
+    // Прокручиваем вниз только если ползунок уже находился в самом низу (пользователь не отмотал текст вверх)
+    bool wasAtBottom = (oldMax == 0) || (oldScroll >= oldMax - 6);
+
     if (markdownText.trimmed().isEmpty()) {
         viewer->clear();
     } else {
         viewer->setMarkdown(markdownText);
     }
-    if (scrollToBottom) {
-        viewer->verticalScrollBar()->setValue(viewer->verticalScrollBar()->maximum());
+
+    if (scrollToBottom && wasAtBottom) {
+        vbar->setValue(vbar->maximum());
     } else {
-        viewer->verticalScrollBar()->setValue(oldScroll);
+        vbar->setValue(oldScroll);
     }
 }
 
@@ -229,6 +235,7 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bo
 
 void ContextInspectorDock::refreshDisplay() {
     m_updatingUi = true;
+
     if (m_projectPromptEdit->toPlainText() != m_projectMgr->projectSystemPrompt())
         m_projectPromptEdit->setPlainText(m_projectMgr->projectSystemPrompt());
 

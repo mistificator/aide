@@ -31,24 +31,27 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     ollamaLocal.backend = AiBackendType::Ollama;
     ollamaLocal.endpointUrl = "http://127.0.0.1:11434";
     ollamaLocal.modelName = "qwen2.5-coder:7b";
-    ollamaLocal.maxOutputCodeTokens = 2048;
-    ollamaLocal.maxOutputSummaryTokens = 256;
+    ollamaLocal.maxOutputCodeTokens = 65536;
+    ollamaLocal.maxOutputSummaryTokens = 1024;
+    ollamaLocal.contextWindow = 131072;
 
     AiConnectionConfig koboldLocal;
     koboldLocal.profileName = "KoboldCpp (Offline)";
     koboldLocal.backend = AiBackendType::KoboldCpp;
     koboldLocal.endpointUrl = "http://127.0.0.1:5001";
     koboldLocal.modelName = "";
-    koboldLocal.maxOutputCodeTokens = 2048;
-    koboldLocal.maxOutputSummaryTokens = 256;
+    koboldLocal.maxOutputCodeTokens = 65536;
+    koboldLocal.maxOutputSummaryTokens = 1024;
+    koboldLocal.contextWindow = 131072;
 
     AiConnectionConfig ollamaOnline;
     ollamaOnline.profileName = "Ollama.com (Online)";
     ollamaOnline.backend = AiBackendType::Ollama;
     ollamaOnline.endpointUrl = "https://ollama.com";
     ollamaOnline.modelName = "qwen2.5-coder:7b";
-    ollamaOnline.maxOutputCodeTokens = 2048;
-    ollamaOnline.maxOutputSummaryTokens = 256;
+    ollamaOnline.maxOutputCodeTokens = 65536;
+    ollamaOnline.maxOutputSummaryTokens = 1024;
+    ollamaOnline.contextWindow = 131072;
 
     return {ollamaLocal, koboldLocal, ollamaOnline};
 }
@@ -94,18 +97,12 @@ bool ConfigManager::initializeStorage() {
     QDir dir(configDirPath());
     bool ok = dir.mkpath(".") && dir.mkpath("syntax") && dir.mkpath("themes");
     if (!QFile::exists(dir.filePath("config.json"))) saveConfig();
-    if (!QFile::exists(dir.filePath("prompts.json"))) {
-        QSaveFile f(dir.filePath("prompts.json"));
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(QJsonDocument(m_promptTemplates).toJson());
-            f.commit();
-        }
-    }
+    if (!QFile::exists(dir.filePath("prompts.json"))) savePrompts();
     return ok;
 }
 
-void ConfigManager::initDefaultPrompts() {
-    m_promptTemplates = {
+QJsonObject ConfigManager::defaultPromptTemplates() {
+    return {
         {"ExplainCode", "Explain the logic, architecture, and potential pitfalls of the following code clearly and concisely:"},
         {"RefactorCode", "Refactor the following code to improve readability, structure, and idiomatic style. Output ONLY raw code without markdown fences:"},
         {"FindBugs", "Find potential bugs, memory leaks, edge cases, or vulnerabilities in the following code and fix them. Output ONLY raw code without markdown fences:"},
@@ -113,9 +110,38 @@ void ConfigManager::initDefaultPrompts() {
         {"AddDocumentation", "Add comprehensive documentation comments (Doxygen/Docstrings) to the following code. Output ONLY raw code without markdown fences:"},
         {"GenerateUnitTests", "Generate unit tests covering main scenarios and edge cases for the following code. Output ONLY raw code without markdown fences:"},
         {"CompleteCode", "Complete the implementation of the following code based on its context and signatures. Output ONLY raw code without markdown fences:"},
+        {"CustomPrompt", "If modifying code, output ONLY raw code without markdown fences:"},
         {"FileSummary", "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
         {"ProjectSummary", "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
     };
+}
+
+QString ConfigManager::defaultPromptTemplate(const QString& actionKey) {
+    return defaultPromptTemplates()[actionKey].toString();
+}
+
+void ConfigManager::initDefaultPrompts() {
+    m_promptTemplates = defaultPromptTemplates();
+}
+
+void ConfigManager::savePrompts() const {
+    QSaveFile f(configDirPath() + "/prompts.json");
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(m_promptTemplates).toJson(QJsonDocument::Indented));
+        f.commit();
+    }
+}
+
+void ConfigManager::setPromptTemplates(const QJsonObject& templates) {
+    m_promptTemplates = defaultPromptTemplates();
+    for (auto it = templates.begin(); it != templates.end(); ++it) {
+        QString val = it.value().toString().trimmed();
+        if (!val.isEmpty()) {
+            m_promptTemplates[it.key()] = val;
+        }
+    }
+    savePrompts();
+    emit promptsChanged();
 }
 
 void ConfigManager::initDefaultFileTypes() {
@@ -155,10 +181,10 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     cfg.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
     cfg.temperature = ai["temperature"].toDouble(0.2);
     cfg.topP = ai["topP"].toDouble(0.9);
-    int legacyMaxTokens = ai["maxOutputTokens"].toInt(2048);
+    int legacyMaxTokens = ai["maxOutputTokens"].toInt(65536);
     cfg.maxOutputCodeTokens = ai["maxOutputCodeTokens"].toInt(legacyMaxTokens);
-    cfg.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(256);
-    cfg.contextWindow = ai["contextWindow"].toInt(8192);
+    cfg.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(1024);
+    cfg.contextWindow = ai["contextWindow"].toInt(131072);
     cfg.timeoutSec = ai["timeoutSec"].toInt(120);
     cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
     return cfg;
@@ -263,11 +289,15 @@ void ConfigManager::loadConfig() {
         }
     }
 
+    m_promptTemplates = defaultPromptTemplates();
     QFile prFile(configDirPath() + "/prompts.json");
     if (prFile.open(QIODevice::ReadOnly)) {
         auto loaded = QJsonDocument::fromJson(prFile.readAll()).object();
-        for (auto it = loaded.begin(); it != loaded.end(); ++it)
-            m_promptTemplates[it.key()] = it.value();
+        for (auto it = loaded.begin(); it != loaded.end(); ++it) {
+            if (!it.value().toString().trimmed().isEmpty()) {
+                m_promptTemplates[it.key()] = it.value();
+            }
+        }
     }
 }
 
@@ -568,5 +598,6 @@ FileTypeRule ConfigManager::ruleForLanguage(const QString& langId) const {
 }
 
 QString ConfigManager::promptTemplate(const QString& actionKey) const {
-    return m_promptTemplates[actionKey].toString();
+    QString val = m_promptTemplates[actionKey].toString();
+    return val.isEmpty() ? defaultPromptTemplate(actionKey) : val;
 }
