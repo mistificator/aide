@@ -9,6 +9,12 @@
 
 enum class AiBackendType { Ollama, KoboldCpp, OpenAiCompatible };
 
+enum class AutoSummaryMode {
+    None = 0,            // Не автосоздавать саммари
+    FilesOnly = 1,       // Создавать только саммари файлов
+    FilesAndProject = 2  // Создавать саммари файлов и проектов
+};
+
 struct AiConnectionConfig {
     QString profileName = "Ollama (Offline)";
     AiBackendType backend = AiBackendType::Ollama;
@@ -33,6 +39,7 @@ struct AiConnectionConfig {
 };
 
 struct AiBehaviorConfig {
+    AutoSummaryMode autoSummaryMode = AutoSummaryMode::FilesAndProject;
     bool includeDocumentSummaryInPrompt = true;
     bool includeProjectSummaryInPrompt = true;
     bool summaryUseSyntaxExtensions = true;

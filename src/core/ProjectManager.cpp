@@ -29,6 +29,7 @@ bool ProjectManager::openProjectFolder(const QString& folderPath) {
     QDir dir(folderPath);
     if (!dir.exists()) return false;
     m_rootPath = dir.absolutePath();
+
     auto aideFiles = dir.entryList({"*.aide"}, QDir::Files);
     m_aideFilePath = dir.filePath(aideFiles.isEmpty()
                                       ? (dir.dirName().isEmpty() ? "project.aide" : dir.dirName() + ".aide")
@@ -50,6 +51,7 @@ bool ProjectManager::openProjectFolder(const QString& folderPath) {
 bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
     QFile f(aideFilePath);
     if (!f.open(QIODevice::ReadOnly)) return false;
+
     QFileInfo fi(aideFilePath);
     m_aideFilePath = fi.absoluteFilePath();
     m_rootPath = fi.absolutePath();
@@ -68,21 +70,27 @@ bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
         auto fo = it.value().toObject();
         QString summary = fo["ai_summary"].toString();
         QString savedLlm = fo["llm_model"].toString();
+        QString sha = fo["sha256"].toString();
+        bool created = fo.contains("summary_created")
+                           ? fo["summary_created"].toBool()
+                           : (!summary.trimmed().isEmpty() || !sha.isEmpty());
         if (savedLlm.isEmpty() && !summary.isEmpty()) {
             savedLlm = defaultLlm;
         }
         m_files[it.key()] = {
             it.key(),
-            fo["sha256"].toString(),
+            sha,
             savedLlm,
             fo["user_prompt"].toString(),
             summary,
             QDateTime::fromString(fo["updated_at"].toString(), Qt::ISODate),
+            created,
             false,
             {},
             {}
         };
     }
+
     emit projectLoaded(m_rootPath);
     emit projectContextChanged();
     return true;
@@ -97,9 +105,11 @@ bool ProjectManager::saveProjectFile() {
             {"llm_model", data.llmModel},
             {"user_prompt", data.userPrompt},
             {"ai_summary", data.aiSummary},
+            {"summary_created", data.summaryCreated},
             {"updated_at", data.updatedAt.toString(Qt::ISODate)}
         };
     }
+
     QJsonArray ignoredArr;
     for (const auto& d : ConfigManager::instance().aiBehavior().summaryIgnoredDirs) {
         ignoredArr.append(d);
@@ -115,6 +125,7 @@ bool ProjectManager::saveProjectFile() {
         {"updated_at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
         {"files", filesObj}
     };
+
     QSaveFile f(m_aideFilePath);
     if (!f.open(QIODevice::WriteOnly)) return false;
     f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -159,7 +170,8 @@ FileContextData ProjectManager::fileContext(const QString& absoluteOrRelPath) co
 bool ProjectManager::hasFileSummary(const QString& absoluteOrRelPath) const {
     auto rel = toRelativePath(absoluteOrRelPath);
     if (!m_files.contains(rel)) return false;
-    return !m_files[rel].aiSummary.trimmed().isEmpty();
+    const auto& entry = m_files[rel];
+    return entry.summaryCreated || !entry.aiSummary.trimmed().isEmpty();
 }
 
 void ProjectManager::updateFileUserPrompt(const QString& filePath, const QString& prompt) {
@@ -179,11 +191,31 @@ void ProjectManager::updateFileSummary(const QString& filePath, const QString& s
     entry.sha256 = sha256;
     entry.llmModel = llmModel;
     entry.aiSummary = summary;
+    entry.summaryCreated = true;
     entry.updatedAt = QDateTime::currentDateTimeUtc();
     entry.isSummaryPending = false;
     entry.pendingSha256.clear();
     entry.pendingLlmModel.clear();
+    m_projectSummaryDirty = true;
+    saveProjectFile();
+    emit fileContextChanged(rel);
+    emit projectContextChanged();
+}
 
+void ProjectManager::clearFileSummary(const QString& filePath, const QString& currentSha256) {
+    auto rel = toRelativePath(filePath);
+    auto& entry = m_files[rel];
+    entry.relativePath = rel;
+    if (!currentSha256.isEmpty()) {
+        entry.sha256 = currentSha256;
+    }
+    entry.llmModel = "cleared (empty)";
+    entry.aiSummary.clear();
+    entry.summaryCreated = true; // Считаем, что саммари создано, просто оно пустое
+    entry.updatedAt = QDateTime::currentDateTimeUtc();
+    entry.isSummaryPending = false;
+    entry.pendingSha256.clear();
+    entry.pendingLlmModel.clear();
     m_projectSummaryDirty = true;
     saveProjectFile();
     emit fileContextChanged(rel);
@@ -210,10 +242,8 @@ bool ProjectManager::isFileSummaryOutdated(const QString& filePath, const QByteA
     if (!m_files.contains(rel)) return true;
     const auto& entry = m_files[rel];
 
-    // Если саммари уже генерируется или уже существует — не пересоздаём автоматически
     if (entry.isSummaryPending) return false;
-    if (!entry.aiSummary.trimmed().isEmpty()) return false;
-
+    if (entry.summaryCreated || !entry.aiSummary.trimmed().isEmpty()) return false;
     return true;
 }
 

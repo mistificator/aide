@@ -71,6 +71,7 @@ private:
     QSpinBox* m_summaryIntervalSpin = nullptr;
 
     // Вкладка 2: Behavior & Summary Rules
+    QComboBox* m_autoSummaryModeCombo = nullptr;
     QCheckBox* m_useDocSummaryCheck = nullptr;
     QCheckBox* m_useProjSummaryCheck = nullptr;
     QCheckBox* m_useSyntaxExtensionsCheck = nullptr;

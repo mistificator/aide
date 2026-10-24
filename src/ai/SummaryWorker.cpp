@@ -25,7 +25,12 @@ void SummaryWorker::updateTimerInterval() {
 void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content) {
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
 
-    // Если у файла уже есть Summary — не пересоздаём его, пока пользователь явно не нажмёт Regenerate
+    // Если автосоздание саммари отключено в настройках поведения AI — выходим
+    if (ConfigManager::instance().aiBehavior().autoSummaryMode == AutoSummaryMode::None) {
+        return;
+    }
+
+    // Если саммари уже создано (в том числе очищено пользователем в пустое) — не перезаписываем без ручного Regenerate
     if (m_projectMgr->hasFileSummary(filePath)) {
         return;
     }
@@ -90,6 +95,9 @@ void SummaryWorker::forceRebuildProjectSummary() {
 }
 
 void SummaryWorker::onPeriodicTimerTimeout() {
+    if (ConfigManager::instance().aiBehavior().autoSummaryMode != AutoSummaryMode::FilesAndProject)
+        return;
+
     if (m_projectMgr->isProjectSummaryDirty() && m_taskQueue->isIdle())
         forceRebuildProjectSummary();
 }

@@ -30,9 +30,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_fileMetaLabel->setStyleSheet("color: #888899; font-size: 11px;");
 
     auto* docSumHdr = new QHBoxLayout();
+    m_clearFileBtn = new QPushButton("Clear", docTop);
+    m_clearFileBtn->setToolTip("Clear summary text while marking summary as created (empty)");
     m_rebuildFileBtn = new QPushButton("Regenerate", docTop);
     docSumHdr->addWidget(new QLabel("Document AI Summary (Markdown):", docTop));
     docSumHdr->addStretch();
+    docSumHdr->addWidget(m_clearFileBtn);
     docSumHdr->addWidget(m_rebuildFileBtn);
 
     m_fileSummaryView = new QTextEdit(docTop);
@@ -151,6 +154,15 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         }
     });
 
+    connect(m_clearFileBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_activeFilePath.isEmpty()) {
+            QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
+            m_liveFileMarkdownByPath.remove(rel);
+            m_fileSummaryView->clear();
+            emit clearFileSummaryClicked(m_activeFilePath);
+        }
+    });
+
     connect(m_rebuildProjBtn, &QPushButton::clicked, this, [this]() {
         if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
         m_liveProjectMarkdown.clear();
@@ -186,7 +198,6 @@ void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer, con
     QScrollBar* vbar = viewer->verticalScrollBar();
     int oldScroll = vbar->value();
     int oldMax = vbar->maximum();
-    // Прокручиваем вниз только если ползунок уже находился в самом низу (пользователь не отмотал текст вверх)
     bool wasAtBottom = (oldMax == 0) || (oldScroll >= oldMax - 6);
 
     if (markdownText.trimmed().isEmpty()) {
@@ -250,19 +261,22 @@ void ContextInspectorDock::refreshDisplay() {
     bool hasFile = !m_activeFilePath.isEmpty();
     m_filePromptEdit->setEnabled(hasFile);
     m_rebuildFileBtn->setEnabled(hasFile);
+    m_clearFileBtn->setEnabled(hasFile);
 
     if (hasFile) {
         auto fc = m_projectMgr->fileContext(m_activeFilePath);
         QString skipReasonMd;
         bool summaryAllowed = ConfigManager::instance().shouldGenerateSummaryForFile(m_activeFilePath, &skipReasonMd);
+        bool isClearedEmpty = fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && !fc.isSummaryPending;
 
         QString statusSuffix = fc.isSummaryPending ? " [Indexing...]"
+                               : isClearedEmpty ? " [Summary Empty]"
                                                    : (!summaryAllowed && fc.aiSummary.isEmpty() ? " [Summary Skipped]" : "");
         m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, statusSuffix));
 
         QString llmInfo = fc.isSummaryPending
                               ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
-                              : (fc.llmModel.isEmpty() ? (summaryAllowed ? "-" : "Skipped by settings") : fc.llmModel);
+                              : (fc.llmModel.isEmpty() ? (isClearedEmpty ? "cleared (empty)" : (summaryAllowed ? "-" : "Skipped by settings")) : fc.llmModel);
         QString shaInfo = fc.isSummaryPending
                               ? (fc.pendingSha256.isEmpty() ? "-" : fc.pendingSha256.left(12))
                               : (fc.sha256.isEmpty() ? "-" : fc.sha256.left(12));
@@ -274,11 +288,16 @@ void ContextInspectorDock::refreshDisplay() {
         if (!fc.isSummaryPending) {
             m_liveFileMarkdownByPath.remove(fc.relativePath);
             if (!fc.aiSummary.trimmed().isEmpty()) {
+                m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
                 renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+            } else if (isClearedEmpty) {
+                m_fileSummaryView->clear();
+                m_fileSummaryView->setPlaceholderText("Summary is created and intentionally empty (cleared). Click 'Regenerate' to rebuild.");
             } else if (!summaryAllowed) {
                 renderMarkdownPreservingScroll(m_fileSummaryView, skipReasonMd);
             } else {
                 m_fileSummaryView->clear();
+                m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
             }
         } else {
             const QString liveMd = m_liveFileMarkdownByPath.value(fc.relativePath);

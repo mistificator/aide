@@ -37,8 +37,8 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
 
     AiConnectionConfig koboldLocal;
     koboldLocal.profileName = "KoboldCpp (Offline)";
-    koboldLocal.backend = AiBackendType::KoboldCpp;
-    koboldLocal.endpointUrl = "http://127.0.0.1:5001";
+    koboldLocal.backend = AiBackendType::OpenAiCompatible;
+    koboldLocal.endpointUrl = "http://localhost:5001/v1/";
     koboldLocal.modelName = "";
     koboldLocal.maxOutputCodeTokens = 65536;
     koboldLocal.maxOutputSummaryTokens = 1024;
@@ -58,6 +58,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
 
 AiBehaviorConfig ConfigManager::defaultAiBehavior() {
     AiBehaviorConfig b;
+    b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
     b.includeDocumentSummaryInPrompt = true;
     b.includeProjectSummaryInPrompt = true;
     b.summaryUseSyntaxExtensions = true;
@@ -187,6 +188,14 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     cfg.contextWindow = ai["contextWindow"].toInt(131072);
     cfg.timeoutSec = ai["timeoutSec"].toInt(120);
     cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+
+    // Автоматическая миграция старого дефолтного профиля KoboldCpp на OpenAI-compatible + /v1/
+    if (cfg.profileName == "KoboldCpp (Offline)" &&
+        cfg.backend == AiBackendType::KoboldCpp &&
+        (cfg.endpointUrl == "http://127.0.0.1:5001" || cfg.endpointUrl == "http://localhost:5001")) {
+        cfg.backend = AiBackendType::OpenAiCompatible;
+        cfg.endpointUrl = "http://localhost:5001/v1/";
+    }
     return cfg;
 }
 
@@ -245,6 +254,8 @@ void ConfigManager::loadConfig() {
         m_aiBehavior = defaultAiBehavior();
         if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
             auto beh = obj["aiBehavior"].toObject();
+            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::FilesAndProject));
+            m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
@@ -317,6 +328,7 @@ void ConfigManager::saveConfig() {
     for (const QString& dirPat : m_aiBehavior.summaryIgnoredDirs) ignoredDirsArr.append(dirPat);
 
     QJsonObject behaviorObj{
+        {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},

@@ -42,7 +42,7 @@ constexpr PromptActionMeta kPromptActions[] = {
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(640, 620);
+    resize(650, 640);
 
     auto& cfgMgr = ConfigManager::instance();
     m_profiles = cfgMgr.aiProfiles();
@@ -159,6 +159,16 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* filterGroup = new QGroupBox("Automatic & Recursive File Summary Generation Rules", behPage);
     auto* filterLay = new QVBoxLayout(filterGroup);
 
+    auto* autoModeRow = new QHBoxLayout();
+    autoModeRow->addWidget(new QLabel("Automatic Summary Creation:", filterGroup));
+    m_autoSummaryModeCombo = new QComboBox(filterGroup);
+    m_autoSummaryModeCombo->addItem("Do not auto-create summaries", static_cast<int>(AutoSummaryMode::None));
+    m_autoSummaryModeCombo->addItem("Create file summaries only", static_cast<int>(AutoSummaryMode::FilesOnly));
+    m_autoSummaryModeCombo->addItem("Create file and project summaries", static_cast<int>(AutoSummaryMode::FilesAndProject));
+    m_autoSummaryModeCombo->setCurrentIndex(qBound(0, static_cast<int>(behCfg.autoSummaryMode), 2));
+    autoModeRow->addWidget(m_autoSummaryModeCombo, 1);
+    filterLay->addLayout(autoModeRow);
+
     m_useSyntaxExtensionsCheck = new QCheckBox(
         "Automatically include extensions from downloaded syntax highlighting definitions", filterGroup);
     m_useSyntaxExtensionsCheck->setChecked(behCfg.summaryUseSyntaxExtensions);
@@ -240,7 +250,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     mainLay->addWidget(btns);
 
-    // Инициализация списка профилей
     m_updatingProfileUi = true;
     QString activeName = cfgMgr.activeAiProfileName();
     int activeIdx = 0;
@@ -254,7 +263,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_deleteProfileBtn->setEnabled(m_profiles.size() > 1);
     m_updatingProfileUi = false;
 
-    // Инициализация вкладки Prompts
     m_currentPromptIndex = 0;
     m_promptActionCombo->setCurrentIndex(0);
     loadPromptIntoUi(0);
@@ -433,7 +441,9 @@ void AiPreferencesDialog::onBackendChanged(int index) {
     if (b == AiBackendType::Ollama && (url.isEmpty() || url.contains(":5001")))
         m_endpointEdit->setText("http://127.0.0.1:11434");
     else if (b == AiBackendType::KoboldCpp && (url.isEmpty() || url.contains(":11434")))
-        m_endpointEdit->setText("http://127.0.0.1:5001");
+        m_endpointEdit->setText("http://localhost:5001");
+    else if (b == AiBackendType::OpenAiCompatible && (url.isEmpty() || url.contains(":11434") || url == "http://127.0.0.1:5001" || url == "http://localhost:5001"))
+        m_endpointEdit->setText("http://localhost:5001/v1/");
 }
 
 void AiPreferencesDialog::onFetchModelsClicked() {
@@ -495,6 +505,7 @@ AiConnectionConfig AiPreferencesDialog::resultConfig() const {
 
 AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
     AiBehaviorConfig b;
+    b.autoSummaryMode = static_cast<AutoSummaryMode>(m_autoSummaryModeCombo->currentData().toInt());
     b.includeDocumentSummaryInPrompt = m_useDocSummaryCheck->isChecked();
     b.includeProjectSummaryInPrompt = m_useProjSummaryCheck->isChecked();
     b.summaryUseSyntaxExtensions = m_useSyntaxExtensionsCheck->isChecked();

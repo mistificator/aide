@@ -13,6 +13,7 @@ struct FileContextData {
     QString userPrompt;
     QString aiSummary;
     QDateTime updatedAt;
+    bool summaryCreated = false;
     bool isSummaryPending = false;
     QString pendingSha256;
     QString pendingLlmModel;
@@ -41,8 +42,10 @@ public:
 
     FileContextData fileContext(const QString& absoluteOrRelPath) const;
     bool hasFileSummary(const QString& absoluteOrRelPath) const;
+
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
     void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
+    void clearFileSummary(const QString& filePath, const QString& currentSha256 = {});
     void setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256 = {}, const QString& pendingLlmModel = {});
 
     bool isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent, const QString& currentLlmModel) const;

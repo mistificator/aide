@@ -48,13 +48,16 @@ public:
         if (index.column() == 0 && !isDir(index)) {
             QString path = filePath(index);
             auto fc = m_pm->fileContext(path);
+            bool hasCreatedSummary = fc.summaryCreated || !fc.aiSummary.isEmpty();
             if (role == Qt::ForegroundRole) {
                 if (fc.isSummaryPending) return QColor("#ffb86c");
-                if (!fc.aiSummary.isEmpty()) return QColor("#50fa7b");
+                if (hasCreatedSummary) return QColor("#50fa7b");
             } else if (role == Qt::ToolTipRole) {
                 if (fc.isSummaryPending) return "AI Summary: Indexing in background...";
                 if (!fc.aiSummary.isEmpty())
                     return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
+                if (fc.summaryCreated)
+                    return "AI Summary: Created (intentionally empty / cleared)";
                 if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
                     return "AI Summary: Not required according to AI Behavior settings";
                 return "AI Summary: Not indexed yet (open file or run recursive summary)";
@@ -356,6 +359,7 @@ void MainWindow::setupConnections() {
     connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 
     connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, &MainWindow::rebuildSingleFileSummary);
+    connect(m_inspectorDock, &ContextInspectorDock::clearFileSummaryClicked, this, &MainWindow::clearSingleFileSummary);
     connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
@@ -393,6 +397,24 @@ void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
     if (f.open(QIODevice::ReadOnly)) {
         m_summaryWorker->forceRebuildFileSummary(filePath, f.readAll());
     }
+}
+
+void MainWindow::clearSingleFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    QString relPath = m_projectMgr->toRelativePath(filePath);
+    m_taskQueue->cancelFileSummaryTask(relPath);
+
+    QString sha256;
+    if (auto* ed = m_tabWidget->findEditorByPath(filePath)) {
+        sha256 = ProjectManager::computeSha256(ed->toPlainText().toUtf8());
+    } else {
+        QFile f(filePath);
+        if (f.open(QIODevice::ReadOnly)) {
+            sha256 = ProjectManager::computeSha256(f.readAll());
+        }
+    }
+    m_projectMgr->clearFileSummary(filePath, sha256);
+    statusBar()->showMessage("File summary cleared (marked as created & empty).", 3000);
 }
 
 void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
@@ -433,6 +455,9 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         });
         menu.addAction("Generate / Regenerate File Summary", this, [this, clickedPath]() {
             rebuildSingleFileSummary(clickedPath);
+        });
+        menu.addAction("Clear File Summary (Mark Empty)", this, [this, clickedPath]() {
+            clearSingleFileSummary(clickedPath);
         });
         menu.addSeparator();
     }
