@@ -7,6 +7,8 @@
 #include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QCryptographicHash>
+#include <algorithm>
 
 ConfigManager::ConfigManager(QObject* parent) : QObject(parent) {
     initDefaultPrompts();
@@ -25,39 +27,49 @@ QString ConfigManager::configDirPath() const {
     return QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + "/.aide";
 }
 
+QString ConfigManager::computePromptHash(const QString& promptText) {
+    QByteArray norm = promptText.trimmed().toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(norm, QCryptographicHash::Sha256).toHex());
+}
+
 QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     AiConnectionConfig ollamaLocal;
     ollamaLocal.profileName = "Ollama (Offline)";
     ollamaLocal.backend = AiBackendType::Ollama;
-    ollamaLocal.endpointUrl = "http://127.0.0.1:11434";
+    ollamaLocal.endpointUrl = "[http://127.0.0.1:11434](http://127.0.0.1:11434)";
     ollamaLocal.modelName = "qwen2.5-coder:7b";
-    ollamaLocal.maxOutputCodeTokens = 2048;
-    ollamaLocal.maxOutputSummaryTokens = 256;
+    ollamaLocal.maxOutputCodeTokens = 65536;
+    ollamaLocal.maxOutputSummaryTokens = 1024;
+    ollamaLocal.contextWindow = 131072;
 
     AiConnectionConfig koboldLocal;
     koboldLocal.profileName = "KoboldCpp (Offline)";
-    koboldLocal.backend = AiBackendType::KoboldCpp;
-    koboldLocal.endpointUrl = "http://127.0.0.1:5001";
+    koboldLocal.backend = AiBackendType::OpenAiCompatible;
+    koboldLocal.endpointUrl = "http://localhost:5001/v1/";
     koboldLocal.modelName = "";
-    koboldLocal.maxOutputCodeTokens = 2048;
-    koboldLocal.maxOutputSummaryTokens = 256;
+    koboldLocal.maxOutputCodeTokens = 65536;
+    koboldLocal.maxOutputSummaryTokens = 1024;
+    koboldLocal.contextWindow = 131072;
 
     AiConnectionConfig ollamaOnline;
     ollamaOnline.profileName = "Ollama.com (Online)";
     ollamaOnline.backend = AiBackendType::Ollama;
-    ollamaOnline.endpointUrl = "https://ollama.com";
+    ollamaOnline.endpointUrl = "[https://ollama.com](https://ollama.com)";
     ollamaOnline.modelName = "qwen2.5-coder:7b";
-    ollamaOnline.maxOutputCodeTokens = 2048;
-    ollamaOnline.maxOutputSummaryTokens = 256;
+    ollamaOnline.maxOutputCodeTokens = 65536;
+    ollamaOnline.maxOutputSummaryTokens = 1024;
+    ollamaOnline.contextWindow = 131072;
 
     return {ollamaLocal, koboldLocal, ollamaOnline};
 }
 
 AiBehaviorConfig ConfigManager::defaultAiBehavior() {
     AiBehaviorConfig b;
+    b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
     b.includeDocumentSummaryInPrompt = true;
     b.includeProjectSummaryInPrompt = true;
     b.summaryUseSyntaxExtensions = true;
+    b.promptHistoryLimit = 50;
     b.summaryAllowedFilenames = {
         "CMakeLists.txt", "Makefile", "GNUmakefile", "Dockerfile", "meson.build", "SConstruct"
     };
@@ -94,18 +106,12 @@ bool ConfigManager::initializeStorage() {
     QDir dir(configDirPath());
     bool ok = dir.mkpath(".") && dir.mkpath("syntax") && dir.mkpath("themes");
     if (!QFile::exists(dir.filePath("config.json"))) saveConfig();
-    if (!QFile::exists(dir.filePath("prompts.json"))) {
-        QSaveFile f(dir.filePath("prompts.json"));
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(QJsonDocument(m_promptTemplates).toJson());
-            f.commit();
-        }
-    }
+    if (!QFile::exists(dir.filePath("prompts.json"))) savePrompts();
     return ok;
 }
 
-void ConfigManager::initDefaultPrompts() {
-    m_promptTemplates = {
+QJsonObject ConfigManager::defaultPromptTemplates() {
+    return {
         {"ExplainCode", "Explain the logic, architecture, and potential pitfalls of the following code clearly and concisely:"},
         {"RefactorCode", "Refactor the following code to improve readability, structure, and idiomatic style. Output ONLY raw code without markdown fences:"},
         {"FindBugs", "Find potential bugs, memory leaks, edge cases, or vulnerabilities in the following code and fix them. Output ONLY raw code without markdown fences:"},
@@ -113,9 +119,137 @@ void ConfigManager::initDefaultPrompts() {
         {"AddDocumentation", "Add comprehensive documentation comments (Doxygen/Docstrings) to the following code. Output ONLY raw code without markdown fences:"},
         {"GenerateUnitTests", "Generate unit tests covering main scenarios and edge cases for the following code. Output ONLY raw code without markdown fences:"},
         {"CompleteCode", "Complete the implementation of the following code based on its context and signatures. Output ONLY raw code without markdown fences:"},
+        {"CustomPrompt", "If modifying code, output ONLY raw code without markdown fences:"},
         {"FileSummary", "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
         {"ProjectSummary", "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
     };
+}
+
+QString ConfigManager::defaultPromptTemplate(const QString& actionKey) {
+    return defaultPromptTemplates()[actionKey].toString();
+}
+
+void ConfigManager::initDefaultPrompts() {
+    m_promptTemplates = defaultPromptTemplates();
+}
+
+void ConfigManager::savePrompts() const {
+    QSaveFile f(configDirPath() + "/prompts.json");
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(QJsonDocument(m_promptTemplates).toJson(QJsonDocument::Indented));
+        f.commit();
+    }
+}
+
+void ConfigManager::setPromptTemplates(const QJsonObject& templates) {
+    m_promptTemplates = defaultPromptTemplates();
+    for (auto it = templates.begin(); it != templates.end(); ++it) {
+        QString val = it.value().toString().trimmed();
+        if (!val.isEmpty()) {
+            m_promptTemplates[it.key()] = val;
+        }
+    }
+    savePrompts();
+    emit promptsChanged();
+}
+
+void ConfigManager::enforcePromptHistoryLimit() {
+    int limit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);
+    // Стабильно держим приколотые в начале списка, неприколотые — после них
+    std::stable_partition(m_promptHistory.begin(), m_promptHistory.end(),
+                          [](const PromptHistoryItem& item) { return item.pinned; });
+
+    // Удаляем с конца неприколотые элементы, если превышен лимит
+    while (m_promptHistory.size() > limit) {
+        int lastUnpinned = -1;
+        for (int i = m_promptHistory.size() - 1; i >= 0; --i) {
+            if (!m_promptHistory[i].pinned) {
+                lastUnpinned = i;
+                break;
+            }
+        }
+        if (lastUnpinned >= 0) {
+            m_promptHistory.removeAt(lastUnpinned);
+        } else {
+            m_promptHistory.removeLast();
+        }
+    }
+}
+
+void ConfigManager::setPromptHistory(const QVector<PromptHistoryItem>& items) {
+    m_promptHistory.clear();
+    QSet<QString> seenHashes;
+    for (auto it : items) {
+        it.text = it.text.trimmed();
+        if (it.text.isEmpty()) continue;
+        it.sha256 = computePromptHash(it.text);
+        if (seenHashes.contains(it.sha256)) continue;
+        seenHashes.insert(it.sha256);
+        if (!it.updatedAt.isValid()) it.updatedAt = QDateTime::currentDateTimeUtc();
+        m_promptHistory.append(it);
+    }
+    enforcePromptHistoryLimit();
+    saveConfig();
+    emit promptHistoryChanged();
+}
+
+void ConfigManager::addPromptToHistory(const QString& promptText) {
+    QString clean = promptText.trimmed();
+    if (clean.isEmpty()) return;
+
+    QString hash = computePromptHash(clean);
+    QDateTime now = QDateTime::currentDateTimeUtc();
+
+    int existingIdx = -1;
+    for (int i = 0; i < m_promptHistory.size(); ++i) {
+        if (m_promptHistory[i].sha256 == hash) {
+            existingIdx = i;
+            break;
+        }
+    }
+
+    int firstUnpinnedIdx = 0;
+    while (firstUnpinnedIdx < m_promptHistory.size() && m_promptHistory[firstUnpinnedIdx].pinned) {
+        ++firstUnpinnedIdx;
+    }
+
+    if (existingIdx >= 0) {
+        PromptHistoryItem item = m_promptHistory.takeAt(existingIdx);
+        item.text = clean;
+        item.updatedAt = now;
+        if (item.pinned) {
+            // Приколотый поднимаем на самый верх приколотых
+            m_promptHistory.prepend(item);
+        } else {
+            // Пересчитываем границу приколотых после takeAt и ставим первым среди неприколотых
+            int insertPos = 0;
+            while (insertPos < m_promptHistory.size() && m_promptHistory[insertPos].pinned) {
+                ++insertPos;
+            }
+            m_promptHistory.insert(insertPos, item);
+        }
+    } else {
+        PromptHistoryItem item;
+        item.text = clean;
+        item.sha256 = hash;
+        item.pinned = false;
+        item.updatedAt = now;
+        m_promptHistory.insert(firstUnpinnedIdx, item);
+    }
+
+    enforcePromptHistoryLimit();
+    saveConfig();
+    emit promptHistoryChanged();
+}
+
+void ConfigManager::setPromptHistoryLimit(int limit) {
+    int bounded = qBound(5, limit, 1000);
+    if (m_aiBehavior.promptHistoryLimit == bounded) return;
+    m_aiBehavior.promptHistoryLimit = bounded;
+    enforcePromptHistoryLimit();
+    saveConfig();
+    emit promptHistoryChanged();
+    emit aiBehaviorChanged(m_aiBehavior);
 }
 
 void ConfigManager::initDefaultFileTypes() {
@@ -150,17 +284,24 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     AiConnectionConfig cfg;
     cfg.profileName = ai["profileName"].toString(fallbackName);
     cfg.backend = static_cast<AiBackendType>(ai["backend"].toInt(0));
-    cfg.endpointUrl = ai["endpointUrl"].toString("http://127.0.0.1:11434");
+    cfg.endpointUrl = ai["endpointUrl"].toString("[http://127.0.0.1:11434](http://127.0.0.1:11434)");
     cfg.apiKey = ai["apiKey"].toString();
     cfg.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
     cfg.temperature = ai["temperature"].toDouble(0.2);
     cfg.topP = ai["topP"].toDouble(0.9);
-    int legacyMaxTokens = ai["maxOutputTokens"].toInt(2048);
+    int legacyMaxTokens = ai["maxOutputTokens"].toInt(65536);
     cfg.maxOutputCodeTokens = ai["maxOutputCodeTokens"].toInt(legacyMaxTokens);
-    cfg.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(256);
-    cfg.contextWindow = ai["contextWindow"].toInt(8192);
+    cfg.maxOutputSummaryTokens = ai["maxOutputSummaryTokens"].toInt(1024);
+    cfg.contextWindow = ai["contextWindow"].toInt(131072);
     cfg.timeoutSec = ai["timeoutSec"].toInt(120);
     cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+
+    if (cfg.profileName == "KoboldCpp (Offline)" &&
+        cfg.backend == AiBackendType::KoboldCpp &&
+        (cfg.endpointUrl == "[http://127.0.0.1:5001](http://127.0.0.1:5001)" || cfg.endpointUrl == "http://localhost:5001")) {
+        cfg.backend = AiBackendType::OpenAiCompatible;
+        cfg.endpointUrl = "http://localhost:5001/v1/";
+    }
     return cfg;
 }
 
@@ -174,7 +315,7 @@ void ConfigManager::loadConfig() {
         m_lastCustomPrompt = obj["lastCustomPrompt"].toString();
         m_windowGeometry = QByteArray::fromBase64(obj["windowGeometry"].toString().toLatin1());
         m_windowState = QByteArray::fromBase64(obj["windowState"].toString().toLatin1());
-        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
+        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("[https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/](https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/)");
 
         m_recentProjects.clear();
         for (const auto& v : obj["recentProjects"].toArray()) {
@@ -219,9 +360,12 @@ void ConfigManager::loadConfig() {
         m_aiBehavior = defaultAiBehavior();
         if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
             auto beh = obj["aiBehavior"].toObject();
+            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::FilesAndProject));
+            m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
+            m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
 
             if (beh.contains("summaryAllowedFilenames")) {
                 m_aiBehavior.summaryAllowedFilenames.clear();
@@ -247,6 +391,35 @@ void ConfigManager::loadConfig() {
             }
         }
 
+        m_promptHistory.clear();
+        if (obj.contains("promptHistory") && obj["promptHistory"].isArray()) {
+            QSet<QString> seen;
+            for (const auto& itemVal : obj["promptHistory"].toArray()) {
+                auto po = itemVal.toObject();
+                QString txt = po["text"].toString().trimmed();
+                if (txt.isEmpty()) continue;
+                QString hash = po["sha256"].toString();
+                if (hash.isEmpty()) hash = computePromptHash(txt);
+                if (seen.contains(hash)) continue;
+                seen.insert(hash);
+                PromptHistoryItem item;
+                item.text = txt;
+                item.sha256 = hash;
+                item.pinned = po["pinned"].toBool(false);
+                item.updatedAt = QDateTime::fromString(po["updatedAt"].toString(), Qt::ISODate);
+                if (!item.updatedAt.isValid()) item.updatedAt = QDateTime::currentDateTimeUtc();
+                m_promptHistory.append(item);
+            }
+            enforcePromptHistoryLimit();
+        } else if (!m_lastCustomPrompt.trimmed().isEmpty()) {
+            PromptHistoryItem seed;
+            seed.text = m_lastCustomPrompt.trimmed();
+            seed.sha256 = computePromptHash(seed.text);
+            seed.pinned = false;
+            seed.updatedAt = QDateTime::currentDateTimeUtc();
+            m_promptHistory.append(seed);
+        }
+
         if (obj.contains("fileTypes")) {
             QVector<FileTypeRule> loadedRules;
             for (const auto& item : obj["fileTypes"].toArray()) {
@@ -263,11 +436,15 @@ void ConfigManager::loadConfig() {
         }
     }
 
+    m_promptTemplates = defaultPromptTemplates();
     QFile prFile(configDirPath() + "/prompts.json");
     if (prFile.open(QIODevice::ReadOnly)) {
         auto loaded = QJsonDocument::fromJson(prFile.readAll()).object();
-        for (auto it = loaded.begin(); it != loaded.end(); ++it)
-            m_promptTemplates[it.key()] = it.value();
+        for (auto it = loaded.begin(); it != loaded.end(); ++it) {
+            if (!it.value().toString().trimmed().isEmpty()) {
+                m_promptTemplates[it.key()] = it.value();
+            }
+        }
     }
 }
 
@@ -287,13 +464,25 @@ void ConfigManager::saveConfig() {
     for (const QString& dirPat : m_aiBehavior.summaryIgnoredDirs) ignoredDirsArr.append(dirPat);
 
     QJsonObject behaviorObj{
+        {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
+        {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
         {"summaryAllowedFilenames", allowedFilesArr},
         {"summaryAllowedExtensions", allowedExtsArr},
         {"summaryIgnoredDirs", ignoredDirsArr}
     };
+
+    QJsonArray historyArr;
+    for (const auto& item : m_promptHistory) {
+        historyArr.append(QJsonObject{
+            {"text", item.text},
+            {"sha256", item.sha256},
+            {"pinned", item.pinned},
+            {"updatedAt", item.updatedAt.toString(Qt::ISODate)}
+        });
+    }
 
     QJsonArray recentArr;
     for (const QString& p : m_recentProjects) recentArr.append(p);
@@ -316,6 +505,7 @@ void ConfigManager::saveConfig() {
         {"lastDialogDir", m_lastDialogDir},
         {"recentProjects", recentArr},
         {"lastCustomPrompt", m_lastCustomPrompt},
+        {"promptHistory", historyArr},
         {"windowGeometry", QString::fromLatin1(m_windowGeometry.toBase64())},
         {"windowState", QString::fromLatin1(m_windowState.toBase64())},
         {"syntaxBaseUrl", m_syntaxBaseUrl},
@@ -367,7 +557,10 @@ void ConfigManager::setAiProfiles(const QVector<AiConnectionConfig>& profiles, c
 
 void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
     m_aiBehavior = behavior;
+    m_aiBehavior.promptHistoryLimit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);
+    enforcePromptHistoryLimit();
     saveConfig();
+    emit promptHistoryChanged();
     emit aiBehaviorChanged(m_aiBehavior);
 }
 
@@ -515,7 +708,7 @@ void ConfigManager::clearRecentProjects() {
 
 void ConfigManager::setLastCustomPrompt(const QString& prompt) {
     m_lastCustomPrompt = prompt;
-    saveConfig();
+    addPromptToHistory(prompt);
 }
 
 void ConfigManager::setWindowGeometryAndState(const QByteArray& geometry, const QByteArray& state) {
@@ -568,5 +761,6 @@ FileTypeRule ConfigManager::ruleForLanguage(const QString& langId) const {
 }
 
 QString ConfigManager::promptTemplate(const QString& actionKey) const {
-    return m_promptTemplates[actionKey].toString();
+    QString val = m_promptTemplates[actionKey].toString();
+    return val.isEmpty() ? defaultPromptTemplate(actionKey) : val;
 }

@@ -8,6 +8,8 @@
 #include "AiDebugConsoleDock.h"
 #include "AiTaskQueueDock.h"
 #include "DiffViewerDialog.h"
+#include "MarkdownRenderer.h"
+#include "PromptHistoryDock.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
 #include "../editor/EditorTabWidget.h"
@@ -48,13 +50,16 @@ public:
         if (index.column() == 0 && !isDir(index)) {
             QString path = filePath(index);
             auto fc = m_pm->fileContext(path);
+            bool hasCreatedSummary = fc.summaryCreated || !fc.aiSummary.isEmpty();
             if (role == Qt::ForegroundRole) {
                 if (fc.isSummaryPending) return QColor("#ffb86c");
-                if (!fc.aiSummary.isEmpty()) return QColor("#50fa7b");
+                if (hasCreatedSummary) return QColor("#50fa7b");
             } else if (role == Qt::ToolTipRole) {
                 if (fc.isSummaryPending) return "AI Summary: Indexing in background...";
                 if (!fc.aiSummary.isEmpty())
                     return QString("AI Summary Ready (%1):\n%2").arg(fc.llmModel, fc.aiSummary.left(300));
+                if (fc.summaryCreated)
+                    return "AI Summary: Created (intentionally empty / cleared)";
                 if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
                     return "AI Summary: Not required according to AI Behavior settings";
                 return "AI Summary: Not indexed yet (open file or run recursive summary)";
@@ -90,6 +95,12 @@ MainWindow::MainWindow(QWidget* parent)
     const QByteArray savedState = ConfigManager::instance().windowState();
     if (!savedState.isEmpty()) {
         restoreState(savedState);
+    }
+
+    // Гарантируем адекватную начальную ширину правых док-панелей (не более ~32% ширины окна)
+    int maxRightDockW = qMax(340, width() / 3);
+    if (m_inspectorDock->width() > maxRightDockW || savedState.isEmpty()) {
+        resizeDocks({m_inspectorDock}, {360}, Qt::Horizontal);
     }
 
     m_downloader->ensureResourcesPresent();
@@ -181,6 +192,13 @@ void MainWindow::setupUiAndDocks() {
     m_inspectorDock->setObjectName("ContextInspectorDock");
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
 
+    // Док 2b: AI Prompt History
+    m_promptHistoryDock = new PromptHistoryDock(this);
+    m_promptHistoryDock->setObjectName("PromptHistoryDock");
+    addDockWidget(Qt::RightDockWidgetArea, m_promptHistoryDock);
+    tabifyDockWidget(m_inspectorDock, m_promptHistoryDock);
+    m_inspectorDock->raise();
+
     // Док 3: AI Task Queue
     m_taskQueueDock = new AiTaskQueueDock(m_taskQueue, this);
     m_taskQueueDock->setObjectName("AiTaskQueueDock");
@@ -259,6 +277,7 @@ void MainWindow::setupMenus() {
     QMenu* viewMenu = menuBar()->addMenu("&View");
     viewMenu->addAction(m_projectDock->toggleViewAction());
     viewMenu->addAction(m_inspectorDock->toggleViewAction());
+    viewMenu->addAction(m_promptHistoryDock->toggleViewAction());
     viewMenu->addAction(m_taskQueueDock->toggleViewAction());
     viewMenu->addAction(m_debugConsoleDock->toggleViewAction());
     viewMenu->addSeparator();
@@ -309,6 +328,10 @@ void MainWindow::setupMenus() {
         m_debugConsoleDock->show();
         m_debugConsoleDock->raise();
     });
+    aiMenu->addAction("Show AI Prompt History", this, [this]() {
+        m_promptHistoryDock->show();
+        m_promptHistoryDock->raise();
+    });
     aiMenu->addSeparator();
     aiMenu->addAction("Preferences...", this, &MainWindow::onAiPreferences);
 
@@ -356,6 +379,7 @@ void MainWindow::setupConnections() {
     connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 
     connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, &MainWindow::rebuildSingleFileSummary);
+    connect(m_inspectorDock, &ContextInspectorDock::clearFileSummaryClicked, this, &MainWindow::clearSingleFileSummary);
     connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
@@ -381,6 +405,17 @@ void MainWindow::setupConnections() {
             m_inspectorDock, &ContextInspectorDock::appendLiveSummaryChunk);
     connect(m_summaryWorker, &SummaryWorker::summaryStreamingReset,
             m_inspectorDock, &ContextInspectorDock::resetLiveSummary);
+
+    connect(m_promptHistoryDock, &PromptHistoryDock::usePromptRequested, this, [this](const QString& promptText) {
+        CodeEditor* ed = m_tabWidget->currentEditor();
+        if (!ed) {
+            ed = m_tabWidget->newDocument();
+            updateCentralViewState();
+        }
+        if (ed) {
+            ed->triggerCustomPromptWithText(promptText);
+        }
+    });
 }
 
 void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
@@ -393,6 +428,24 @@ void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
     if (f.open(QIODevice::ReadOnly)) {
         m_summaryWorker->forceRebuildFileSummary(filePath, f.readAll());
     }
+}
+
+void MainWindow::clearSingleFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    QString relPath = m_projectMgr->toRelativePath(filePath);
+    m_taskQueue->cancelFileSummaryTask(relPath);
+
+    QString sha256;
+    if (auto* ed = m_tabWidget->findEditorByPath(filePath)) {
+        sha256 = ProjectManager::computeSha256(ed->toPlainText().toUtf8());
+    } else {
+        QFile f(filePath);
+        if (f.open(QIODevice::ReadOnly)) {
+            sha256 = ProjectManager::computeSha256(f.readAll());
+        }
+    }
+    m_projectMgr->clearFileSummary(filePath, sha256);
+    statusBar()->showMessage("File summary cleared (marked as created & empty).", 3000);
 }
 
 void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
@@ -433,6 +486,9 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         });
         menu.addAction("Generate / Regenerate File Summary", this, [this, clickedPath]() {
             rebuildSingleFileSummary(clickedPath);
+        });
+        menu.addAction("Clear File Summary (Mark Empty)", this, [this, clickedPath]() {
+            clearSingleFileSummary(clickedPath);
         });
         menu.addSeparator();
     }
@@ -601,12 +657,12 @@ QString MainWindow::actionKeyForEnum(AiEditAction action) {
 void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction) {
     if (!editor) return;
     QString sysCtx = m_projectMgr->buildEffectiveSystemContext(editor->filePath());
+    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
     QString instruction = (action == AiEditAction::CustomPrompt)
-                              ? (customInstruction + "\nIf modifying code, output ONLY raw code without markdown fences:")
+                              ? (customSuffix.isEmpty() ? customInstruction : (customInstruction + "\n" + customSuffix))
                               : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
 
     const auto& cfg = ConfigManager::instance().aiConfig();
-
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
     task.targetType = (action == AiEditAction::ExplainCode) ? TaskTargetType::ExplainToDialog : TaskTargetType::ModifyEditorCode;
@@ -626,12 +682,12 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle("AI Code Explanation");
-    dlg->resize(720, 540);
+    dlg->resize(740, 560);
     auto* lay = new QVBoxLayout(dlg);
     auto* view = new QTextEdit(dlg);
     view->setReadOnly(true);
-    view->document()->setIndentWidth(16);
-    view->setMarkdown(resultText);
+    MarkdownRenderer::configureViewer(view);
+    view->setHtml(MarkdownRenderer::toHtml(resultText));
     lay->addWidget(view);
     dlg->show();
 }
@@ -649,6 +705,7 @@ void MainWindow::onAiPreferences() {
         cfgMgr.setAiProfiles(dlg.resultProfiles(), dlg.resultActiveProfileName());
         cfgMgr.setAiConfig(dlg.resultConfig());
         cfgMgr.setAiBehavior(dlg.resultBehavior());
+        cfgMgr.setPromptTemplates(dlg.resultPrompts());
         m_projectMgr->saveProjectFile();
         m_inspectorDock->refreshDisplay();
         m_projectTree->viewport()->update();

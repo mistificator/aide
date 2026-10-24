@@ -15,6 +15,7 @@
 #include <QFontDatabase>
 #include <QContextMenuEvent>
 #include <QResizeEvent>
+#include <QScrollBar>
 
 CodeEditor::CodeEditor(QWidget* parent)
     : QPlainTextEdit(parent),
@@ -35,6 +36,19 @@ CodeEditor::CodeEditor(QWidget* parent)
         applyColorScheme(ColorScheme::loadByName(name));
     });
 
+    // Отслеживаем ручную прокрутку во время стриминга, чтобы не сдёргивать скролл вниз
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        if (!m_isAiBusy || m_updatingStreamText) return;
+        QScrollBar* vbar = verticalScrollBar();
+        if (value < m_lastAutoScrollValue) {
+            m_userScrolledUpDuringStream = true;
+        } else if (value >= vbar->maximum() - 2 ||
+                   cursorRect(m_streamCursor).top() <= viewport()->rect().bottom()) {
+            m_userScrolledUpDuringStream = false;
+            m_lastAutoScrollValue = value;
+        }
+    });
+
     applyColorScheme(ColorScheme::loadByName(ConfigManager::instance().activeTheme()));
     updateLineNumberAreaWidth(0);
 }
@@ -46,15 +60,14 @@ void CodeEditor::setupOverlayBanner() {
         "QLabel { color: #f8f8f2; font-weight: bold; border: none; background: transparent; }"
         "QPushButton { background-color: #ff5555; color: #ffffff; border: none; border-radius: 4px; padding: 4px 12px; font-weight: bold; }"
         "QPushButton:hover { background-color: #ff6e6e; }");
-
     auto* layout = new QHBoxLayout(m_busyBanner);
     layout->setContentsMargins(12, 6, 12, 6);
     m_busyLabel = new QLabel("AI: Processing...", m_busyBanner);
     m_cancelBtn = new QPushButton("Cancel", m_busyBanner);
     layout->addWidget(m_busyLabel, 1);
     layout->addWidget(m_cancelBtn);
-
     m_busyBanner->hide();
+
     connect(m_cancelBtn, &QPushButton::clicked, this, [this]() { emit cancelAiRequested(this); });
 }
 
@@ -124,6 +137,9 @@ void CodeEditor::beginAiStreamEdit() {
     if (!m_streamCursor.hasSelection()) m_streamCursor.select(QTextCursor::Document);
     m_isFirstChunk = true;
     m_headerResolved = false;
+    m_userScrolledUpDuringStream = false;
+    m_updatingStreamText = false;
+    m_lastAutoScrollValue = verticalScrollBar()->value();
     m_headerBuf.clear();
     m_tailBuf.clear();
 }
@@ -131,6 +147,12 @@ void CodeEditor::beginAiStreamEdit() {
 void CodeEditor::appendAiStreamChunk(const QString& chunk) {
     auto commitText = [this](const QString& txt) {
         if (txt.isEmpty()) return;
+        m_updatingStreamText = true;
+        QScrollBar* vbar = verticalScrollBar();
+        QScrollBar* hbar = horizontalScrollBar();
+        int savedV = vbar->value();
+        int savedH = hbar->value();
+
         if (m_isFirstChunk) {
             m_streamCursor.beginEditBlock();
             m_streamCursor.removeSelectedText();
@@ -142,8 +164,16 @@ void CodeEditor::appendAiStreamChunk(const QString& chunk) {
             m_streamCursor.insertText(txt);
             m_streamCursor.endEditBlock();
         }
-        setTextCursor(m_streamCursor);
-        ensureCursorVisible();
+
+        if (!m_userScrolledUpDuringStream) {
+            setTextCursor(m_streamCursor);
+            ensureCursorVisible();
+            m_lastAutoScrollValue = vbar->value();
+        } else {
+            vbar->setValue(savedV);
+            hbar->setValue(savedH);
+        }
+        m_updatingStreamText = false;
     };
 
     QString pending = chunk;
@@ -177,6 +207,12 @@ void CodeEditor::finishAiStreamEdit() {
         if (m_tailBuf.endsWith('\n')) m_tailBuf.chop(1);
     }
     if (!m_tailBuf.isEmpty()) {
+        m_updatingStreamText = true;
+        QScrollBar* vbar = verticalScrollBar();
+        QScrollBar* hbar = horizontalScrollBar();
+        int savedV = vbar->value();
+        int savedH = hbar->value();
+
         if (m_isFirstChunk) {
             m_streamCursor.beginEditBlock();
             m_streamCursor.removeSelectedText();
@@ -188,41 +224,62 @@ void CodeEditor::finishAiStreamEdit() {
             m_streamCursor.insertText(m_tailBuf);
             m_streamCursor.endEditBlock();
         }
+
+        if (!m_userScrolledUpDuringStream) {
+            setTextCursor(m_streamCursor);
+            ensureCursorVisible();
+        } else {
+            vbar->setValue(savedV);
+            hbar->setValue(savedH);
+        }
+        m_updatingStreamText = false;
     }
     m_tailBuf.clear();
+    m_userScrolledUpDuringStream = false;
     setAiBusy(false);
 }
 
 void CodeEditor::cancelAndRollbackAiEdit() {
     m_tailBuf.clear();
     m_headerBuf.clear();
+    m_userScrolledUpDuringStream = false;
     setAiBusy(false);
     if (!m_isFirstChunk) undo();
 }
 
 void CodeEditor::triggerAiAction(AiEditAction action) {
-    if (m_isAiBusy) return;
-    QString customInst;
     if (action == AiEditAction::CustomPrompt) {
-        bool ok = false;
-        QString lastPrompt = ConfigManager::instance().lastCustomPrompt();
-        customInst = QInputDialog::getMultiLineText(
-            this,
-            "AI Custom Prompt",
-            "Enter instructions for the LLM:",
-            lastPrompt,
-            &ok);
-        if (!ok || customInst.trimmed().isEmpty()) return;
-        customInst = customInst.trimmed();
-        ConfigManager::instance().setLastCustomPrompt(customInst);
+        triggerCustomPromptWithText(ConfigManager::instance().lastCustomPrompt());
+        return;
     }
+    if (m_isAiBusy) return;
 
     QTextCursor c = textCursor();
     QString targetText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
-    if (targetText.trimmed().isEmpty() && action != AiEditAction::CustomPrompt && action != AiEditAction::CompleteCode)
+    if (targetText.trimmed().isEmpty() && action != AiEditAction::CompleteCode)
         return;
 
-    emit aiActionRequested(this, action, targetText, customInst);
+    emit aiActionRequested(this, action, targetText, {});
+}
+
+void CodeEditor::triggerCustomPromptWithText(const QString& initialPromptText) {
+    if (m_isAiBusy) return;
+    bool ok = false;
+    QString customInst = QInputDialog::getMultiLineText(
+        this,
+        "AI Custom Prompt",
+        "Enter instructions for the LLM:",
+        initialPromptText,
+        &ok);
+    if (!ok || customInst.trimmed().isEmpty()) return;
+    customInst = customInst.trimmed();
+
+    // Сохраняет промпт и автоматически поднимает его в глобальной истории по SHA-256
+    ConfigManager::instance().setLastCustomPrompt(customInst);
+
+    QTextCursor c = textCursor();
+    QString targetText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
+    emit aiActionRequested(this, AiEditAction::CustomPrompt, targetText, customInst);
 }
 
 void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
@@ -234,7 +291,7 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     diffAct->setEnabled(document()->isModified() || !m_filePath.isEmpty());
 
     menu->addSeparator();
-    QMenu* aiMenu = menu->addMenu("AI ▸");
+    QMenu* aiMenu = menu->addMenu("AI");
     aiMenu->setEnabled(!m_isAiBusy);
 
     const QList<QPair<QString, AiEditAction>> actions = {
@@ -251,7 +308,6 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
         if (act == AiEditAction::CustomPrompt) aiMenu->addSeparator();
         aiMenu->addAction(title, this, [this, act]() { triggerAiAction(act); });
     }
-
     menu->exec(event->globalPos());
     delete menu;
 }

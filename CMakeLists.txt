@@ -133,6 +133,10 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/AppIcon.cpp
     src/ui/RecursiveSummaryDialog.h
     src/ui/RecursiveSummaryDialog.cpp
+    src/ui/MarkdownRenderer.h
+    src/ui/MarkdownRenderer.cpp
+    src/ui/PromptHistoryDock.h
+    src/ui/PromptHistoryDock.cpp
 
     ${AIDE_PLATFORM_SOURCES}
 

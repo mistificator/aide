@@ -38,14 +38,22 @@ AiDebugConsoleDock::AiDebugConsoleDock(QWidget* parent)
 
 void AiDebugConsoleDock::appendLog(const QString& category, const QString& summary, const QString& payload) {
     if (category == "STREAM" && !m_logStreamsCheck->isChecked()) return;
-
     QString ts = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     QString entry = QString("[%1] [%2] %3").arg(ts, category, summary);
     if (!payload.trimmed().isEmpty()) {
         entry += "\n" + payload.trimmed() + "\n" + QString(60, '-');
     }
+
+    QScrollBar* vbar = m_logView->verticalScrollBar();
+    int oldScroll = vbar->value();
+    bool wasAtBottom = (vbar->maximum() == 0) || (oldScroll >= vbar->maximum() - 6);
+
     m_logView->appendPlainText(entry);
-    m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+    if (wasAtBottom) {
+        vbar->setValue(vbar->maximum());
+    } else {
+        vbar->setValue(oldScroll);
+    }
 }
 
 void AiDebugConsoleDock::clearConsole() {

@@ -18,6 +18,7 @@ class AiProvider;
 class AiTaskQueue;
 class SummaryWorker;
 class ThemeAndSyntaxDownloader;
+class PromptHistoryDock;
 struct AiTask;
 
 class MainWindow : public QMainWindow {
@@ -56,6 +57,7 @@ private:
     void openProjectAtPath(const QString& dirPath);
     void updateCentralViewState();
     void rebuildSingleFileSummary(const QString& filePath);
+    void clearSingleFileSummary(const QString& filePath);
     static QString actionKeyForEnum(AiEditAction action);
 
     ProjectManager* m_projectMgr = nullptr;
@@ -75,6 +77,7 @@ private:
     ProjectTreeModel* m_fsModel = nullptr;
 
     ContextInspectorDock* m_inspectorDock = nullptr;
+    PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
 

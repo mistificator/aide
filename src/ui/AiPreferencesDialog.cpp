@@ -18,14 +18,36 @@
 #include <QMessageBox>
 #include <QLabel>
 
+namespace {
+struct PromptActionMeta {
+    const char* key;
+    const char* menuLabel;
+    const char* hint;
+};
+
+constexpr PromptActionMeta kPromptActions[] = {
+    {"ExplainCode",         "Explain Code",                             "Triggered by 'AI -> Explain Code'. Output is rendered as Markdown in a dialog."},
+    {"RefactorCode",        "Refactor & Clean Up",                      "Triggered by 'AI -> Refactor & Clean Up'. Replaces selected or full code in editor."},
+    {"FindBugs",            "Find Bugs & Edge Cases",                   "Triggered by 'AI -> Find Bugs & Edge Cases'. Replaces selected or full code in editor."},
+    {"OptimizePerformance", "Optimize Performance",                     "Triggered by 'AI -> Optimize Performance'. Replaces selected or full code in editor."},
+    {"AddDocumentation",    "Add Documentation / Comments",             "Triggered by 'AI -> Add Documentation / Comments'. Replaces selected or full code in editor."},
+    {"GenerateUnitTests",   "Generate Unit Tests",                      "Triggered by 'AI -> Generate Unit Tests'. Replaces or appends unit test code in editor."},
+    {"CompleteCode",        "Complete / Continue Code",                 "Triggered by 'AI -> Complete / Continue Code'. Completes implementation in editor."},
+    {"CustomPrompt",        "Custom Prompt... (Appended Instruction)",  "Appended after user's custom instruction in 'AI -> Custom Prompt...'."},
+    {"FileSummary",         "Rebuild File Summary",                     "Used when indexing a source file into Markdown summary (background or manual)."},
+    {"ProjectSummary",      "Rebuild Project Summary",                  "Used when synthesizing the global project architecture summary from file summaries."}
+};
+} // namespace
+
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(620, 620);
+    resize(650, 640);
 
     auto& cfgMgr = ConfigManager::instance();
     m_profiles = cfgMgr.aiProfiles();
     if (m_profiles.isEmpty()) m_profiles = ConfigManager::defaultAiProfiles();
+    m_promptTemplates = cfgMgr.promptTemplates();
 
     auto* mainLay = new QVBoxLayout(this);
     auto* tabs = new QTabWidget(this);
@@ -50,6 +72,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     connLay->addWidget(profileGroup);
 
     auto* form = new QFormLayout();
+
     m_backendCombo = new QComboBox(connPage);
     m_backendCombo->addItems({"Ollama (Native API)", "KoboldCpp (Native / SSE)", "OpenAI-Compatible (/v1/chat/completions)"});
 
@@ -66,6 +89,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     modelRow->addWidget(m_fetchBtn);
 
     m_statusLabel = new QLabel(connPage);
+
     m_tempSpin = new QDoubleSpinBox(connPage);
     m_tempSpin->setRange(0.0, 2.0);
     m_tempSpin->setSingleStep(0.05);
@@ -75,17 +99,19 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_topPSpin->setSingleStep(0.05);
 
     m_maxCodeTokensSpin = new QSpinBox(connPage);
-    m_maxCodeTokensSpin->setRange(64, 65536);
-    m_maxCodeTokensSpin->setSingleStep(256);
+    m_maxCodeTokensSpin->setRange(64, 262144);
+    m_maxCodeTokensSpin->setSingleStep(1024);
+    m_maxCodeTokensSpin->setValue(65536);
 
     m_maxSummaryTokensSpin = new QSpinBox(connPage);
     m_maxSummaryTokensSpin->setRange(64, 65536);
     m_maxSummaryTokensSpin->setSingleStep(64);
-    m_maxSummaryTokensSpin->setValue(256);
+    m_maxSummaryTokensSpin->setValue(1024);
 
     m_ctxWindowSpin = new QSpinBox(connPage);
-    m_ctxWindowSpin->setRange(1024, 131072);
-    m_ctxWindowSpin->setSingleStep(1024);
+    m_ctxWindowSpin->setRange(1024, 1048576);
+    m_ctxWindowSpin->setSingleStep(4096);
+    m_ctxWindowSpin->setValue(131072);
 
     m_timeoutSpin = new QSpinBox(connPage);
     m_timeoutSpin->setRange(10, 3600);
@@ -109,6 +135,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     form->addRow("Project Summary Rebuild:", m_summaryIntervalSpin);
     connLay->addLayout(form);
     connLay->addStretch();
+
     tabs->addTab(connPage, "Connection && Profiles");
 
     // =========================================================================
@@ -116,6 +143,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     // =========================================================================
     auto* behPage = new QWidget(tabs);
     auto* behLay = new QVBoxLayout(behPage);
+
     auto behCfg = cfgMgr.aiBehavior();
 
     auto* promptGroup = new QGroupBox("System Prompt Context Composition (When Working with a Document)", behPage);
@@ -130,6 +158,16 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
 
     auto* filterGroup = new QGroupBox("Automatic & Recursive File Summary Generation Rules", behPage);
     auto* filterLay = new QVBoxLayout(filterGroup);
+
+    auto* autoModeRow = new QHBoxLayout();
+    autoModeRow->addWidget(new QLabel("Automatic Summary Creation:", filterGroup));
+    m_autoSummaryModeCombo = new QComboBox(filterGroup);
+    m_autoSummaryModeCombo->addItem("Do not auto-create summaries", static_cast<int>(AutoSummaryMode::None));
+    m_autoSummaryModeCombo->addItem("Create file summaries only", static_cast<int>(AutoSummaryMode::FilesOnly));
+    m_autoSummaryModeCombo->addItem("Create file and project summaries", static_cast<int>(AutoSummaryMode::FilesAndProject));
+    m_autoSummaryModeCombo->setCurrentIndex(qBound(0, static_cast<int>(behCfg.autoSummaryMode), 2));
+    autoModeRow->addWidget(m_autoSummaryModeCombo, 1);
+    filterLay->addLayout(autoModeRow);
 
     m_useSyntaxExtensionsCheck = new QCheckBox(
         "Automatically include extensions from downloaded syntax highlighting definitions", filterGroup);
@@ -165,7 +203,58 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
 
     behLay->addWidget(filterGroup);
     behLay->addStretch();
+
     tabs->addTab(behPage, "Behavior && Summary Rules");
+
+    // =========================================================================
+    // Вкладка 3: Prompts
+    // =========================================================================
+    auto* promptsPage = new QWidget(tabs);
+    auto* promptsLay = new QVBoxLayout(promptsPage);
+
+    auto* promptsGroup = new QGroupBox("AI Menu & Summary Prompt Templates", promptsPage);
+    auto* promptsGroupLay = new QVBoxLayout(promptsGroup);
+
+    auto* actionRow = new QHBoxLayout();
+    actionRow->addWidget(new QLabel("AI Menu Action:", promptsGroup));
+    m_promptActionCombo = new QComboBox(promptsGroup);
+    for (const auto& meta : kPromptActions) {
+        m_promptActionCombo->addItem(QString::fromLatin1(meta.menuLabel), QString::fromLatin1(meta.key));
+    }
+    actionRow->addWidget(m_promptActionCombo, 1);
+    promptsGroupLay->addLayout(actionRow);
+
+    m_promptHintLabel = new QLabel(promptsGroup);
+    m_promptHintLabel->setStyleSheet("color: #888899; font-size: 11px;");
+    m_promptHintLabel->setWordWrap(true);
+    promptsGroupLay->addWidget(m_promptHintLabel);
+
+    promptsGroupLay->addWidget(new QLabel("Prompt Instruction Sent to LLM (target code or digest is appended after this prompt):", promptsGroup));
+    m_promptEdit = new QPlainTextEdit(promptsGroup);
+    m_promptEdit->setPlaceholderText("Enter prompt template for the selected AI action...");
+    promptsGroupLay->addWidget(m_promptEdit, 1);
+
+    auto* promptBtnRow = new QHBoxLayout();
+    m_resetCurrentPromptBtn = new QPushButton("Reset Selected to Default", promptsGroup);
+    m_resetAllPromptsBtn = new QPushButton("Reset All Prompts to Defaults", promptsGroup);
+    promptBtnRow->addWidget(m_resetCurrentPromptBtn);
+    promptBtnRow->addStretch();
+    promptBtnRow->addWidget(m_resetAllPromptsBtn);
+    promptsGroupLay->addLayout(promptBtnRow);
+
+    auto* historyGroup = new QGroupBox("Global Custom Prompt History", promptsPage);
+    auto* historyLay = new QHBoxLayout(historyGroup);
+    historyLay->addWidget(new QLabel("Maximum Prompts Stored in History:", historyGroup));
+    m_promptHistoryLimitSpin = new QSpinBox(historyGroup);
+    m_promptHistoryLimitSpin->setRange(5, 1000);
+    m_promptHistoryLimitSpin->setSingleStep(10);
+    m_promptHistoryLimitSpin->setValue(behCfg.promptHistoryLimit);
+    historyLay->addWidget(m_promptHistoryLimitSpin);
+    historyLay->addStretch();
+    promptsLay->addWidget(historyGroup);
+
+    promptsLay->addWidget(promptsGroup, 1);
+    tabs->addTab(promptsPage, "Prompts");
 
     mainLay->addWidget(tabs, 1);
 
@@ -185,6 +274,10 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_deleteProfileBtn->setEnabled(m_profiles.size() > 1);
     m_updatingProfileUi = false;
 
+    m_currentPromptIndex = 0;
+    m_promptActionCombo->setCurrentIndex(0);
+    loadPromptIntoUi(0);
+
     connect(m_profileCombo, &QComboBox::currentIndexChanged, this, &AiPreferencesDialog::onProfileSelectionChanged);
     connect(m_newProfileBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onNewProfileClicked);
     connect(m_deleteProfileBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onDeleteProfileClicked);
@@ -193,8 +286,13 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     connect(m_fetchBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onFetchModelsClicked);
     connect(syncSyntaxExtBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onSyncSyntaxExtensionsClicked);
 
+    connect(m_promptActionCombo, &QComboBox::currentIndexChanged, this, &AiPreferencesDialog::onPromptSelectionChanged);
+    connect(m_resetCurrentPromptBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onResetCurrentPromptClicked);
+    connect(m_resetAllPromptsBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onResetAllPromptsClicked);
+
     connect(btns, &QDialogButtonBox::accepted, this, [this]() {
         saveUiIntoCurrentProfile();
+        saveUiIntoCurrentPrompt();
         accept();
     });
     connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -246,6 +344,48 @@ void AiPreferencesDialog::saveUiIntoCurrentProfile() {
     dst.contextWindow = m_ctxWindowSpin->value();
     dst.timeoutSec = m_timeoutSpin->value();
     dst.projectSummaryIntervalMin = m_summaryIntervalSpin->value();
+}
+
+void AiPreferencesDialog::loadPromptIntoUi(int index) {
+    if (index < 0 || index >= m_promptActionCombo->count()) return;
+    m_updatingPromptUi = true;
+    QString key = m_promptActionCombo->itemData(index).toString();
+    QString text = m_promptTemplates[key].toString();
+    if (text.isEmpty()) text = ConfigManager::defaultPromptTemplate(key);
+    m_promptEdit->setPlainText(text);
+    if (index < static_cast<int>(std::size(kPromptActions))) {
+        m_promptHintLabel->setText(QString::fromLatin1(kPromptActions[index].hint));
+    }
+    m_updatingPromptUi = false;
+}
+
+void AiPreferencesDialog::saveUiIntoCurrentPrompt() {
+    if (m_currentPromptIndex < 0 || m_currentPromptIndex >= m_promptActionCombo->count()) return;
+    QString key = m_promptActionCombo->itemData(m_currentPromptIndex).toString();
+    QString text = m_promptEdit->toPlainText().trimmed();
+    m_promptTemplates[key] = text.isEmpty() ? ConfigManager::defaultPromptTemplate(key) : text;
+}
+
+void AiPreferencesDialog::onPromptSelectionChanged(int index) {
+    if (m_updatingPromptUi || index < 0) return;
+    saveUiIntoCurrentPrompt();
+    m_currentPromptIndex = index;
+    loadPromptIntoUi(index);
+}
+
+void AiPreferencesDialog::onResetCurrentPromptClicked() {
+    if (m_currentPromptIndex < 0 || m_currentPromptIndex >= m_promptActionCombo->count()) return;
+    QString key = m_promptActionCombo->itemData(m_currentPromptIndex).toString();
+    QString def = ConfigManager::defaultPromptTemplate(key);
+    m_promptTemplates[key] = def;
+    m_updatingPromptUi = true;
+    m_promptEdit->setPlainText(def);
+    m_updatingPromptUi = false;
+}
+
+void AiPreferencesDialog::onResetAllPromptsClicked() {
+    m_promptTemplates = ConfigManager::defaultPromptTemplates();
+    loadPromptIntoUi(m_currentPromptIndex);
 }
 
 void AiPreferencesDialog::onProfileSelectionChanged(int index) {
@@ -312,7 +452,9 @@ void AiPreferencesDialog::onBackendChanged(int index) {
     if (b == AiBackendType::Ollama && (url.isEmpty() || url.contains(":5001")))
         m_endpointEdit->setText("http://127.0.0.1:11434");
     else if (b == AiBackendType::KoboldCpp && (url.isEmpty() || url.contains(":11434")))
-        m_endpointEdit->setText("http://127.0.0.1:5001");
+        m_endpointEdit->setText("http://localhost:5001");
+    else if (b == AiBackendType::OpenAiCompatible && (url.isEmpty() || url.contains(":11434") || url == "http://127.0.0.1:5001" || url == "http://localhost:5001"))
+        m_endpointEdit->setText("http://localhost:5001/v1/");
 }
 
 void AiPreferencesDialog::onFetchModelsClicked() {
@@ -374,6 +516,7 @@ AiConnectionConfig AiPreferencesDialog::resultConfig() const {
 
 AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
     AiBehaviorConfig b;
+    b.autoSummaryMode = static_cast<AutoSummaryMode>(m_autoSummaryModeCombo->currentData().toInt());
     b.includeDocumentSummaryInPrompt = m_useDocSummaryCheck->isChecked();
     b.includeProjectSummaryInPrompt = m_useProjSummaryCheck->isChecked();
     b.summaryUseSyntaxExtensions = m_useSyntaxExtensionsCheck->isChecked();
@@ -386,5 +529,6 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
             b.summaryAllowedExtensions.append(ext);
     }
     b.summaryIgnoredDirs = splitCommaSeparated(m_ignoredDirsEdit->toPlainText());
+    b.promptHistoryLimit = m_promptHistoryLimitSpin ? m_promptHistoryLimitSpin->value() : 50;
     return b;
 }

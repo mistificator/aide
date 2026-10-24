@@ -141,7 +141,7 @@ bool RecursiveSummaryDialog::populateDirectoryItem(const QString& dirPath, QTree
         }
 
         auto fc = m_projectMgr->fileContext(absPath);
-        bool hasSummary = !fc.aiSummary.trimmed().isEmpty();
+        bool hasSummary = fc.summaryCreated || !fc.aiSummary.trimmed().isEmpty();
         bool isPending = fc.isSummaryPending;
 
         auto* fileItem = new QTreeWidgetItem(parentItem);
@@ -149,6 +149,7 @@ bool RecursiveSummaryDialog::populateDirectoryItem(const QString& dirPath, QTree
         fileItem->setToolTip(0, QDir::toNativeSeparators(absPath));
         fileItem->setIcon(0, style()->standardIcon(QStyle::SP_FileIcon));
         fileItem->setFlags(fileItem->flags() | Qt::ItemIsUserCheckable);
+
         fileItem->setData(0, RoleFilePath, absPath);
         fileItem->setData(0, RoleIsAllowed, allowed);
         fileItem->setData(0, RoleHasSummary, hasSummary);
@@ -159,7 +160,11 @@ bool RecursiveSummaryDialog::populateDirectoryItem(const QString& dirPath, QTree
             fileItem->setForeground(1, QColor("#8be9fd"));
         } else if (hasSummary) {
             fileItem->setCheckState(0, Qt::Unchecked);
-            fileItem->setText(1, QString("Summary Ready (%1)").arg(fc.llmModel.isEmpty() ? "cached" : fc.llmModel));
+            if (fc.aiSummary.trimmed().isEmpty()) {
+                fileItem->setText(1, "Summary Ready (Empty / Cleared)");
+            } else {
+                fileItem->setText(1, QString("Summary Ready (%1)").arg(fc.llmModel.isEmpty() ? "cached" : fc.llmModel));
+            }
             fileItem->setForeground(1, QColor("#50fa7b"));
         } else if (allowed) {
             fileItem->setCheckState(0, Qt::Checked);

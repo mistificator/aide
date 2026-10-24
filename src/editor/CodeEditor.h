@@ -22,6 +22,7 @@ public:
     bool loadFile(const QString& filePath);
     bool saveFile();
     bool saveFileAs(const QString& newFilePath);
+
     QString filePath() const { return m_filePath; }
     QString savedDiskContent() const { return m_savedDiskContent; }
     QString displayName() const;
@@ -29,8 +30,9 @@ public:
     void applyColorScheme(const ColorScheme& scheme);
     void setSyntaxLanguage(const QString& langId);
     QString syntaxLanguage() const;
-    void triggerAiAction(AiEditAction action);
 
+    void triggerAiAction(AiEditAction action);
+    void triggerCustomPromptWithText(const QString& initialPromptText);
     void setAiBusy(bool busy, const QString& statusText = {});
     bool isAiBusy() const { return m_isAiBusy; }
 
@@ -74,6 +76,9 @@ private:
 
     QTextCursor m_streamCursor;
     bool m_isFirstChunk = true, m_headerResolved = false;
+    bool m_userScrolledUpDuringStream = false;
+    bool m_updatingStreamText = false;
+    int m_lastAutoScrollValue = 0;
     QString m_headerBuf, m_tailBuf;
 };
 
