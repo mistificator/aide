@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QJsonObject>
 #include <QVector>
+#include <QDateTime>
 
 enum class AiBackendType { Ollama, KoboldCpp, OpenAiCompatible };
 
@@ -18,7 +19,7 @@ enum class AutoSummaryMode {
 struct AiConnectionConfig {
     QString profileName = "Ollama (Offline)";
     AiBackendType backend = AiBackendType::Ollama;
-    QString endpointUrl = "http://127.0.0.1:11434";
+    QString endpointUrl = "[http://127.0.0.1:11434](http://127.0.0.1:11434)";
     QString apiKey;
     QString modelName = "qwen2.5-coder:7b";
     double temperature = 0.2;
@@ -46,6 +47,14 @@ struct AiBehaviorConfig {
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
     QStringList summaryIgnoredDirs;
+    int promptHistoryLimit = 50;
+};
+
+struct PromptHistoryItem {
+    QString text;
+    QString sha256;
+    bool pinned = false;
+    QDateTime updatedAt;
 };
 
 struct FileTypeRule {
@@ -81,6 +90,14 @@ public:
     QStringList extensionsFromLoadedSyntaxes() const;
     bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
     bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
+
+    // Глобальная история кастомных промптов
+    QVector<PromptHistoryItem> promptHistory() const { return m_promptHistory; }
+    void setPromptHistory(const QVector<PromptHistoryItem>& items);
+    void addPromptToHistory(const QString& promptText);
+    int promptHistoryLimit() const { return m_aiBehavior.promptHistoryLimit; }
+    void setPromptHistoryLimit(int limit);
+    static QString computePromptHash(const QString& promptText);
 
     // Тема и пути
     QString activeTheme() const { return m_activeTheme; }
@@ -129,6 +146,7 @@ signals:
     void aiConfigChanged(const AiConnectionConfig& newConfig);
     void aiBehaviorChanged(const AiBehaviorConfig& newBehavior);
     void promptsChanged();
+    void promptHistoryChanged();
     void themeChanged(const QString& themeName);
     void fileTypesChanged();
     void recentProjectsChanged();
@@ -138,12 +156,14 @@ private:
     void initDefaultPrompts();
     void initDefaultFileTypes();
     void savePrompts() const;
+    void enforcePromptHistoryLimit();
     static QJsonObject serializeAiConfig(const AiConnectionConfig& cfg);
     static AiConnectionConfig deserializeAiConfig(const QJsonObject& ai, const QString& fallbackName = "Default");
 
     AiConnectionConfig m_aiConfig;
     QVector<AiConnectionConfig> m_aiProfiles;
     AiBehaviorConfig m_aiBehavior;
+    QVector<PromptHistoryItem> m_promptHistory;
 
     QString m_activeTheme = "dracula";
     QString m_lastProjectPath;
@@ -152,7 +172,7 @@ private:
     QString m_lastCustomPrompt;
     QByteArray m_windowGeometry;
     QByteArray m_windowState;
-    QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
+    QString m_syntaxBaseUrl = "[https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/](https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/)";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;
 };

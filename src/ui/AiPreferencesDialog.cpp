@@ -242,6 +242,17 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     promptBtnRow->addWidget(m_resetAllPromptsBtn);
     promptsGroupLay->addLayout(promptBtnRow);
 
+    auto* historyGroup = new QGroupBox("Global Custom Prompt History", promptsPage);
+    auto* historyLay = new QHBoxLayout(historyGroup);
+    historyLay->addWidget(new QLabel("Maximum Prompts Stored in History:", historyGroup));
+    m_promptHistoryLimitSpin = new QSpinBox(historyGroup);
+    m_promptHistoryLimitSpin->setRange(5, 1000);
+    m_promptHistoryLimitSpin->setSingleStep(10);
+    m_promptHistoryLimitSpin->setValue(behCfg.promptHistoryLimit);
+    historyLay->addWidget(m_promptHistoryLimitSpin);
+    historyLay->addStretch();
+    promptsLay->addWidget(historyGroup);
+
     promptsLay->addWidget(promptsGroup, 1);
     tabs->addTab(promptsPage, "Prompts");
 
@@ -518,5 +529,6 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
             b.summaryAllowedExtensions.append(ext);
     }
     b.summaryIgnoredDirs = splitCommaSeparated(m_ignoredDirsEdit->toPlainText());
+    b.promptHistoryLimit = m_promptHistoryLimitSpin ? m_promptHistoryLimitSpin->value() : 50;
     return b;
 }

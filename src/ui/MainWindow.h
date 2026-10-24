@@ -18,6 +18,7 @@ class AiProvider;
 class AiTaskQueue;
 class SummaryWorker;
 class ThemeAndSyntaxDownloader;
+class PromptHistoryDock;
 struct AiTask;
 
 class MainWindow : public QMainWindow {
@@ -76,6 +77,7 @@ private:
     ProjectTreeModel* m_fsModel = nullptr;
 
     ContextInspectorDock* m_inspectorDock = nullptr;
+    PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
 

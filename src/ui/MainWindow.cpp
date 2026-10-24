@@ -8,6 +8,8 @@
 #include "AiDebugConsoleDock.h"
 #include "AiTaskQueueDock.h"
 #include "DiffViewerDialog.h"
+#include "MarkdownRenderer.h"
+#include "PromptHistoryDock.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
 #include "../editor/EditorTabWidget.h"
@@ -93,6 +95,12 @@ MainWindow::MainWindow(QWidget* parent)
     const QByteArray savedState = ConfigManager::instance().windowState();
     if (!savedState.isEmpty()) {
         restoreState(savedState);
+    }
+
+    // Гарантируем адекватную начальную ширину правых док-панелей (не более ~32% ширины окна)
+    int maxRightDockW = qMax(340, width() / 3);
+    if (m_inspectorDock->width() > maxRightDockW || savedState.isEmpty()) {
+        resizeDocks({m_inspectorDock}, {360}, Qt::Horizontal);
     }
 
     m_downloader->ensureResourcesPresent();
@@ -184,6 +192,13 @@ void MainWindow::setupUiAndDocks() {
     m_inspectorDock->setObjectName("ContextInspectorDock");
     addDockWidget(Qt::RightDockWidgetArea, m_inspectorDock);
 
+    // Док 2b: AI Prompt History
+    m_promptHistoryDock = new PromptHistoryDock(this);
+    m_promptHistoryDock->setObjectName("PromptHistoryDock");
+    addDockWidget(Qt::RightDockWidgetArea, m_promptHistoryDock);
+    tabifyDockWidget(m_inspectorDock, m_promptHistoryDock);
+    m_inspectorDock->raise();
+
     // Док 3: AI Task Queue
     m_taskQueueDock = new AiTaskQueueDock(m_taskQueue, this);
     m_taskQueueDock->setObjectName("AiTaskQueueDock");
@@ -262,6 +277,7 @@ void MainWindow::setupMenus() {
     QMenu* viewMenu = menuBar()->addMenu("&View");
     viewMenu->addAction(m_projectDock->toggleViewAction());
     viewMenu->addAction(m_inspectorDock->toggleViewAction());
+    viewMenu->addAction(m_promptHistoryDock->toggleViewAction());
     viewMenu->addAction(m_taskQueueDock->toggleViewAction());
     viewMenu->addAction(m_debugConsoleDock->toggleViewAction());
     viewMenu->addSeparator();
@@ -311,6 +327,10 @@ void MainWindow::setupMenus() {
     aiMenu->addAction("Show AI API Debug Console", this, [this]() {
         m_debugConsoleDock->show();
         m_debugConsoleDock->raise();
+    });
+    aiMenu->addAction("Show AI Prompt History", this, [this]() {
+        m_promptHistoryDock->show();
+        m_promptHistoryDock->raise();
     });
     aiMenu->addSeparator();
     aiMenu->addAction("Preferences...", this, &MainWindow::onAiPreferences);
@@ -385,6 +405,17 @@ void MainWindow::setupConnections() {
             m_inspectorDock, &ContextInspectorDock::appendLiveSummaryChunk);
     connect(m_summaryWorker, &SummaryWorker::summaryStreamingReset,
             m_inspectorDock, &ContextInspectorDock::resetLiveSummary);
+
+    connect(m_promptHistoryDock, &PromptHistoryDock::usePromptRequested, this, [this](const QString& promptText) {
+        CodeEditor* ed = m_tabWidget->currentEditor();
+        if (!ed) {
+            ed = m_tabWidget->newDocument();
+            updateCentralViewState();
+        }
+        if (ed) {
+            ed->triggerCustomPromptWithText(promptText);
+        }
+    });
 }
 
 void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
@@ -651,12 +682,12 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle("AI Code Explanation");
-    dlg->resize(720, 540);
+    dlg->resize(740, 560);
     auto* lay = new QVBoxLayout(dlg);
     auto* view = new QTextEdit(dlg);
     view->setReadOnly(true);
-    view->document()->setIndentWidth(16);
-    view->setMarkdown(resultText);
+    MarkdownRenderer::configureViewer(view);
+    view->setHtml(MarkdownRenderer::toHtml(resultText));
     lay->addWidget(view);
     dlg->show();
 }

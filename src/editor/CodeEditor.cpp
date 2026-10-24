@@ -248,28 +248,38 @@ void CodeEditor::cancelAndRollbackAiEdit() {
 }
 
 void CodeEditor::triggerAiAction(AiEditAction action) {
-    if (m_isAiBusy) return;
-    QString customInst;
     if (action == AiEditAction::CustomPrompt) {
-        bool ok = false;
-        QString lastPrompt = ConfigManager::instance().lastCustomPrompt();
-        customInst = QInputDialog::getMultiLineText(
-            this,
-            "AI Custom Prompt",
-            "Enter instructions for the LLM:",
-            lastPrompt,
-            &ok);
-        if (!ok || customInst.trimmed().isEmpty()) return;
-        customInst = customInst.trimmed();
-        ConfigManager::instance().setLastCustomPrompt(customInst);
+        triggerCustomPromptWithText(ConfigManager::instance().lastCustomPrompt());
+        return;
     }
+    if (m_isAiBusy) return;
 
     QTextCursor c = textCursor();
     QString targetText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
-    if (targetText.trimmed().isEmpty() && action != AiEditAction::CustomPrompt && action != AiEditAction::CompleteCode)
+    if (targetText.trimmed().isEmpty() && action != AiEditAction::CompleteCode)
         return;
 
-    emit aiActionRequested(this, action, targetText, customInst);
+    emit aiActionRequested(this, action, targetText, {});
+}
+
+void CodeEditor::triggerCustomPromptWithText(const QString& initialPromptText) {
+    if (m_isAiBusy) return;
+    bool ok = false;
+    QString customInst = QInputDialog::getMultiLineText(
+        this,
+        "AI Custom Prompt",
+        "Enter instructions for the LLM:",
+        initialPromptText,
+        &ok);
+    if (!ok || customInst.trimmed().isEmpty()) return;
+    customInst = customInst.trimmed();
+
+    // Сохраняет промпт и автоматически поднимает его в глобальной истории по SHA-256
+    ConfigManager::instance().setLastCustomPrompt(customInst);
+
+    QTextCursor c = textCursor();
+    QString targetText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
+    emit aiActionRequested(this, AiEditAction::CustomPrompt, targetText, customInst);
 }
 
 void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {

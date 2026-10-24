@@ -88,4 +88,5 @@ private:
     QPlainTextEdit* m_promptEdit = nullptr;
     QPushButton* m_resetCurrentPromptBtn = nullptr;
     QPushButton* m_resetAllPromptsBtn = nullptr;
+    QSpinBox* m_promptHistoryLimitSpin = nullptr;
 };

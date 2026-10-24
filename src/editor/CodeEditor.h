@@ -32,6 +32,7 @@ public:
     QString syntaxLanguage() const;
 
     void triggerAiAction(AiEditAction action);
+    void triggerCustomPromptWithText(const QString& initialPromptText);
     void setAiBusy(bool busy, const QString& statusText = {});
     bool isAiBusy() const { return m_isAiBusy; }
 
