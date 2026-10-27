@@ -33,7 +33,6 @@ private slots:
     void onBackendChanged(int index);
     void onFetchModelsClicked();
     void onSyncSyntaxExtensionsClicked();
-
     void onPromptSelectionChanged(int index);
     void onResetCurrentPromptClicked();
     void onResetAllPromptsClicked();
@@ -74,6 +73,7 @@ private:
     QComboBox* m_autoSummaryModeCombo = nullptr;
     QCheckBox* m_useDocSummaryCheck = nullptr;
     QCheckBox* m_useProjSummaryCheck = nullptr;
+    QComboBox* m_projCustomPromptCtxCombo = nullptr;
     QCheckBox* m_useSyntaxExtensionsCheck = nullptr;
     QLineEdit* m_allowedFilenamesEdit = nullptr;
     QPlainTextEdit* m_allowedExtensionsEdit = nullptr;

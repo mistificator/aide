@@ -100,6 +100,9 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
         bool isSummary = (task.targetType == TaskTargetType::FileSummary || task.targetType == TaskTargetType::ProjectSummary);
         task.maxOutputTokens = isSummary ? cfg.maxOutputSummaryTokens : cfg.maxOutputCodeTokens;
     }
+    if (task.contextWindow <= 0) {
+        task.contextWindow = ConfigManager::instance().aiConfig().contextWindow;
+    }
     task.expectedTokens = estimateExpectedTokens(task);
 
     if (task.priority == TaskPriority::High_UserAction) {
@@ -122,6 +125,7 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
                 existing.systemPrompt = task.systemPrompt;
                 existing.userPrompt = task.userPrompt;
                 existing.maxOutputTokens = task.maxOutputTokens;
+                existing.contextWindow = task.contextWindow;
                 existing.expectedTokens = task.expectedTokens;
                 emitStatus();
                 return existing.taskId;
@@ -277,9 +281,12 @@ void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
 
 void AiTaskQueue::processNext() {
     if (m_isProcessing) return;
-    while (!m_highQueue.isEmpty() && m_highQueue.head().priority == TaskPriority::High_UserAction && !m_highQueue.head().targetEditor)
+    while (!m_highQueue.isEmpty() &&
+           m_highQueue.head().priority == TaskPriority::High_UserAction &&
+           m_highQueue.head().targetType != TaskTargetType::ProjectCustomPrompt &&
+           !m_highQueue.head().targetEditor) {
         m_highQueue.dequeue();
-
+    }
     if (!m_highQueue.isEmpty()) m_currentTask = m_highQueue.dequeue();
     else if (!m_lowQueue.isEmpty()) m_currentTask = m_lowQueue.dequeue();
     else { emitStatus(); return; }
@@ -300,20 +307,23 @@ void AiTaskQueue::processNext() {
             m_currentTask.targetEditor->beginAiStreamEdit();
     }
 
-    const auto& cfg = ConfigManager::instance().aiConfig();
+    AiConnectionConfig reqCfg = ConfigManager::instance().aiConfig();
+    if (m_currentTask.contextWindow > 0) {
+        reqCfg.contextWindow = m_currentTask.contextWindow;
+    }
     int maxTokens = m_currentTask.maxOutputTokens > 0
                         ? m_currentTask.maxOutputTokens
                         : ((m_currentTask.targetType == TaskTargetType::FileSummary ||
                             m_currentTask.targetType == TaskTargetType::ProjectSummary)
-                               ? cfg.maxOutputSummaryTokens
-                               : cfg.maxOutputCodeTokens);
+                               ? reqCfg.maxOutputSummaryTokens
+                               : reqCfg.maxOutputCodeTokens);
 
     emit taskStarted(m_currentTask);
     m_provider->sendRequest(m_currentTask.taskId,
                             m_currentTask.systemPrompt,
                             m_currentTask.userPrompt,
                             m_currentTask.stream,
-                            cfg,
+                            reqCfg,
                             maxTokens);
 }
 

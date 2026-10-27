@@ -121,15 +121,38 @@ void ThemeAndSyntaxDownloader::registerDownloadedSyntaxMetadata(const QString& l
     QString fileName = QFileInfo(localXmlPath).fileName();
     QString langId = QFileInfo(localXmlPath).baseName().toLower();
 
-    auto existing = ConfigManager::instance().ruleForLanguage(langId);
+    bool existedBefore = ConfigManager::instance().hasFileTypeRule(langId);
+    FileTypeRule existing = ConfigManager::instance().ruleForLanguage(langId);
+
     FileTypeRule rule;
     rule.langId = langId;
     rule.displayName = meta.name;
     rule.syntaxFile = fileName;
-    rule.extensions = !existing.extensions.isEmpty() && existing.syntaxFile == fileName
-                          ? existing.extensions
-                          : meta.extensions;
-    if (rule.extensions.isEmpty()) rule.extensions = {langId};
+
+    // Приоритет отдаём расширениям из официального KDE XML и встроенного справочника
+    QStringList finalExts = meta.extensions;
+    if (finalExts.isEmpty()) {
+        finalExts = ConfigManager::knownExtensionsForLanguage(langId);
+    }
+
+    // Если правило уже существовало в конфиге, сохраняем дополнительные пользовательские расширения
+    // (отфильтровывая ошибочную авто-заглушку, совпадающую с самим langId, например "pascal")
+    if (existedBefore && existing.syntaxFile == fileName) {
+        for (const QString& ext : existing.extensions) {
+            QString clean = ext.trimmed().toLower();
+            if (clean.isEmpty()) continue;
+            if (clean == langId && !meta.extensions.contains(langId)) continue;
+            if (!finalExts.contains(clean)) {
+                finalExts.append(clean);
+            }
+        }
+    }
+
+    if (finalExts.isEmpty()) {
+        finalExts = {langId};
+    }
+
+    rule.extensions = finalExts;
     ConfigManager::instance().upsertFileTypeRule(rule);
 }
 

@@ -8,7 +8,13 @@
 #include "../editor/CodeEditor.h"
 
 enum class TaskPriority { High_UserAction, Low_BackgroundSummary };
-enum class TaskTargetType { ModifyEditorCode, ExplainToDialog, FileSummary, ProjectSummary };
+enum class TaskTargetType {
+    ModifyEditorCode,
+    ExplainToDialog,
+    ProjectCustomPrompt,
+    FileSummary,
+    ProjectSummary
+};
 
 struct AiTask {
     QString taskId, filePath, fileSha256, llmModel, systemPrompt, userPrompt;
@@ -16,11 +22,12 @@ struct AiTask {
     TaskTargetType targetType = TaskTargetType::ModifyEditorCode;
     QPointer<CodeEditor> targetEditor;
     int maxOutputTokens = 0;
+    int contextWindow = 0;
     int expectedTokens = 512;
     bool stream = true;
     bool isThinking = false;
 
-    // Живая статистика и прогресс
+    // Метрики выполнения в реальном времени
     int generatedTokens = 0;
     int thinkingTokens = 0;
     qint64 elapsedMs = 0;

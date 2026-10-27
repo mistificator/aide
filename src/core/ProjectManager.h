@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QDateTime>
+#include "ConfigManager.h"
 
 struct FileContextData {
     QString relativePath;
@@ -42,6 +43,8 @@ public:
 
     FileContextData fileContext(const QString& absoluteOrRelPath) const;
     bool hasFileSummary(const QString& absoluteOrRelPath) const;
+    int indexedFilesCount() const;
+    QStringList indexedFilePaths() const;
 
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
     void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
@@ -54,6 +57,26 @@ public:
     QString toRelativePath(const QString& path) const;
     QString buildEffectiveSystemContext(const QString& filePath) const;
     QString buildAggregatedFilesDigest() const;
+
+    // Сборка единого Markdown-документа из выбранных пользователем файлов проекта
+    QString buildSelectedFilesSourceMarkdown(const QStringList& selectedFilePaths,
+                                             const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                             int* outIncludedFilesCount = nullptr) const;
+
+    // Сборка единого Markdown-документа из всех проиндексированных файлов проекта
+    QString buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                            int* outIncludedFilesCount = nullptr) const;
+
+    // Сборка контекста для Custom Prompt по проекту с явным списком выбранных файлов
+    QString buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                            const QStringList& selectedFilePaths,
+                                            const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                            int* outIncludedFilesCount = nullptr) const;
+
+    // Перегрузка по умолчанию (использует все проиндексированные файлы)
+    QString buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                            const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                            int* outIndexedFilesCount = nullptr) const;
 
     static QString computeSha256(const QByteArray& data);
 

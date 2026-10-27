@@ -83,7 +83,52 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
     auto* btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     mainLay->addWidget(btnBox);
 
+    ConfigManager::instance().repairFileTypeExtensions();
     populateTable(ConfigManager::instance().fileTypeRules());
+
+    // Автоматически подставляем известные расширения и имя .xml файла, когда пользователь меняет Language ID в таблице
+    connect(m_table, &QTableWidget::cellChanged, this, [this](int row, int col) {
+        if (col != 0) return;
+        auto* langItem = m_table->item(row, 0);
+        if (!langItem) return;
+        QString langId = langItem->text().trimmed().toLower();
+        if (langId.isEmpty() || langId == "custom") return;
+
+        m_table->blockSignals(true);
+        auto* nameItem = m_table->item(row, 1);
+        auto* xmlItem = m_table->item(row, 2);
+        auto* extItem = m_table->item(row, 3);
+
+        QString xmlFile = langId + ".xml";
+        if (xmlItem && (xmlItem->text().trimmed().isEmpty() || xmlItem->text() == "custom.xml")) {
+            xmlItem->setText(xmlFile);
+        }
+
+        QString localXmlPath = ConfigManager::instance().syntaxDirPath() + "/" + (xmlItem ? xmlItem->text().trimmed() : xmlFile);
+        QStringList knownExts;
+        QString dispName;
+        if (QFile::exists(localXmlPath)) {
+            auto meta = LexicalHighlighter::inspectSyntaxXml(localXmlPath);
+            if (meta.valid) {
+                dispName = meta.name;
+                knownExts = meta.extensions;
+            }
+        }
+        if (knownExts.isEmpty()) {
+            knownExts = ConfigManager::knownExtensionsForLanguage(langId);
+        }
+
+        if (nameItem && (nameItem->text().trimmed().isEmpty() || nameItem->text() == "Custom Language")) {
+            nameItem->setText(dispName.isEmpty() ? langId.toUpper() : dispName);
+        }
+        if (extItem && !knownExts.isEmpty()) {
+            QString curExt = extItem->text().trimmed().toLower();
+            if (curExt.isEmpty() || curExt == "ext" || curExt == langId) {
+                extItem->setText(knownExts.join(", "));
+            }
+        }
+        m_table->blockSignals(false);
+    });
 
     connect(resetUrlBtn, &QPushButton::clicked, this, [this]() {
         m_baseUrlEdit->setText("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
@@ -192,7 +237,12 @@ void EditorPreferencesDialog::onImportLocalSyntaxFile() {
     r.langId = fi.baseName().toLower();
     r.displayName = meta.valid ? meta.name : fi.baseName().toUpper();
     r.syntaxFile = fi.fileName();
-    r.extensions = meta.valid && !meta.extensions.isEmpty() ? meta.extensions : QStringList{r.langId};
+    r.extensions = (meta.valid && !meta.extensions.isEmpty())
+                       ? meta.extensions
+                       : ConfigManager::knownExtensionsForLanguage(r.langId);
+    if (r.extensions.isEmpty()) {
+        r.extensions = {r.langId};
+    }
 
     auto current = collectRulesFromTable();
     ConfigManager::instance().setFileTypeRules(current);

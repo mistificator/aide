@@ -1,5 +1,7 @@
 // src/core/ConfigManager.cpp
 #include "ConfigManager.h"
+#include "../syntax/LexicalHighlighter.h"
+#include <QMimeDatabase>
 #include <QStandardPaths>
 #include <QDir>
 #include <QFile>
@@ -8,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QCryptographicHash>
+#include <QSet>
 #include <algorithm>
 
 ConfigManager::ConfigManager(QObject* parent) : QObject(parent) {
@@ -36,7 +39,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     AiConnectionConfig ollamaLocal;
     ollamaLocal.profileName = "Ollama (Offline)";
     ollamaLocal.backend = AiBackendType::Ollama;
-    ollamaLocal.endpointUrl = "[http://127.0.0.1:11434](http://127.0.0.1:11434)";
+    ollamaLocal.endpointUrl = "http://127.0.0.1:11434";
     ollamaLocal.modelName = "qwen2.5-coder:7b";
     ollamaLocal.maxOutputCodeTokens = 65536;
     ollamaLocal.maxOutputSummaryTokens = 1024;
@@ -54,7 +57,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     AiConnectionConfig ollamaOnline;
     ollamaOnline.profileName = "Ollama.com (Online)";
     ollamaOnline.backend = AiBackendType::Ollama;
-    ollamaOnline.endpointUrl = "[https://ollama.com](https://ollama.com)";
+    ollamaOnline.endpointUrl = "https://ollama.com";
     ollamaOnline.modelName = "qwen2.5-coder:7b";
     ollamaOnline.maxOutputCodeTokens = 65536;
     ollamaOnline.maxOutputSummaryTokens = 1024;
@@ -68,6 +71,7 @@ AiBehaviorConfig ConfigManager::defaultAiBehavior() {
     b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
     b.includeDocumentSummaryInPrompt = true;
     b.includeProjectSummaryInPrompt = true;
+    b.projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     b.summaryUseSyntaxExtensions = true;
     b.promptHistoryLimit = 50;
     b.summaryAllowedFilenames = {
@@ -111,17 +115,43 @@ bool ConfigManager::initializeStorage() {
 }
 
 QJsonObject ConfigManager::defaultPromptTemplates() {
+    const QString noEllipsisRule =
+        " STRICT RULE: NEVER truncate code, NEVER use ellipses (`...`), and NEVER write lazy placeholder comments "
+        "(such as `// ... rest of the code`, `// ... similar for other methods`, or `// TODO: implement`). "
+        "Every single function, switch case, and block MUST be written in full. "
+        "Output ONLY raw code without markdown fences:";
+
     return {
-        {"ExplainCode", "Explain the logic, architecture, and potential pitfalls of the following code clearly and concisely:"},
-        {"RefactorCode", "Refactor the following code to improve readability, structure, and idiomatic style. Output ONLY raw code without markdown fences:"},
-        {"FindBugs", "Find potential bugs, memory leaks, edge cases, or vulnerabilities in the following code and fix them. Output ONLY raw code without markdown fences:"},
-        {"OptimizePerformance", "Optimize the algorithmic complexity and memory usage of the following code. Output ONLY raw code without markdown fences:"},
-        {"AddDocumentation", "Add comprehensive documentation comments (Doxygen/Docstrings) to the following code. Output ONLY raw code without markdown fences:"},
-        {"GenerateUnitTests", "Generate unit tests covering main scenarios and edge cases for the following code. Output ONLY raw code without markdown fences:"},
-        {"CompleteCode", "Complete the implementation of the following code based on its context and signatures. Output ONLY raw code without markdown fences:"},
-        {"CustomPrompt", "If modifying code, output ONLY raw code without markdown fences:"},
-        {"FileSummary", "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
-        {"ProjectSummary", "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
+        {"ExplainCode",
+         "Explain the logic, architecture, and potential pitfalls of the following code clearly and concisely:"},
+        {"RefactorCode",
+         "Refactor the following code to improve readability, structure, and idiomatic style." + noEllipsisRule},
+        {"FindBugs",
+         "Find potential bugs, memory leaks, edge cases, or vulnerabilities in the following code and fix them." + noEllipsisRule},
+        {"OptimizePerformance",
+         "Optimize the algorithmic complexity and memory usage of the following code." + noEllipsisRule},
+        {"AddDocumentation",
+         "Add comprehensive documentation comments (Doxygen/Docstrings) to the following code." + noEllipsisRule},
+        {"GenerateUnitTests",
+         "Generate complete, compilable unit tests covering main scenarios and edge cases for the following code." + noEllipsisRule},
+        {"CompleteCode",
+         "Complete the implementation of the following code based on its context and signatures." + noEllipsisRule},
+        {"CustomPrompt",
+         "If modifying or generating code, output ONLY raw, complete code without markdown fences. "
+         "NEVER use ellipses (`...`) or placeholder comments like `// ... rest is similar` — write all code in full:"},
+        {"ProjectCustomPrompt",
+         "Provide a comprehensive, well-structured response in Markdown format. "
+         "When outputting files or code fragments, always use fenced code blocks with the language identifier "
+         "and precede each file block with a Markdown heading containing its relative path (e.g., `### File: src/path/file.ext`).\n"
+         "CRITICAL CODE GENERATION RULE: NEVER use ellipses (`...`), omitted blocks, or placeholder comments inside code "
+         "(such as `// ... rest of the file`, `// ... handle other cases similarly`, `/* ... */`, or `// TODO`). "
+         "Write every line of code completely. Always prefer outputting the complete file; if a file is too large to fit "
+         "entirely, output the complete, unabridged, self-contained code of the modified functions/classes/sections "
+         "without any internal omissions or placeholders:"},
+        {"FileSummary",
+         "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
+        {"ProjectSummary",
+         "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
     };
 }
 
@@ -155,11 +185,10 @@ void ConfigManager::setPromptTemplates(const QJsonObject& templates) {
 
 void ConfigManager::enforcePromptHistoryLimit() {
     int limit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);
-    // Стабильно держим приколотые в начале списка, неприколотые — после них
+
     std::stable_partition(m_promptHistory.begin(), m_promptHistory.end(),
                           [](const PromptHistoryItem& item) { return item.pinned; });
 
-    // Удаляем с конца неприколотые элементы, если превышен лимит
     while (m_promptHistory.size() > limit) {
         int lastUnpinned = -1;
         for (int i = m_promptHistory.size() - 1; i >= 0; --i) {
@@ -179,6 +208,7 @@ void ConfigManager::enforcePromptHistoryLimit() {
 void ConfigManager::setPromptHistory(const QVector<PromptHistoryItem>& items) {
     m_promptHistory.clear();
     QSet<QString> seenHashes;
+
     for (auto it : items) {
         it.text = it.text.trimmed();
         if (it.text.isEmpty()) continue;
@@ -188,6 +218,7 @@ void ConfigManager::setPromptHistory(const QVector<PromptHistoryItem>& items) {
         if (!it.updatedAt.isValid()) it.updatedAt = QDateTime::currentDateTimeUtc();
         m_promptHistory.append(it);
     }
+
     enforcePromptHistoryLimit();
     saveConfig();
     emit promptHistoryChanged();
@@ -218,10 +249,8 @@ void ConfigManager::addPromptToHistory(const QString& promptText) {
         item.text = clean;
         item.updatedAt = now;
         if (item.pinned) {
-            // Приколотый поднимаем на самый верх приколотых
             m_promptHistory.prepend(item);
         } else {
-            // Пересчитываем границу приколотых после takeAt и ставим первым среди неприколотых
             int insertPos = 0;
             while (insertPos < m_promptHistory.size() && m_promptHistory[insertPos].pinned) {
                 ++insertPos;
@@ -284,7 +313,7 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     AiConnectionConfig cfg;
     cfg.profileName = ai["profileName"].toString(fallbackName);
     cfg.backend = static_cast<AiBackendType>(ai["backend"].toInt(0));
-    cfg.endpointUrl = ai["endpointUrl"].toString("[http://127.0.0.1:11434](http://127.0.0.1:11434)");
+    cfg.endpointUrl = ai["endpointUrl"].toString("http://127.0.0.1:11434");
     cfg.apiKey = ai["apiKey"].toString();
     cfg.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
     cfg.temperature = ai["temperature"].toDouble(0.2);
@@ -298,7 +327,7 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
 
     if (cfg.profileName == "KoboldCpp (Offline)" &&
         cfg.backend == AiBackendType::KoboldCpp &&
-        (cfg.endpointUrl == "[http://127.0.0.1:5001](http://127.0.0.1:5001)" || cfg.endpointUrl == "http://localhost:5001")) {
+        (cfg.endpointUrl == "http://127.0.0.1:5001" || cfg.endpointUrl == "http://localhost:5001")) {
         cfg.backend = AiBackendType::OpenAiCompatible;
         cfg.endpointUrl = "http://localhost:5001/v1/";
     }
@@ -310,12 +339,13 @@ void ConfigManager::loadConfig() {
     if (cfgFile.open(QIODevice::ReadOnly)) {
         auto obj = QJsonDocument::fromJson(cfgFile.readAll()).object();
         m_activeTheme = obj["activeTheme"].toString("dracula");
+        m_projectExplorerFilterSupported = obj["projectExplorerFilterSupported"].toBool(false);
         m_lastProjectPath = obj["lastProjectPath"].toString();
         m_lastDialogDir = obj["lastDialogDir"].toString();
         m_lastCustomPrompt = obj["lastCustomPrompt"].toString();
         m_windowGeometry = QByteArray::fromBase64(obj["windowGeometry"].toString().toLatin1());
         m_windowState = QByteArray::fromBase64(obj["windowState"].toString().toLatin1());
-        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("[https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/](https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/)");
+        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
 
         m_recentProjects.clear();
         for (const auto& v : obj["recentProjects"].toArray()) {
@@ -364,6 +394,10 @@ void ConfigManager::loadConfig() {
             m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
+            int projCtxVal = beh["projectCustomPromptContextMode"].toInt(
+                static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+            m_aiBehavior.projectCustomPromptContextMode =
+                static_cast<ProjectCustomPromptContextMode>(qBound(0, projCtxVal, 2));
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
             m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
 
@@ -402,6 +436,7 @@ void ConfigManager::loadConfig() {
                 if (hash.isEmpty()) hash = computePromptHash(txt);
                 if (seen.contains(hash)) continue;
                 seen.insert(hash);
+
                 PromptHistoryItem item;
                 item.text = txt;
                 item.sha256 = hash;
@@ -446,6 +481,195 @@ void ConfigManager::loadConfig() {
             }
         }
     }
+
+    repairFileTypeExtensions();
+}
+
+bool ConfigManager::hasFileTypeRule(const QString& langId) const {
+    for (const auto& r : m_fileTypes) {
+        if (r.langId.compare(langId, Qt::CaseInsensitive) == 0) return true;
+    }
+    return false;
+}
+
+QStringList ConfigManager::knownExtensionsForLanguage(const QString& langIdOrFile) {
+    QString key = QFileInfo(langIdOrFile).baseName().toLower().trimmed();
+    if (key.isEmpty()) key = langIdOrFile.toLower().trimmed();
+
+    static const QMap<QString, QStringList> kKnownMap = {
+        {"abap", {"abap"}},
+        {"actionscript", {"as"}},
+        {"ada", {"adb", "ads", "ada"}},
+        {"apache", {"conf", "htaccess"}},
+        {"asm", {"asm", "s", "inc"}},
+        {"asm6502", {"asm", "s"}},
+        {"avr", {"asm", "inc"}},
+        {"awk", {"awk"}},
+        {"bash", {"sh", "bash", "zsh", "ebuild"}},
+        {"bat", {"bat", "cmd"}},
+        {"Bibtex", {"bib"}},
+        {"bison", {"y", "yy"}},
+        {"c", {"c", "h"}},
+        {"cg", {"cg", "cgfx"}},
+        {"clojure", {"clj", "cljs", "cljc", "edn"}},
+        {"cmake", {"cmake"}},
+        {"cobol", {"cbl", "cob", "cpy"}},
+        {"coffee", {"coffee"}},
+        {"commonlisp", {"lisp", "cl", "el"}},
+        {"cpp", {"cpp", "cxx", "cc", "hpp", "hxx", "hh", "h", "inl"}},
+        {"cs", {"cs"}},
+        {"csharp", {"cs"}},
+        {"css", {"css"}},
+        {"cuda", {"cu", "cuh"}},
+        {"d", {"d", "di"}},
+        {"dart", {"dart"}},
+        {"diff", {"diff", "patch"}},
+        {"dockerfile", {"dockerfile"}},
+        {"dosbat", {"bat", "cmd"}},
+        {"doxygen", {"dox"}},
+        {"elixir", {"ex", "exs"}},
+        {"elm", {"elm"}},
+        {"erlang", {"erl", "hrl"}},
+        {"fsharp", {"fs", "fsi", "fsx"}},
+        {"fortran", {"f", "for", "f90", "f95", "f03", "f08"}},
+        {"fortran-fixed", {"f", "for", "f77"}},
+        {"fortran-free", {"f90", "f95", "f03", "f08"}},
+        {"gdscript", {"gd"}},
+        {"glsl", {"glsl", "vert", "frag", "geom", "comp", "tesc", "tese"}},
+        {"gnuassembler", {"s", "S"}},
+        {"go", {"go"}},
+        {"graphql", {"graphql", "gql"}},
+        {"groovy", {"groovy", "gvy", "gy", "gradle"}},
+        {"haskell", {"hs", "lhs"}},
+        {"hlsl", {"hlsl", "fx", "fxh"}},
+        {"html", {"html", "htm", "xhtml"}},
+        {"ini", {"ini", "cfg", "conf"}},
+        {"isocpp", {"cpp", "cxx", "cc", "hpp", "hxx", "hh", "h"}},
+        {"java", {"java"}},
+        {"javascript", {"js", "mjs", "cjs", "jsx", "ts", "tsx"}},
+        {"json", {"json", "jsonc"}},
+        {"julia", {"jl"}},
+        {"kotlin", {"kt", "kts"}},
+        {"latex", {"tex", "sty", "cls", "bib"}},
+        {"lex", {"l", "lex", "fl"}},
+        {"less", {"less"}},
+        {"llvm", {"ll"}},
+        {"lua", {"lua"}},
+        {"m4", {"m4"}},
+        {"makefile", {"mk", "mak"}},
+        {"markdown", {"md", "markdown", "mdown"}},
+        {"matlab", {"m"}},
+        {"meson", {"build"}},
+        {"nasm", {"asm", "nasm", "inc"}},
+        {"nim", {"nim", "nims"}},
+        {"nix", {"nix"}},
+        {"objectivec", {"m", "mm", "h"}},
+        {"objectivecpp", {"mm", "M", "h"}},
+        {"ocaml", {"ml", "mli"}},
+        {"octave", {"m"}},
+        {"opencl", {"cl"}},
+        {"pascal", {"p", "pas", "pp", "inc", "lpr", "dpr"}},
+        {"perl", {"pl", "pm", "t"}},
+        {"php", {"php", "phtml", "php5", "php7", "phps"}},
+        {"powershell", {"ps1", "psm1", "psd1"}},
+        {"prolog", {"pl", "pro", "P"}},
+        {"protobuf", {"proto"}},
+        {"python", {"py", "pyw", "pyi"}},
+        {"qml", {"qml", "qbs"}},
+        {"r", {"r", "R", "rmd"}},
+        {" rst", {"rst"}},
+        {"rest", {"rst"}},
+        {"ruby", {"rb", "rake", "gemspec"}},
+        {"rust", {"rs"}},
+        {"scala", {"scala", "sc"}},
+        {"scheme", {"scm", "ss", "rkt"}},
+        {"scss", {"scss"}},
+        {" solidity", {"sol"}},
+        {"sql", {"sql", "ddl", "dml"}},
+        {"sql-mysql", {"sql"}},
+        {"sql-oracle", {"sql", "pls", "plb"}},
+        {"sql-postgresql", {"sql"}},
+        {"swift", {"swift"}},
+        {"systemverilog", {"sv", "svh"}},
+        {"tcl", {"tcl", "tk"}},
+        {"toml", {"toml"}},
+        {"typescript", {"ts", "tsx", "mts", "cts"}},
+        {"vala", {"vala", "vapi"}},
+        {"vbnet", {"vb"}},
+        {"verilog", {"v", "vh"}},
+        {"vhdl", {"vhd", "vhdl"}},
+        {"vim", {"vim"}},
+        {"xml", {"xml", "xsd", "xsl", "xslt", "svg", "ui", "qrc"}},
+        {"yaml", {"yml", "yaml"}},
+        {"zig", {"zig"}},
+        {"zsh", {"zsh"}}
+    };
+
+    if (kKnownMap.contains(key)) {
+        return kKnownMap.value(key);
+    }
+
+    // Резервный поиск через системную базу MIME-типов Qt6 (freedesktop.org shared-mime-info)
+    QMimeDatabase mimeDb;
+    const QStringList candidateMimes = {
+        "text/x-" + key,
+        "text/" + key,
+        "application/x-" + key,
+        "application/" + key
+    };
+    QStringList mimeExts;
+    for (const QString& mimeName : candidateMimes) {
+        QMimeType mt = mimeDb.mimeTypeForName(mimeName);
+        if (mt.isValid() && !mt.isDefault()) {
+            for (const QString& sfx : mt.suffixes()) {
+                QString clean = sfx.toLower().trimmed();
+                if (!clean.isEmpty() && !mimeExts.contains(clean)) {
+                    mimeExts.append(clean);
+                }
+            }
+        }
+    }
+    return mimeExts;
+}
+
+void ConfigManager::repairFileTypeExtensions() {
+    bool modified = false;
+    QString synDir = syntaxDirPath();
+
+    for (auto& r : m_fileTypes) {
+        // Проверяем, не состоит ли список расширений только из самого langId (следствие прежнего бага с заглушкой)
+        bool hasOnlyDummySelfExt = (r.extensions.isEmpty() ||
+                                    (r.extensions.size() == 1 &&
+                                     r.extensions.first().compare(r.langId, Qt::CaseInsensitive) == 0));
+
+        QStringList resolvedExts;
+        QString localXml = synDir + "/" + (r.syntaxFile.isEmpty() ? (r.langId + ".xml") : r.syntaxFile);
+        if (QFile::exists(localXml)) {
+            auto meta = LexicalHighlighter::inspectSyntaxXml(localXml);
+            if (meta.valid) {
+                if (!meta.name.isEmpty() && (r.displayName.isEmpty() || r.displayName == r.langId.toUpper())) {
+                    r.displayName = meta.name;
+                    modified = true;
+                }
+                resolvedExts = meta.extensions;
+            }
+        }
+
+        if (resolvedExts.isEmpty()) {
+            resolvedExts = knownExtensionsForLanguage(r.langId);
+        }
+
+        if (hasOnlyDummySelfExt && !resolvedExts.isEmpty()) {
+            if (r.extensions != resolvedExts) {
+                r.extensions = resolvedExts;
+                modified = true;
+            }
+        }
+    }
+
+    if (modified) {
+        saveConfig();
+    }
 }
 
 void ConfigManager::saveConfig() {
@@ -467,6 +691,7 @@ void ConfigManager::saveConfig() {
         {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
+        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
         {"summaryAllowedFilenames", allowedFilesArr},
@@ -501,6 +726,7 @@ void ConfigManager::saveConfig() {
 
     QJsonObject root{
         {"activeTheme", m_activeTheme},
+        {"projectExplorerFilterSupported", m_projectExplorerFilterSupported},
         {"lastProjectPath", m_lastProjectPath},
         {"lastDialogDir", m_lastDialogDir},
         {"recentProjects", recentArr},
@@ -564,6 +790,13 @@ void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
     emit aiBehaviorChanged(m_aiBehavior);
 }
 
+void ConfigManager::setProjectExplorerFilterSupported(bool filterSupportedOnly) {
+    if (m_projectExplorerFilterSupported == filterSupportedOnly) return;
+    m_projectExplorerFilterSupported = filterSupportedOnly;
+    saveConfig();
+    emit projectExplorerFilterChanged(m_projectExplorerFilterSupported);
+}
+
 QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
     QStringList result;
     QString synDir = syntaxDirPath();
@@ -581,9 +814,39 @@ QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
     return result;
 }
 
+QStringList ConfigManager::supportedProjectFileNameFilters() const {
+    QStringList filters;
+    auto addExt = [&](QString ext) {
+        ext = ext.trimmed().toLower();
+        if (ext.startsWith("*.")) ext = ext.mid(2);
+        else if (ext.startsWith('.')) ext = ext.mid(1);
+        if (!ext.isEmpty()) {
+            QString mask = "*." + ext;
+            if (!filters.contains(mask, Qt::CaseInsensitive)) {
+                filters.append(mask);
+            }
+        }
+    };
+
+    for (const auto& r : m_fileTypes) {
+        for (const QString& ext : r.extensions) {
+            addExt(ext);
+        }
+    }
+    for (const QString& ext : m_aiBehavior.summaryAllowedExtensions) {
+        addExt(ext);
+    }
+    for (const QString& fn : m_aiBehavior.summaryAllowedFilenames) {
+        QString clean = fn.trimmed();
+        if (!clean.isEmpty() && !filters.contains(clean, Qt::CaseInsensitive)) {
+            filters.append(clean);
+        }
+    }
+    return filters;
+}
+
 bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown) const {
     if (filePath.isEmpty()) return false;
-
     QFileInfo fi(filePath);
     QString fileName = fi.fileName();
     QString ext = fi.suffix().toLower();
@@ -603,7 +866,6 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
                 return true;
             }
         }
-
         if (m_aiBehavior.summaryUseSyntaxExtensions) {
             const QStringList synExts = extensionsFromLoadedSyntaxes();
             if (synExts.contains(ext, Qt::CaseInsensitive)) {

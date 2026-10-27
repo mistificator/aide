@@ -35,11 +35,17 @@ PromptHistoryDock::PromptHistoryDock(QWidget* parent)
     // 2. Панель действий над выбранным промптом
     auto* btnRow = new QHBoxLayout();
     btnRow->setSpacing(4);
-    m_useBtn = new QPushButton("Use Prompt...", container);
-    m_useBtn->setToolTip("Open Custom Prompt dialog with this prompt text");
-    m_useBtn->setStyleSheet("QPushButton { background-color: #bd93f9; color: #191a24; font-weight: bold; border-radius: 3px; padding: 3px 8px; }"
+    m_useBtn = new QPushButton("Doc Prompt...", container);
+    m_useBtn->setToolTip("Open Document Custom Prompt dialog with this prompt text");
+    m_useBtn->setStyleSheet("QPushButton { background-color: #bd93f9; color: #191a24; font-weight: bold; border-radius: 3px; padding: 3px 6px; }"
                             "QPushButton:hover { background-color: #caa6ff; }"
                             "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_useProjectBtn = new QPushButton("Project...", container);
+    m_useProjectBtn->setToolTip("Open Custom Prompt for Project dialog with this prompt text");
+    m_useProjectBtn->setStyleSheet("QPushButton { background-color: #8be9fd; color: #191a24; font-weight: bold; border-radius: 3px; padding: 3px 6px; }"
+                                   "QPushButton:hover { background-color: #a4f0ff; }"
+                                   "QPushButton:disabled { background-color: #44475a; color: #888899; }");
 
     m_pinBtn = new QPushButton("Pin", container);
     m_pinBtn->setToolTip("Pin or unpin prompt at the top of the list");
@@ -54,6 +60,7 @@ PromptHistoryDock::PromptHistoryDock(QWidget* parent)
     m_deleteBtn->setToolTip("Delete selected prompt from history");
 
     btnRow->addWidget(m_useBtn, 1);
+    btnRow->addWidget(m_useProjectBtn);
     btnRow->addWidget(m_pinBtn);
     btnRow->addWidget(m_upBtn);
     btnRow->addWidget(m_downBtn);
@@ -106,6 +113,7 @@ PromptHistoryDock::PromptHistoryDock(QWidget* parent)
     connect(m_listWidget, &QListWidget::customContextMenuRequested, this, &PromptHistoryDock::onContextMenuRequested);
 
     connect(m_useBtn, &QPushButton::clicked, this, &PromptHistoryDock::onUseSelectedClicked);
+    connect(m_useProjectBtn, &QPushButton::clicked, this, &PromptHistoryDock::onUseSelectedForProjectClicked);
     connect(m_pinBtn, &QPushButton::clicked, this, &PromptHistoryDock::onTogglePinClicked);
     connect(m_upBtn, &QPushButton::clicked, this, &PromptHistoryDock::onMoveUpClicked);
     connect(m_downBtn, &QPushButton::clicked, this, &PromptHistoryDock::onMoveDownClicked);
@@ -220,6 +228,7 @@ void PromptHistoryDock::updateButtonsState() {
     QString editedText = m_editorEdit->toPlainText().trimmed();
 
     m_useBtn->setEnabled(hasSel || !editedText.isEmpty());
+    m_useProjectBtn->setEnabled(hasSel || !editedText.isEmpty());
     m_pinBtn->setEnabled(hasSel);
     m_deleteBtn->setEnabled(hasSel);
     m_addNewBtn->setEnabled(!editedText.isEmpty());
@@ -247,6 +256,15 @@ void PromptHistoryDock::onUseSelectedClicked() {
     }
     if (!textToUse.isEmpty()) {
         emit usePromptRequested(textToUse);
+    }
+}
+
+void PromptHistoryDock::onUseSelectedForProjectClicked() {
+    int idx = currentHistoryIndex();
+    const auto history = ConfigManager::instance().promptHistory();
+    QString textToUse = (idx >= 0 && idx < history.size()) ? history[idx].text : m_editorEdit->toPlainText().trimmed();
+    if (!textToUse.isEmpty()) {
+        emit useProjectPromptRequested(textToUse);
     }
 }
 
@@ -340,7 +358,8 @@ void PromptHistoryDock::onContextMenuRequested(const QPoint& pos) {
 
     QMenu menu(this);
     if (hasSel) {
-        menu.addAction("Use in Custom Prompt...", this, &PromptHistoryDock::onUseSelectedClicked);
+        menu.addAction("Use in Document Custom Prompt...", this, &PromptHistoryDock::onUseSelectedClicked);
+        menu.addAction("Use in Project Custom Prompt...", this, &PromptHistoryDock::onUseSelectedForProjectClicked);
         menu.addAction(history[idx].pinned ? "Unpin Prompt" : "Pin Prompt to Top",
                        this, &PromptHistoryDock::onTogglePinClicked);
         menu.addSeparator();

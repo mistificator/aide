@@ -10,6 +10,7 @@
 #include "DiffViewerDialog.h"
 #include "MarkdownRenderer.h"
 #include "PromptHistoryDock.h"
+#include "ProjectPromptResultDialog.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
 #include "../editor/EditorTabWidget.h"
@@ -18,6 +19,9 @@
 #include "../ai/SummaryWorker.h"
 #include "../syntax/ThemeAndSyntaxDownloader.h"
 
+#include <QComboBox>
+#include <QPlainTextEdit>
+#include <QDialogButtonBox>
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QTreeView>
@@ -42,6 +46,11 @@
 #include <QTextEdit>
 #include <QHeaderView>
 #include <QApplication>
+#include <QSplitter>
+#include <QGroupBox>
+#include <QFormLayout>
+#include <QSpinBox>
+#include <QCheckBox>
 
 class ProjectTreeModel : public QFileSystemModel {
 public:
@@ -142,10 +151,11 @@ void MainWindow::setupUiAndDocks() {
     m_centralStack->addWidget(m_tabWidget);
     setCentralWidget(m_centralStack);
 
-    // Док 1: Project Explorer с отображением пути к проекту
+    // Док 1: Project Explorer
     m_projectDock = new QDockWidget("Project Explorer", this);
     m_projectDock->setObjectName("ProjectExplorerDock");
     m_projectDockStack = new QStackedWidget(m_projectDock);
+
     auto* noProjExplorerLabel = new QLabel("No project loaded.\nUse File -> Open Folder / Project...", m_projectDockStack);
     noProjExplorerLabel->setAlignment(Qt::AlignCenter);
     noProjExplorerLabel->setStyleSheet("color: #777;");
@@ -160,24 +170,39 @@ void MainWindow::setupUiAndDocks() {
         "QWidget { background-color: rgba(128, 128, 150, 0.12); border-bottom: 1px solid rgba(128, 128, 150, 0.25); }");
     auto* pathHeaderLay = new QVBoxLayout(pathHeaderBox);
     pathHeaderLay->setContentsMargins(8, 5, 8, 5);
-    pathHeaderLay->setSpacing(1);
-
+    pathHeaderLay->setSpacing(3);
     auto* pathTitleLbl = new QLabel("PROJECT PATH:", pathHeaderBox);
     pathTitleLbl->setStyleSheet("color: #888899; font-size: 9px; font-weight: bold; border: none; background: transparent;");
     m_projectPathLabel = new QLabel("-", pathHeaderBox);
     m_projectPathLabel->setStyleSheet("color: #bd93f9; font-size: 11px; font-weight: bold; border: none; background: transparent;");
     m_projectPathLabel->setWordWrap(true);
     m_projectPathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    auto* filterRow = new QHBoxLayout();
+    filterRow->setContentsMargins(0, 2, 0, 0);
+    auto* filterLbl = new QLabel("Files:", pathHeaderBox);
+    filterLbl->setStyleSheet("color: #888899; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+    m_projectFilterCombo = new QComboBox(pathHeaderBox);
+    m_projectFilterCombo->addItem("All Files (*)", false);
+    m_projectFilterCombo->addItem("Supported Extensions Only", true);
+    m_projectFilterCombo->setCurrentIndex(ConfigManager::instance().projectExplorerFilterSupported() ? 1 : 0);
+    filterRow->addWidget(filterLbl);
+    filterRow->addWidget(m_projectFilterCombo, 1);
+
     pathHeaderLay->addWidget(pathTitleLbl);
     pathHeaderLay->addWidget(m_projectPathLabel);
+    pathHeaderLay->addLayout(filterRow);
 
     m_projectTree = new QTreeView(projExplorerPage);
     m_fsModel = new ProjectTreeModel(m_projectMgr, this);
     m_fsModel->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
+    m_fsModel->setNameFilterDisables(false);
     m_projectTree->setModel(m_fsModel);
     for (int col = 1; col < 4; ++col) m_projectTree->hideColumn(col);
     m_projectTree->header()->hide();
     m_projectTree->setContextMenuPolicy(Qt::CustomContextMenu);
+
+    applyProjectExplorerFilter();
 
     projExplorerLay->addWidget(pathHeaderBox);
     projExplorerLay->addWidget(m_projectTree, 1);
@@ -305,16 +330,19 @@ void MainWindow::setupMenus() {
     };
     for (const auto& [label, act] : aiActs)
         aiMenu->addAction(label, this, [this, act]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(act); });
+    aiMenu->addAction("Custom Prompt for Project...", QKeySequence("Ctrl+Shift+P"), this, [this]() {
+        onProjectCustomPrompt();
+    });
 
     aiMenu->addSeparator();
     aiMenu->addAction("Rebuild File Summary", this, [this]() {
         if (auto* e = m_tabWidget->currentEditor(); e && !e->filePath().isEmpty())
-            m_summaryWorker->forceRebuildFileSummary(e->filePath(), e->toPlainText().toUtf8());
+            rebuildSingleFileSummary(e->filePath(), true);
     });
     aiMenu->addAction("Generate Summaries for Project Files (Recursive)...", this, [this]() {
         onRecursiveProjectSummary();
     });
-    aiMenu->addAction("Rebuild Project Summary", m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
+    aiMenu->addAction("Rebuild Project Summary", this, &MainWindow::onRebuildProjectSummary);
     aiMenu->addAction("Cancel All Background Tasks", m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
     aiMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
         statusBar()->showMessage("Downloading syntax & theme files...", 3000);
@@ -378,9 +406,11 @@ void MainWindow::setupConnections() {
 
     connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 
-    connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, &MainWindow::rebuildSingleFileSummary);
+    connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, [this](const QString& path) {
+        rebuildSingleFileSummary(path, true);
+    });
     connect(m_inspectorDock, &ContextInspectorDock::clearFileSummaryClicked, this, &MainWindow::clearSingleFileSummary);
-    connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, m_summaryWorker, &SummaryWorker::forceRebuildProjectSummary);
+    connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, this, &MainWindow::onRebuildProjectSummary);
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
         m_projectTree->viewport()->update();
@@ -395,6 +425,8 @@ void MainWindow::setupConnections() {
 
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &MainWindow::onTaskCompleted);
     connect(m_taskQueue, &AiTaskQueue::taskFailed, this, &MainWindow::onTaskFailed);
+    connect(m_taskQueue, &AiTaskQueue::taskStreamChunk, this, &MainWindow::onTaskStreamChunk);
+    connect(m_taskQueue, &AiTaskQueue::taskCancelled, this, &MainWindow::onTaskCancelled);
 
     connect(m_downloader, &ThemeAndSyntaxDownloader::allDownloadsFinished, this, [this]() {
         statusBar()->showMessage("Syntax definitions and color schemes are up to date.", 4000);
@@ -416,18 +448,64 @@ void MainWindow::setupConnections() {
             ed->triggerCustomPromptWithText(promptText);
         }
     });
+    connect(m_promptHistoryDock, &PromptHistoryDock::useProjectPromptRequested, this, [this](const QString& promptText) {
+        onProjectCustomPrompt(promptText);
+    });
+
+    connect(m_projectFilterCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        bool filterOnly = m_projectFilterCombo->itemData(idx).toBool();
+        ConfigManager::instance().setProjectExplorerFilterSupported(filterOnly);
+    });
+    connect(&ConfigManager::instance(), &ConfigManager::projectExplorerFilterChanged, this, [this](bool filterOnly) {
+        int targetIdx = filterOnly ? 1 : 0;
+        if (m_projectFilterCombo->currentIndex() != targetIdx) {
+            m_projectFilterCombo->setCurrentIndex(targetIdx);
+        }
+        applyProjectExplorerFilter();
+    });
+    connect(&ConfigManager::instance(), &ConfigManager::fileTypesChanged, this, &MainWindow::applyProjectExplorerFilter);
+    connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
+        applyProjectExplorerFilter();
+    });
 }
 
-void MainWindow::rebuildSingleFileSummary(const QString& filePath) {
+void MainWindow::rebuildSingleFileSummary(const QString& filePath,
+                                          bool checkLimits,
+                                          int maxTokensOverride,
+                                          int ctxWindowOverride) {
     if (filePath.isEmpty()) return;
+
+    QByteArray content;
     if (auto* ed = m_tabWidget->findEditorByPath(filePath)) {
-        m_summaryWorker->forceRebuildFileSummary(filePath, ed->toPlainText().toUtf8());
-        return;
+        content = ed->toPlainText().toUtf8();
+    } else {
+        QFile f(filePath);
+        if (!f.open(QIODevice::ReadOnly)) return;
+        content = f.readAll();
     }
-    QFile f(filePath);
-    if (f.open(QIODevice::ReadOnly)) {
-        m_summaryWorker->forceRebuildFileSummary(filePath, f.readAll());
+    if (content.trimmed().isEmpty()) return;
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    int maxTokens = maxTokensOverride > 0 ? maxTokensOverride : cfg.maxOutputSummaryTokens;
+    int ctxWindow = ctxWindowOverride > 0 ? ctxWindowOverride : cfg.contextWindow;
+
+    if (checkLimits) {
+        QString relPath = m_projectMgr->toRelativePath(filePath);
+        QString sysPrompt = m_projectMgr->projectSystemPrompt();
+        QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+                             + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
+        if (!verifyAndAdjustContextLimits("Rebuild File Summary (" + relPath + ")",
+                                          sysPrompt,
+                                          userPrompt,
+                                          qMax(512, maxTokens),
+                                          true,
+                                          maxTokens,
+                                          ctxWindow)) {
+            return;
+        }
     }
+
+    m_summaryWorker->forceRebuildFileSummary(filePath, content, maxTokens, ctxWindow);
 }
 
 void MainWindow::clearSingleFileSummary(const QString& filePath) {
@@ -448,26 +526,546 @@ void MainWindow::clearSingleFileSummary(const QString& filePath) {
     statusBar()->showMessage("File summary cleared (marked as created & empty).", 3000);
 }
 
+QMap<QString, QString> MainWindow::collectOpenEditorBuffers() const {
+    QMap<QString, QString> buffers;
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        if (auto* ed = m_tabWidget->editorAt(i); ed && !ed->filePath().isEmpty()) {
+            buffers.insert(QFileInfo(ed->filePath()).absoluteFilePath(), ed->toPlainText());
+        }
+    }
+    return buffers;
+}
+
+int MainWindow::roundUpTokenStep(int needed, int maxCap) {
+    static constexpr int kSteps[] = {
+        1024, 2048, 4096, 8192, 12288, 16384, 24576, 32768,
+        49152, 65536, 98304, 131072, 196608, 262144, 524288, 1048576
+    };
+    for (int step : kSteps) {
+        if (step >= needed && step <= maxCap) return step;
+    }
+    int aligned = ((needed + 4095) / 4096) * 4096;
+    return qBound(1024, aligned, maxCap);
+}
+
+bool MainWindow::verifyAndAdjustContextLimits(const QString& taskTitle,
+                                              const QString& systemPrompt,
+                                              const QString& userPrompt,
+                                              int minRecommendedOutputTokens,
+                                              bool isSummaryTask,
+                                              int& inOutMaxOutputTokens,
+                                              int& inOutContextWindow) {
+    const int promptChars = systemPrompt.length() + userPrompt.length();
+    const int promptTokens = (promptChars + 3) / 4;
+    const int framingOverhead = 128;
+    const int effectivePromptTokens = promptTokens + framingOverhead;
+
+    const int maxOutCap = isSummaryTask ? 65536 : 262144;
+    const int minOutNeeded = qBound(64, minRecommendedOutputTokens, maxOutCap);
+
+    const bool outputLimitTooSmall = (inOutMaxOutputTokens < minOutNeeded);
+
+    // Оцениваем необходимый размер окна контекста: промпт + ожидаемый объём ответа
+    const int activeOutputReserve = qMax(minOutNeeded, qMin(inOutMaxOutputTokens, 4096));
+    const int requiredContextTokens = effectivePromptTokens + activeOutputReserve;
+    const bool contextTooSmall = (requiredContextTokens > inOutContextWindow);
+
+    if (!contextTooSmall && !outputLimitTooSmall) {
+        return true;
+    }
+
+    const int suggestedMaxOut = outputLimitTooSmall
+                                    ? roundUpTokenStep(minOutNeeded, maxOutCap)
+                                    : inOutMaxOutputTokens;
+    const int neededCtxWithSuggestedOut = effectivePromptTokens + qMax(minOutNeeded, qMin(suggestedMaxOut, 8192));
+    const int suggestedCtxWindow = contextTooSmall
+                                       ? qMax(inOutContextWindow, roundUpTokenStep(neededCtxWithSuggestedOut, 1048576))
+                                       : inOutContextWindow;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Context Window & Token Limit Check — " + taskTitle);
+    dlg.setMinimumWidth(540);
+
+    auto* mainLay = new QVBoxLayout(&dlg);
+
+    QString problemDesc;
+    if (contextTooSmall && outputLimitTooSmall) {
+        problemDesc = "The estimated prompt and output size exceed both the configured <b>Context Window</b> "
+                      "and <b>Max Output Tokens</b>.";
+    } else if (contextTooSmall) {
+        problemDesc = "The estimated prompt and response reserve exceed the configured <b>Context Window</b> "
+                      "(the LLM may truncate the prompt or fail to generate a full response).";
+    } else {
+        problemDesc = "The configured <b>Max Output Tokens</b> limit is smaller than the recommended output reserve "
+                      "for this task (the response may be cut off mid-generation).";
+    }
+
+    auto* infoLbl = new QLabel(
+        QString("<div style='line-height:1.45;'>"
+                "%1<br><br>"
+                "• <b>Estimated Input Prompt:</b> ~%2 tokens (%3 chars)<br>"
+                "• <b>Recommended Output Reserve:</b> ~%4 tokens<br>"
+                "• <b>Estimated Required Context:</b> ~%5 tokens<br>"
+                "• <b>Current Context Window:</b> <span style='color:%6; font-weight:bold;'>%7 tokens</span><br>"
+                "• <b>Current Max Output Tokens:</b> <span style='color:%8; font-weight:bold;'>%9 tokens</span>"
+                "</div>")
+            .arg(problemDesc)
+            .arg(effectivePromptTokens)
+            .arg(promptChars)
+            .arg(minOutNeeded)
+            .arg(neededCtxWithSuggestedOut)
+            .arg(contextTooSmall ? "#ff5555" : "#50fa7b")
+            .arg(inOutContextWindow)
+            .arg(outputLimitTooSmall ? "#ff5555" : "#50fa7b")
+            .arg(inOutMaxOutputTokens),
+        &dlg);
+    infoLbl->setWordWrap(true);
+    mainLay->addWidget(infoLbl);
+
+    auto* adjGroup = new QGroupBox("Adjust Context Window / Output Token Limits", &dlg);
+    auto* form = new QFormLayout(adjGroup);
+
+    auto* ctxSpin = new QSpinBox(adjGroup);
+    ctxSpin->setRange(1024, 1048576);
+    ctxSpin->setSingleStep(4096);
+    ctxSpin->setValue(suggestedCtxWindow);
+
+    auto* outSpin = new QSpinBox(adjGroup);
+    outSpin->setRange(64, maxOutCap);
+    outSpin->setSingleStep(isSummaryTask ? 256 : 1024);
+    outSpin->setValue(suggestedMaxOut);
+
+    form->addRow("New Context Window (tokens):", ctxSpin);
+    form->addRow(isSummaryTask ? "New Max Summary Tokens:" : "New Max Output Code Tokens:", outSpin);
+
+    const auto activeProfName = ConfigManager::instance().activeAiProfileName();
+    auto* saveProfileCheck = new QCheckBox(
+        QString("Save updated limits to active AI profile (%1)").arg(activeProfName),
+        adjGroup);
+    saveProfileCheck->setChecked(true);
+    form->addRow("", saveProfileCheck);
+
+    mainLay->addWidget(adjGroup);
+
+    auto* btnRow = new QHBoxLayout();
+    auto* increaseBtn = new QPushButton("Increase && Run", &dlg);
+    increaseBtn->setDefault(true);
+    increaseBtn->setStyleSheet(
+        "QPushButton { background-color: #50fa7b; color: #191a24; font-weight: bold; border-radius: 4px; padding: 6px 12px; }"
+        "QPushButton:hover { background-color: #69ff94; }");
+
+    auto* continueAsIsBtn = new QPushButton("Continue Without Changes", &dlg);
+    continueAsIsBtn->setToolTip("Run the prompt immediately using the current context window and token limits");
+
+    auto* cancelBtn = new QPushButton("Cancel", &dlg);
+
+    btnRow->addWidget(increaseBtn);
+    btnRow->addWidget(continueAsIsBtn);
+    btnRow->addStretch();
+    btnRow->addWidget(cancelBtn);
+    mainLay->addLayout(btnRow);
+
+    int userChoice = 0; // 0 = Cancel, 1 = Increase & Run, 2 = Continue Without Changes
+    connect(increaseBtn, &QPushButton::clicked, &dlg, [&]() {
+        userChoice = 1;
+        dlg.accept();
+    });
+    connect(continueAsIsBtn, &QPushButton::clicked, &dlg, [&]() {
+        userChoice = 2;
+        dlg.accept();
+    });
+    connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted || userChoice == 0) {
+        return false;
+    }
+
+    if (userChoice == 1) {
+        inOutContextWindow = ctxSpin->value();
+        inOutMaxOutputTokens = outSpin->value();
+
+        if (saveProfileCheck->isChecked()) {
+            AiConnectionConfig updatedCfg = ConfigManager::instance().aiConfig();
+            updatedCfg.contextWindow = inOutContextWindow;
+            if (isSummaryTask) {
+                updatedCfg.maxOutputSummaryTokens = inOutMaxOutputTokens;
+            } else {
+                updatedCfg.maxOutputCodeTokens = inOutMaxOutputTokens;
+            }
+            ConfigManager::instance().setAiConfig(updatedCfg);
+        }
+    }
+
+    return true;
+}
+
 void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
     if (!m_projectMgr->hasOpenProject()) {
         QMessageBox::information(this, "Recursive Summary", "Please open a project folder first.");
         return;
     }
-
     QString targetDir = startDir.isEmpty() ? m_projectMgr->projectRootPath() : startDir;
     RecursiveSummaryDialog dlg(m_projectMgr, targetDir, this);
     if (dlg.exec() != QDialog::Accepted) return;
 
     const QStringList files = dlg.selectedFilePaths();
-    int scheduled = 0;
+    if (files.isEmpty()) return;
+
+    // Находим самый крупный выбранный файл для предварительной оценки контекста перед постановкой пакета в очередь
+    QString largestPath;
+    QByteArray largestContent;
+    const auto openBuffers = collectOpenEditorBuffers();
     for (const QString& path : files) {
-        rebuildSingleFileSummary(path);
-        ++scheduled;
+        QByteArray raw;
+        QString abs = QFileInfo(path).absoluteFilePath();
+        if (openBuffers.contains(abs)) {
+            raw = openBuffers.value(abs).toUtf8();
+        } else {
+            QFile f(abs);
+            if (f.open(QIODevice::ReadOnly)) raw = f.readAll();
+        }
+        if (raw.size() > largestContent.size()) {
+            largestContent = raw;
+            largestPath = abs;
+        }
     }
 
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    int maxTokens = cfg.maxOutputSummaryTokens;
+    int ctxWindow = cfg.contextWindow;
+
+    if (!largestPath.isEmpty()) {
+        QString relPath = m_projectMgr->toRelativePath(largestPath);
+        QString sysPrompt = m_projectMgr->projectSystemPrompt();
+        QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+                             + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(largestContent));
+        if (!verifyAndAdjustContextLimits(
+                QString("Recursive Summary (Largest File: %1)").arg(relPath),
+                sysPrompt,
+                userPrompt,
+                qMax(512, maxTokens),
+                true,
+                maxTokens,
+                ctxWindow)) {
+            return;
+        }
+    }
+
+    int scheduled = 0;
+    for (const QString& path : files) {
+        rebuildSingleFileSummary(path, false, maxTokens, ctxWindow);
+        ++scheduled;
+    }
     if (scheduled > 0) {
         statusBar()->showMessage(QString("Queued %1 file(s) for background AI summary generation.").arg(scheduled), 5000);
     }
+}
+
+void MainWindow::onRebuildProjectSummary() {
+    QString digest = m_projectMgr->buildAggregatedFilesDigest();
+    if (digest.trimmed().isEmpty()) {
+        QMessageBox::information(this, "Rebuild Project Summary",
+                                 "No indexed file summaries available yet to synthesize a project summary.");
+        return;
+    }
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    int maxTokens = cfg.maxOutputSummaryTokens;
+    int ctxWindow = cfg.contextWindow;
+
+    QString sysPrompt = m_projectMgr->projectSystemPrompt();
+    QString userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
+
+    if (!verifyAndAdjustContextLimits("Rebuild Project Summary",
+                                      sysPrompt,
+                                      userPrompt,
+                                      qMax(1024, maxTokens),
+                                      true,
+                                      maxTokens,
+                                      ctxWindow)) {
+        return;
+    }
+
+    m_summaryWorker->forceRebuildProjectSummary(maxTokens, ctxWindow);
+}
+
+void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
+    if (!m_projectMgr->hasOpenProject()) {
+        QMessageBox::information(this, "Custom Prompt for Project",
+                                 "Please open a project folder first (File -> Open Folder / Project...).");
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("AI Custom Prompt for Project");
+    dlg.resize(840, 680);
+    auto* lay = new QVBoxLayout(&dlg);
+
+    bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() ||
+                      !m_projectMgr->buildAggregatedFilesDigest().trimmed().isEmpty();
+    int indexedCount = m_projectMgr->indexedFilesCount();
+
+    auto* statusLbl = new QLabel(
+        QString("<b>Project:</b> %1<br>"
+                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b></span>")
+            .arg(QDir::toNativeSeparators(m_projectMgr->projectRootPath()),
+                 hasSummary ? "Yes" : "No (Empty)",
+                 QString::number(indexedCount)),
+        &dlg);
+    statusLbl->setWordWrap(true);
+    lay->addWidget(statusLbl);
+
+    auto* ctxRow = new QHBoxLayout();
+    ctxRow->addWidget(new QLabel("Project Context Option:", &dlg));
+    auto* ctxCombo = new QComboBox(&dlg);
+    ctxCombo->addItem("1. Project Summary Only",
+                      static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
+    ctxCombo->addItem("2. Selected Project Files (Concatenated Internal Markdown)",
+                      static_cast<int>(ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly));
+    ctxCombo->addItem("3. Both Project Summary and Selected Files Markdown",
+                      static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+
+    auto beh = ConfigManager::instance().aiBehavior();
+    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 2));
+    ctxRow->addWidget(ctxCombo, 1);
+    lay->addLayout(ctxRow);
+
+    auto* split = new QSplitter(Qt::Vertical, &dlg);
+    split->setChildrenCollapsible(false);
+
+    // Верхняя часть сплиттера: дерево выбора файлов проекта (по умолчанию отмечены проиндексированные файлы)
+    auto* filesBox = new QGroupBox("Project Files to Include in Prompt Context (Indexed files are pre-selected):", split);
+    auto* filesLay = new QVBoxLayout(filesBox);
+    auto* fileSelector = new ProjectFileSelectorWidget(
+        m_projectMgr,
+        m_projectMgr->projectRootPath(),
+        FileSelectorPreset::IndexedFilesDefault,
+        filesBox);
+    auto* selectedCountLbl = new QLabel(filesBox);
+    selectedCountLbl->setStyleSheet("font-weight: bold; color: #bd93f9;");
+    filesLay->addWidget(fileSelector, 1);
+    filesLay->addWidget(selectedCountLbl);
+
+    // Нижняя часть сплиттера: ввод текста кастомного промпта
+    auto* promptBox = new QWidget(split);
+    auto* promptLay = new QVBoxLayout(promptBox);
+    promptLay->setContentsMargins(0, 4, 0, 0);
+    promptLay->addWidget(new QLabel(
+        "Enter instructions for the LLM (response will be generated as a Markdown document in a separate window):",
+        promptBox));
+
+    auto* promptEdit = new QPlainTextEdit(promptBox);
+    promptEdit->setPlaceholderText(
+        "e.g. Analyze the project architecture, propose new classes/files, or generate implementation files...");
+    QString seedText = initialPromptText.isEmpty() ? ConfigManager::instance().lastCustomPrompt() : initialPromptText;
+    promptEdit->setPlainText(seedText);
+    promptLay->addWidget(promptEdit, 1);
+
+    split->addWidget(filesBox);
+    split->addWidget(promptBox);
+    split->setStretchFactor(0, 3);
+    split->setStretchFactor(1, 2);
+    split->setSizes({340, 220});
+    lay->addWidget(split, 1);
+
+    // Панель предварительной оценки размера контекста в реальном времени
+    auto* estimateLbl = new QLabel(&dlg);
+    estimateLbl->setWordWrap(true);
+    lay->addWidget(estimateLbl);
+
+    auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    if (auto* okBtn = btns->button(QDialogButtonBox::Ok)) {
+        okBtn->setText("Run Project Prompt");
+    }
+    lay->addWidget(btns);
+
+    const auto openBuffers = collectOpenEditorBuffers();
+    const QString sysPrompt = m_projectMgr->projectSystemPrompt();
+    const QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+
+    auto updateLiveContextEstimate = [&]() {
+        auto mode = static_cast<ProjectCustomPromptContextMode>(ctxCombo->currentData().toInt());
+        bool usesFiles = (mode != ProjectCustomPromptContextMode::ProjectSummaryOnly);
+        filesBox->setEnabled(usesFiles);
+
+        QStringList selFiles = fileSelector->selectedFilePaths();
+        if (usesFiles) {
+            selectedCountLbl->setText(QString("Selected for prompt context: %1 file(s)").arg(selFiles.size()));
+        } else {
+            selectedCountLbl->setText("File selection is inactive in '1. Project Summary Only' mode.");
+        }
+
+        QString projCtx = m_projectMgr->buildProjectCustomPromptContext(mode, selFiles, openBuffers);
+        QString customInst = promptEdit->toPlainText().trimmed();
+        QString fullUser = customInst;
+        if (!mdSuffix.trimmed().isEmpty()) fullUser += "\n\n" + mdSuffix.trimmed();
+        if (!projCtx.trimmed().isEmpty()) fullUser += "\n\n" + projCtx;
+
+        int totalChars = sysPrompt.length() + fullUser.length();
+        int promptTok = (totalChars + 3) / 4 + 128;
+        int recOutTok = qMax(2048, qMin(16384, promptTok / 3));
+        int reqCtxTok = promptTok + recOutTok;
+
+        const auto& aiCfg = ConfigManager::instance().aiConfig();
+        bool exceedsCtx = (reqCtxTok > aiCfg.contextWindow);
+        bool exceedsOut = (recOutTok > aiCfg.maxOutputCodeTokens);
+
+        if (exceedsCtx || exceedsOut) {
+            estimateLbl->setStyleSheet("color: #ffb86c; font-weight: bold;");
+            estimateLbl->setText(
+                QString("Estimated Context: ~%1 tok (Prompt: ~%2 tok + Output reserve: ~%3 tok) | "
+                        "Configured Context Window: %4 tok, Max Output: %5 tok — Adjust limits on run if needed.")
+                    .arg(reqCtxTok)
+                    .arg(promptTok)
+                    .arg(recOutTok)
+                    .arg(aiCfg.contextWindow)
+                    .arg(aiCfg.maxOutputCodeTokens));
+        } else {
+            estimateLbl->setStyleSheet("color: #50fa7b;");
+            estimateLbl->setText(
+                QString("Estimated Context: ~%1 tok (Prompt: ~%2 tok + Output reserve: ~%3 tok) | "
+                        "Fits within Context Window (%4 tok)")
+                    .arg(reqCtxTok)
+                    .arg(promptTok)
+                    .arg(recOutTok)
+                    .arg(aiCfg.contextWindow));
+        }
+    };
+
+    connect(ctxCombo, &QComboBox::currentIndexChanged, &dlg, [&](int) { updateLiveContextEstimate(); });
+    connect(fileSelector, &ProjectFileSelectorWidget::selectionChanged, &dlg, [&](int) { updateLiveContextEstimate(); });
+    connect(promptEdit, &QPlainTextEdit::textChanged, &dlg, updateLiveContextEstimate);
+
+    updateLiveContextEstimate();
+
+    QString finalCustomInst;
+    QString finalFullUserPrompt;
+    int finalMaxOutputTokens = ConfigManager::instance().aiConfig().maxOutputCodeTokens;
+    int finalContextWindow = ConfigManager::instance().aiConfig().contextWindow;
+
+    connect(btns, &QDialogButtonBox::accepted, &dlg, [&]() {
+        QString customInst = promptEdit->toPlainText().trimmed();
+        if (customInst.isEmpty()) {
+            QMessageBox::warning(&dlg, "Empty Prompt", "Please enter instructions for the LLM.");
+            return;
+        }
+
+        auto selectedMode = static_cast<ProjectCustomPromptContextMode>(ctxCombo->currentData().toInt());
+        QStringList selectedFiles = fileSelector->selectedFilePaths();
+
+        if (selectedMode != ProjectCustomPromptContextMode::ProjectSummaryOnly && selectedFiles.isEmpty()) {
+            auto ans = QMessageBox::question(
+                &dlg,
+                "No Project Files Selected",
+                "No files are checked in the project tree.\n"
+                "Do you want to continue without source files in the context?",
+                QMessageBox::Yes | QMessageBox::No);
+            if (ans == QMessageBox::No) return;
+        }
+
+        int includedFiles = 0;
+        QString projectContext = m_projectMgr->buildProjectCustomPromptContext(
+            selectedMode, selectedFiles, openBuffers, &includedFiles);
+
+        if (projectContext.trimmed().isEmpty()) {
+            auto ans = QMessageBox::question(
+                &dlg,
+                "Empty Project Context",
+                "The selected project context is currently empty (no selected files or project summary found).\n"
+                "Do you want to send the prompt anyway?",
+                QMessageBox::Yes | QMessageBox::No);
+            if (ans == QMessageBox::No) return;
+        }
+
+        QString fullUserPrompt = customInst;
+        if (!mdSuffix.trimmed().isEmpty()) {
+            fullUserPrompt += "\n\n" + mdSuffix.trimmed();
+        }
+        if (!projectContext.trimmed().isEmpty()) {
+            fullUserPrompt += "\n\n" + projectContext;
+        }
+
+        const auto& cfg = ConfigManager::instance().aiConfig();
+        int maxTokens = cfg.maxOutputCodeTokens;
+        int ctxWindow = cfg.contextWindow;
+        int promptTokens = (sysPrompt.length() + fullUserPrompt.length() + 3) / 4;
+        int minRecOutput = qMax(2048, qMin(16384, promptTokens / 3));
+
+        if (!verifyAndAdjustContextLimits("Custom Prompt for Project",
+                                          sysPrompt,
+                                          fullUserPrompt,
+                                          minRecOutput,
+                                          false,
+                                          maxTokens,
+                                          ctxWindow)) {
+            updateLiveContextEstimate();
+            return;
+        }
+
+        if (beh.projectCustomPromptContextMode != selectedMode) {
+            beh.projectCustomPromptContextMode = selectedMode;
+            ConfigManager::instance().setAiBehavior(beh);
+        }
+
+        finalCustomInst = customInst;
+        finalFullUserPrompt = fullUserPrompt;
+        finalMaxOutputTokens = maxTokens;
+        finalContextWindow = ctxWindow;
+        dlg.accept();
+    });
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    ConfigManager::instance().setLastCustomPrompt(finalCustomInst);
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+
+    AiTask task;
+    task.priority = TaskPriority::High_UserAction;
+    task.targetType = TaskTargetType::ProjectCustomPrompt;
+    task.filePath = "[Project Custom Prompt]";
+    task.llmModel = cfg.llmIdentifier();
+    task.maxOutputTokens = finalMaxOutputTokens;
+    task.contextWindow = finalContextWindow;
+    task.systemPrompt = sysPrompt;
+    task.userPrompt = finalFullUserPrompt;
+    task.stream = true;
+
+    QString taskId = m_taskQueue->enqueueTask(task);
+
+    auto* resWin = new ProjectPromptResultDialog(finalCustomInst, m_projectMgr->projectRootPath(), taskId, this);
+    m_projectPromptWindows.insert(taskId, resWin);
+
+    connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
+    connect(resWin, &ProjectPromptResultDialog::openContentInEditorRequested, this,
+            [this](const QString& suggestedPath, const QString& code, const QString& langId) {
+                if (!suggestedPath.isEmpty() && m_projectMgr->hasOpenProject()) {
+                    QString abs = QDir(m_projectMgr->projectRootPath()).filePath(suggestedPath);
+                    if (QFileInfo::exists(abs)) {
+                        if (auto* ed = m_tabWidget->openFile(abs)) {
+                            updateCentralViewState();
+                            return;
+                        }
+                    }
+                }
+                CodeEditor* ed = m_tabWidget->newDocument();
+                if (ed) {
+                    ed->setPlainText(code);
+                    if (!langId.isEmpty()) ed->setSyntaxLanguage(langId);
+                    updateCentralViewState();
+                }
+            });
+    connect(resWin, &ProjectPromptResultDialog::fileSavedToDisk, this, [this](const QString& savedPath) {
+        if (auto* ed = m_tabWidget->findEditorByPath(savedPath)) {
+            ed->loadFile(savedPath);
+        }
+        statusBar()->showMessage("Saved: " + QDir::toNativeSeparators(savedPath), 4000);
+    });
+
+    resWin->show();
+    resWin->raise();
+    resWin->activateWindow();
 }
 
 void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
@@ -497,8 +1095,18 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         menu.addAction(QString("Generate Summaries in '%1' (Recursive)...").arg(QFileInfo(clickedPath).fileName()),
                        this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
     }
+    menu.addAction("Custom Prompt for Project...", this, [this]() {
+        onProjectCustomPrompt();
+    });
     menu.addAction("Generate Summaries for Entire Project (Recursive)...", this, [this]() {
         onRecursiveProjectSummary(m_projectMgr->projectRootPath());
+    });
+    menu.addSeparator();
+    QAction* filterAct = menu.addAction("Show Only Supported File Extensions");
+    filterAct->setCheckable(true);
+    filterAct->setChecked(ConfigManager::instance().projectExplorerFilterSupported());
+    connect(filterAct, &QAction::toggled, this, [](bool checked) {
+        ConfigManager::instance().setProjectExplorerFilterSupported(checked);
     });
 
     menu.addSeparator();
@@ -517,6 +1125,17 @@ void MainWindow::updateCentralViewState() {
     bool hasProj = m_projectMgr->hasOpenProject();
     m_projectDockStack->setCurrentIndex(hasProj ? 1 : 0);
     m_centralStack->setCurrentWidget(hasTabs ? static_cast<QWidget*>(m_tabWidget) : m_welcomeWidget);
+}
+
+void MainWindow::applyProjectExplorerFilter() {
+    if (!m_fsModel) return;
+    if (ConfigManager::instance().projectExplorerFilterSupported()) {
+        QStringList filters = ConfigManager::instance().supportedProjectFileNameFilters();
+        m_fsModel->setNameFilterDisables(false);
+        m_fsModel->setNameFilters(filters.isEmpty() ? QStringList{"*"} : filters);
+    } else {
+        m_fsModel->setNameFilters({});
+    }
 }
 
 void MainWindow::openProjectAtPath(const QString& dirPath) {
@@ -654,30 +1273,69 @@ QString MainWindow::actionKeyForEnum(AiEditAction action) {
     return "RefactorCode";
 }
 
-void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction) {
+void MainWindow::onEditorAiAction(CodeEditor* editor,
+                                  AiEditAction action,
+                                  const QString& selectedText,
+                                  const QString& customInstruction) {
     if (!editor) return;
     QString sysCtx = m_projectMgr->buildEffectiveSystemContext(editor->filePath());
     QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
     QString instruction = (action == AiEditAction::CustomPrompt)
                               ? (customSuffix.isEmpty() ? customInstruction : (customInstruction + "\n" + customSuffix))
                               : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
+    QString fullUserPrompt = instruction + "\n\n" + selectedText;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
+    int maxTokens = cfg.maxOutputCodeTokens;
+    int ctxWindow = cfg.contextWindow;
+
+    int targetCodeTokens = (selectedText.length() + 3) / 4;
+    int minRecOutput = (action == AiEditAction::ExplainCode)
+                           ? 2048
+                           : qMax(1024, targetCodeTokens + 512);
+
+    if (!verifyAndAdjustContextLimits("Editor AI Action (" + actionKeyForEnum(action) + ")",
+                                      sysCtx,
+                                      fullUserPrompt,
+                                      minRecOutput,
+                                      false,
+                                      maxTokens,
+                                      ctxWindow)) {
+        return;
+    }
+
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
-    task.targetType = (action == AiEditAction::ExplainCode) ? TaskTargetType::ExplainToDialog : TaskTargetType::ModifyEditorCode;
+    task.targetType = (action == AiEditAction::ExplainCode)
+                          ? TaskTargetType::ExplainToDialog
+                          : TaskTargetType::ModifyEditorCode;
     task.targetEditor = editor;
     task.filePath = editor->filePath();
     task.llmModel = cfg.llmIdentifier();
-    task.maxOutputTokens = cfg.maxOutputCodeTokens;
+    task.maxOutputTokens = maxTokens;
+    task.contextWindow = ctxWindow;
     task.systemPrompt = sysCtx;
-    task.userPrompt = instruction + "\n\n" + selectedText;
+    task.userPrompt = fullUserPrompt;
     task.stream = true;
 
     m_taskQueue->enqueueTask(task);
 }
 
+void MainWindow::onTaskStreamChunk(const AiTask& task, const QString& chunk) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.value(task.taskId)) {
+            win->appendStreamChunk(chunk);
+        }
+    }
+}
+
 void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->finalizeResponse(resultText);
+        }
+        return;
+    }
     if (task.targetType != TaskTargetType::ExplainToDialog) return;
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -693,9 +1351,22 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
 }
 
 void MainWindow::onTaskFailed(const AiTask& task, const QString& errorText) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->markFailedOrCancelled("AI Request Error: " + errorText);
+        }
+    }
     statusBar()->showMessage("AI Request Error: " + errorText, 6000);
     if (task.priority == TaskPriority::High_UserAction)
         QMessageBox::warning(this, "AI Request Failed", "Error communicating with LLM endpoint:\n" + errorText);
+}
+
+void MainWindow::onTaskCancelled(const AiTask& task) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->markFailedOrCancelled("Generation cancelled by user.");
+        }
+    }
 }
 
 void MainWindow::onAiPreferences() {
