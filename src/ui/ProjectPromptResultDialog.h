@@ -56,8 +56,10 @@ private slots:
 private:
     void renderMarkdownView(bool scrollToBottom = false);
     void parseCodeSnippetsFromMarkdown();
-    static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
+    static QString normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt = false);
     static QString detectFilePathFromLine(const QString& line);
+    static QString detectFilePathFromCodeComment(const QString& firstCodeLine);
+    static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
 
     QString m_projectRootPath;
     QString m_taskId;

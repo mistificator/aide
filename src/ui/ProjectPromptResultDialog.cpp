@@ -294,25 +294,163 @@ void ProjectPromptResultDialog::onOpenFullMarkdownInEditor() {
     emit openContentInEditorRequested("project_ai_response.md", m_markdownText, "markdown");
 }
 
+QString ProjectPromptResultDialog::normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt) {
+    candidate = candidate.trimmed();
+    while (!candidate.isEmpty() &&
+           (candidate.startsWith('`') || candidate.startsWith('\'') ||
+            candidate.startsWith('"') || candidate.startsWith('*') ||
+            candidate.startsWith('(') || candidate.startsWith('['))) {
+        candidate.remove(0, 1);
+    }
+    while (!candidate.isEmpty() &&
+           (candidate.endsWith('`') || candidate.endsWith('\'') ||
+            candidate.endsWith('"') || candidate.endsWith('*') ||
+            candidate.endsWith(':') || candidate.endsWith(';') ||
+            candidate.endsWith(',') || candidate.endsWith(')') ||
+            candidate.endsWith(']'))) {
+        candidate.chop(1);
+    }
+
+    candidate.replace('\\', '/');
+    while (candidate.startsWith("./")) candidate.remove(0, 2);
+    while (candidate.startsWith('/')) candidate.remove(0, 1);
+
+    if (candidate.isEmpty() || candidate.contains("..") || candidate.contains("//")) {
+        return {};
+    }
+    if (candidate.startsWith("http:", Qt::CaseInsensitive) ||
+        candidate.startsWith("https:", Qt::CaseInsensitive)) {
+        return {};
+    }
+
+    QFileInfo fi(candidate);
+    QString fileName = fi.fileName();
+    QString ext = fi.suffix();
+
+    // Проверка известных имён файлов без расширения (Makefile, Dockerfile и т.д.)
+    const QStringList allowedNames = ConfigManager::instance().aiBehavior().summaryAllowedFilenames;
+    if (ext.isEmpty()) {
+        for (const QString& SpecialName : allowedNames) {
+            if (fileName.compare(SpecialName.trimmed(), Qt::CaseInsensitive) == 0) {
+                return candidate;
+            }
+        }
+        return {};
+    }
+
+    // Расширение должно начинаться с буквы (исключает числа вроде 1.2) и иметь разумную длину
+    if (ext.length() > 12 || !ext[0].isLetter()) {
+        return {};
+    }
+
+    if (requireKnownOrLowerExt && !candidate.contains('/')) {
+        // Если путь без '/' и не был выделен бэктиками, требуем строчное расширение
+        // (отсекает конструкции вида Boost.Beast, Qt.Core и т.п.)
+        if (ext != ext.toLower()) {
+            return {};
+        }
+    }
+
+    return candidate;
+}
+
 QString ProjectPromptResultDialog::detectFilePathFromLine(const QString& line) {
     QString clean = line.trimmed();
     if (clean.isEmpty()) return {};
 
-    // Регулярное выражение для извлечения пути вида dir/file.ext или file.ext
-    static const QRegularExpression rxPath(
-        R"((?:File|Path|Файл|Путь)?[\s:`\*#\-]*([A-Za-z0-9_\-\./\\]+\.[A-Za-z0-9_+\-]+))",
-        QRegularExpression::CaseInsensitiveOption);
-
-    auto m = rxPath.match(clean);
-    if (m.hasMatch()) {
-        QString candidate = m.captured(1).trimmed();
-        candidate.replace('\\', '/');
-        while (candidate.startsWith("./")) candidate.remove(0, 2);
-        while (candidate.startsWith('/')) candidate.remove(0, 1);
-        if (candidate.contains('.') && !candidate.startsWith("http") && !candidate.endsWith('.')) {
-            return candidate;
+    // 1. Наивысший приоритет: путь внутри обратных кавычек `path/to/file.ext`
+    static const QRegularExpression rxBacktick(R"(`([^`]+)`)");
+    auto btIt = rxBacktick.globalMatch(clean);
+    while (btIt.hasNext()) {
+        auto m = btIt.next();
+        QString token = m.captured(1).trimmed();
+        // Пропускаем вызовы функций вроде `readLine()` или `split(' ')`
+        if (token.contains('(') || token.contains(')') || token.contains(' ')) continue;
+        QString valid = normalizeAndValidatePathCandidate(token, false);
+        if (!valid.isEmpty()) {
+            return valid;
         }
     }
+
+    // 2. Явная метка File: / Path: / Filename: / Файл:
+    static const QRegularExpression rxExplicitLabel(
+        R"((?:^|[\s\*#\-])(?:File(?:\s*name)?|Path|Файл)\s*[:\-]\s*[`\*\"']*([A-Za-z0-9_\-\./\\]+(?:\.[A-Za-z][A-Za-z0-9_+\-]*)?))",
+        QRegularExpression::CaseInsensitiveOption);
+    auto lm = rxExplicitLabel.match(clean);
+    if (lm.hasMatch()) {
+        QString valid = normalizeAndValidatePathCandidate(lm.captured(1), false);
+        if (!valid.isEmpty()) {
+            return valid;
+        }
+    }
+
+    // 3. Поиск пути в заголовке или строке-метке (с проверкой, что это не вызов метода и не число)
+    static const QRegularExpression rxPath(
+        R"((?:^|[\s:`\*#\-"\(\[])([A-Za-z0-9_\-\./\\]+\.[A-Za-z][A-Za-z0-9_+\-]*)(?=$|[\s:`\*\"'\)\],;]))");
+    auto it = rxPath.globalMatch(clean);
+    while (it.hasNext()) {
+        auto m = it.next();
+        QString valid = normalizeAndValidatePathCandidate(m.captured(1), true);
+        if (!valid.isEmpty()) {
+            return valid;
+        }
+    }
+
+    return {};
+}
+
+QString ProjectPromptResultDialog::detectFilePathFromCodeComment(const QString& firstCodeLine) {
+    QString trimmed = firstCodeLine.trimmed();
+    if (trimmed.isEmpty()) return {};
+
+    QString commentBody;
+    if (trimmed.startsWith("//")) {
+        int i = 2;
+        while (i < trimmed.length() && trimmed[i] == '/') ++i;
+        commentBody = trimmed.mid(i).trimmed();
+    } else if (trimmed.startsWith("/*")) {
+        commentBody = trimmed.mid(2);
+        if (commentBody.endsWith("*/")) commentBody.chop(2);
+        commentBody = commentBody.trimmed();
+    } else if (trimmed.startsWith("--")) {
+        commentBody = trimmed.mid(2).trimmed();
+    } else if (trimmed.startsWith('#')) {
+        // Исключаем шебанг (#!/usr/bin/env ...)
+        if (trimmed.startsWith("#!")) return {};
+
+        // Исключаем директивы препроцессора C/C++/C# (#include, #ifndef, #define, #pragma и т.д.)
+        static const QRegularExpression rxPreproc(
+            R"(^#\s*(?:include|pragma|ifndef|ifdef|if|elif|else|endif|define|undef|error|warning|line|import|using|region|endregion)\b)",
+            QRegularExpression::CaseInsensitiveOption);
+        if (rxPreproc.match(trimmed).hasMatch()) {
+            return {};
+        }
+
+        int i = 1;
+        while (i < trimmed.length() && trimmed[i] == '#') ++i;
+        commentBody = trimmed.mid(i).trimmed();
+    } else {
+        return {};
+    }
+
+    if (commentBody.isEmpty()) return {};
+
+    // Убираем необязательный префикс "File:" или "Path:" в начале комментария
+    static const QRegularExpression rxPrefix(
+        R"(^(?:File(?:\s*name)?|Path|Файл)\s*[:\-]\s*)",
+        QRegularExpression::CaseInsensitiveOption);
+    commentBody.remove(rxPrefix);
+    commentBody = commentBody.trimmed();
+
+    // Комментарий с путём к файлу должен начинаться непосредственно с пути
+    // и либо состоять только из него, либо отделяться дефисом/скобкой (например: "// src/main.cpp - entry point")
+    static const QRegularExpression rxCommentPath(
+        R"(^[`\*\"']*([A-Za-z0-9_\-\./\\]+(?:\.[A-Za-z][A-Za-z0-9_+\-]*)?)[`\*\"']*(?:\s*(?:[\-\—\|]|\(.*\)).*)?$)");
+    auto m = rxCommentPath.match(commentBody);
+    if (m.hasMatch()) {
+        return normalizeAndValidatePathCandidate(m.captured(1), true);
+    }
+
     return {};
 }
 
@@ -328,6 +466,7 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
     QString fenceLang;
     QString fenceHintPath;
     int fenceStartLine = 0;
+    int lastFenceEndLine = -1;
     QStringList codeLines;
 
     for (int i = 0; i < lines.size(); ++i) {
@@ -338,9 +477,9 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
             int backticks = 0;
             while (backticks < trimmed.length() && trimmed[backticks] == '`') ++backticks;
             fenceMarker = QString(backticks, '`');
-
             QString info = trimmed.mid(backticks).trimmed();
-            // Разбираем язык и возможный путь после двоеточия или пробела: ```cpp:src/main.cpp или ```cpp src/main.cpp
+
+            // Разбираем инфо-строку: ```cpp:src/main.cpp или ```cpp src/main.cpp
             fenceLang.clear();
             fenceHintPath.clear();
             if (!info.isEmpty()) {
@@ -375,36 +514,70 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                 snip.language = fenceLang.isEmpty() ? "txt" : fenceLang;
                 snip.code = codeLines.join('\n');
 
+                // 1. Приоритет 1: путь из открывающей строки ```lang:path
                 QString detectedPath = fenceHintPath;
-                // 1. Проверяем первую строку внутри блока кода (например, // src/foo.cpp или # script.py)
-                if (detectedPath.isEmpty() && !codeLines.isEmpty()) {
-                    QString firstCodeLine = codeLines.first().trimmed();
-                    if (firstCodeLine.startsWith("//") || firstCodeLine.startsWith('#') ||
-                        firstCodeLine.startsWith("/*") || firstCodeLine.startsWith("--")) {
-                        detectedPath = detectFilePathFromLine(firstCodeLine);
-                    }
-                }
-                // 2. Проверяем до 3 непустых строк перед блоком кода (например, ### File: src/foo.cpp)
+
+                // 2. Приоритет 2: заголовок секции (### File: `main.cpp`) или явная метка над блоком кода
                 if (detectedPath.isEmpty()) {
-                    for (int prev = fenceStartLine - 1; prev >= qMax(0, fenceStartLine - 4); --prev) {
+                    static const QRegularExpression rxHr(R"(^(?:-\s*){3,}$|^(?:\*\s*){3,}$|^(?:_\s*){3,}$)");
+                    static const QRegularExpression rxLabelLine(
+                        R"(^(?:[#]+|\*{1,2}|[-+]\s+\*{0,2})?\s*(?:File(?:\s*name)?|Path|Файл)\s*[:\-])",
+                        QRegularExpression::CaseInsensitiveOption);
+
+                    int minLine = qMax(lastFenceEndLine + 1, fenceStartLine - 25);
+
+                    // Проход А: ищем ближайший заголовок Markdown (# .. ######) или явную строку "File: ..."
+                    // (пропуская обычные абзацы текста между заголовком и блоком кода)
+                    for (int prev = fenceStartLine - 1; prev >= minLine; --prev) {
                         QString prevLine = lines[prev].trimmed();
                         if (prevLine.isEmpty()) continue;
-                        if (prevLine.startsWith("```")) break;
-                        detectedPath = detectFilePathFromLine(prevLine);
-                        if (!detectedPath.isEmpty()) break;
+                        if (prevLine.startsWith("```") || rxHr.match(prevLine).hasMatch()) break;
+
+                        bool isHeading = prevLine.startsWith('#');
+                        bool isExplicitFileLabel = rxLabelLine.match(prevLine).hasMatch();
+
+                        if (isHeading || isExplicitFileLabel) {
+                            detectedPath = detectFilePathFromLine(prevLine);
+                            // Останавливаемся на ближайшем заголовке секции
+                            break;
+                        }
                     }
+
+                    // Проход Б: если заголовка нет, проверяем строку непосредственно над блоком кода —
+                    // вдруг она состоит ТОЛЬКО из имени файла (например, "**`src/main.cpp`**" или "`main.cpp`:")
+                    if (detectedPath.isEmpty()) {
+                        for (int prev = fenceStartLine - 1; prev >= qMax(minLine, fenceStartLine - 3); --prev) {
+                            QString prevLine = lines[prev].trimmed();
+                            if (prevLine.isEmpty()) continue;
+                            if (prevLine.startsWith("```") || rxHr.match(prevLine).hasMatch()) break;
+
+                            QString stripped = prevLine;
+                            stripped.remove(QRegularExpression(R"(^[\s\*_`#\-:]+|[\s\*_`#\-:]+$)"));
+                            if (!stripped.contains(' ')) {
+                                detectedPath = normalizeAndValidatePathCandidate(stripped, true);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // 3. Приоритет 3: комментарий в первой строке самого кода (// src/foo.cpp или # script.py)
+                if (detectedPath.isEmpty() && !codeLines.isEmpty()) {
+                    detectedPath = detectFilePathFromCodeComment(codeLines.first());
                 }
 
                 snip.suggestedFilePath = detectedPath;
                 if (!detectedPath.isEmpty() && (snip.language == "txt" || snip.language.isEmpty())) {
                     snip.language = ConfigManager::instance().languageIdForFile(detectedPath);
                 }
+
                 snip.title = detectedPath.isEmpty()
                                  ? QString("Fragment #%1 (%2)").arg(snip.index).arg(snip.language)
                                  : detectedPath;
 
                 result.append(snip);
                 inFence = false;
+                lastFenceEndLine = i;
                 fenceMarker.clear();
                 codeLines.clear();
             } else {
