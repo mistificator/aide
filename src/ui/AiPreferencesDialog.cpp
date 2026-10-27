@@ -165,10 +165,10 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
         "1. Project Summary Only",
         static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
     m_projCustomPromptCtxCombo->addItem(
-        "2. All Indexed Project Files (Concatenated Internal Markdown)",
+        "2. Selected Project Files (Concatenated Internal Markdown)",
         static_cast<int>(ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly));
     m_projCustomPromptCtxCombo->addItem(
-        "3. Both Project Summary and Indexed Files Markdown",
+        "3. Both Project Summary and Selected Files Markdown",
         static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
     m_projCustomPromptCtxCombo->setCurrentIndex(
         qBound(0, static_cast<int>(behCfg.projectCustomPromptContextMode), 2));

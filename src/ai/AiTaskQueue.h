@@ -22,11 +22,12 @@ struct AiTask {
     TaskTargetType targetType = TaskTargetType::ModifyEditorCode;
     QPointer<CodeEditor> targetEditor;
     int maxOutputTokens = 0;
+    int contextWindow = 0;
     int expectedTokens = 512;
     bool stream = true;
     bool isThinking = false;
 
-    // Живая статистика и прогресс
+    // Метрики выполнения в реальном времени
     int generatedTokens = 0;
     int thinkingTokens = 0;
     qint64 elapsedMs = 0;

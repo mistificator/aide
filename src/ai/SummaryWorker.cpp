@@ -50,7 +50,10 @@ void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const Q
     }
 }
 
-void SummaryWorker::forceRebuildFileSummary(const QString& filePath, const QByteArray& content) {
+void SummaryWorker::forceRebuildFileSummary(const QString& filePath,
+                                            const QByteArray& content,
+                                            int maxOutputTokensOverride,
+                                            int contextWindowOverride) {
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
@@ -66,7 +69,8 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath, const QByte
     task.filePath = relPath;
     task.fileSha256 = sha256;
     task.llmModel = llmModel;
-    task.maxOutputTokens = cfg.maxOutputSummaryTokens;
+    task.maxOutputTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
+    task.contextWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
     task.systemPrompt = m_projectMgr->projectSystemPrompt();
     task.userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
                       + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
@@ -75,7 +79,8 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath, const QByte
     m_taskQueue->enqueueTask(task);
 }
 
-void SummaryWorker::forceRebuildProjectSummary() {
+void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
+                                               int contextWindowOverride) {
     QString digest = m_projectMgr->buildAggregatedFilesDigest();
     if (digest.trimmed().isEmpty()) return;
 
@@ -86,7 +91,8 @@ void SummaryWorker::forceRebuildProjectSummary() {
     task.targetType = TaskTargetType::ProjectSummary;
     task.filePath = "__PROJECT_SUMMARY__";
     task.llmModel = cfg.llmIdentifier();
-    task.maxOutputTokens = cfg.maxOutputSummaryTokens;
+    task.maxOutputTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
+    task.contextWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
     task.systemPrompt = m_projectMgr->projectSystemPrompt();
     task.userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
     task.stream = true;

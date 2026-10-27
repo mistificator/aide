@@ -13,8 +13,12 @@ public:
 
 public slots:
     void checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content);
-    void forceRebuildFileSummary(const QString& filePath, const QByteArray& content);
-    void forceRebuildProjectSummary();
+    void forceRebuildFileSummary(const QString& filePath,
+                                 const QByteArray& content,
+                                 int maxOutputTokensOverride = 0,
+                                 int contextWindowOverride = 0);
+    void forceRebuildProjectSummary(int maxOutputTokensOverride = 0,
+                                    int contextWindowOverride = 0);
 
 signals:
     void summaryStreamingChunk(const QString& filePath, bool isProjectSummary, const QString& chunk);

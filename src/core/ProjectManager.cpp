@@ -29,7 +29,6 @@ bool ProjectManager::openProjectFolder(const QString& folderPath) {
     QDir dir(folderPath);
     if (!dir.exists()) return false;
     m_rootPath = dir.absolutePath();
-
     auto aideFiles = dir.entryList({"*.aide"}, QDir::Files);
     m_aideFilePath = dir.filePath(aideFiles.isEmpty()
                                       ? (dir.dirName().isEmpty() ? "project.aide" : dir.dirName() + ".aide")
@@ -51,7 +50,6 @@ bool ProjectManager::openProjectFolder(const QString& folderPath) {
 bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
     QFile f(aideFilePath);
     if (!f.open(QIODevice::ReadOnly)) return false;
-
     QFileInfo fi(aideFilePath);
     m_aideFilePath = fi.absoluteFilePath();
     m_rootPath = fi.absolutePath();
@@ -90,7 +88,6 @@ bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
             {}
         };
     }
-
     emit projectLoaded(m_rootPath);
     emit projectContextChanged();
     return true;
@@ -109,7 +106,6 @@ bool ProjectManager::saveProjectFile() {
             {"updated_at", data.updatedAt.toString(Qt::ISODate)}
         };
     }
-
     QJsonArray ignoredArr;
     for (const auto& d : ConfigManager::instance().aiBehavior().summaryIgnoredDirs) {
         ignoredArr.append(d);
@@ -125,7 +121,6 @@ bool ProjectManager::saveProjectFile() {
         {"updated_at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
         {"files", filesObj}
     };
-
     QSaveFile f(m_aideFilePath);
     if (!f.open(QIODevice::WriteOnly)) return false;
     f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -196,6 +191,7 @@ void ProjectManager::updateFileSummary(const QString& filePath, const QString& s
     entry.isSummaryPending = false;
     entry.pendingSha256.clear();
     entry.pendingLlmModel.clear();
+
     m_projectSummaryDirty = true;
     saveProjectFile();
     emit fileContextChanged(rel);
@@ -211,11 +207,12 @@ void ProjectManager::clearFileSummary(const QString& filePath, const QString& cu
     }
     entry.llmModel = "cleared (empty)";
     entry.aiSummary.clear();
-    entry.summaryCreated = true; // Считаем, что саммари создано, просто оно пустое
+    entry.summaryCreated = true;
     entry.updatedAt = QDateTime::currentDateTimeUtc();
     entry.isSummaryPending = false;
     entry.pendingSha256.clear();
     entry.pendingLlmModel.clear();
+
     m_projectSummaryDirty = true;
     saveProjectFile();
     emit fileContextChanged(rel);
@@ -241,7 +238,6 @@ bool ProjectManager::isFileSummaryOutdated(const QString& filePath, const QByteA
     auto rel = toRelativePath(filePath);
     if (!m_files.contains(rel)) return true;
     const auto& entry = m_files[rel];
-
     if (entry.isSummaryPending) return false;
     if (entry.summaryCreated || !entry.aiSummary.trimmed().isEmpty()) return false;
     return true;
@@ -274,34 +270,38 @@ QString ProjectManager::buildAggregatedFilesDigest() const {
     return digest.join("\n\n");
 }
 
-int ProjectManager::indexedFilesCount() const {
-    int count = 0;
+QStringList ProjectManager::indexedFilePaths() const {
+    QStringList paths;
     for (const auto& [relPath, fc] : m_files.asKeyValueRange()) {
         if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) continue;
         QString absPath = m_rootPath.isEmpty() ? relPath : QDir(m_rootPath).filePath(relPath);
-        if (QFileInfo::exists(absPath)) {
-            ++count;
+        QFileInfo fi(absPath);
+        if (fi.exists() && fi.isFile()) {
+            paths.append(fi.absoluteFilePath());
         }
     }
-    return count;
+    return paths;
 }
 
-QString ProjectManager::buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides,
-                                                        int* outIncludedFilesCount) const {
+int ProjectManager::indexedFilesCount() const {
+    return indexedFilePaths().size();
+}
+
+QString ProjectManager::buildSelectedFilesSourceMarkdown(const QStringList& selectedFilePaths,
+                                                         const QMap<QString, QString>& unsavedBufferOverrides,
+                                                         int* outIncludedFilesCount) const {
     if (outIncludedFilesCount) *outIncludedFilesCount = 0;
-    if (m_rootPath.isEmpty()) return {};
+    if (m_rootPath.isEmpty() || selectedFilePaths.isEmpty()) return {};
 
     QStringList blocks;
     int fileCounter = 0;
 
-    for (const auto& [relPath, fc] : m_files.asKeyValueRange()) {
-        if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) {
-            continue;
-        }
-
+    for (const QString& rawPath : selectedFilePaths) {
+        if (rawPath.trimmed().isEmpty()) continue;
+        QString relPath = toRelativePath(rawPath);
         QString absPath = QFileInfo(QDir(m_rootPath).filePath(relPath)).absoluteFilePath();
-        QString content;
 
+        QString content;
         if (unsavedBufferOverrides.contains(absPath)) {
             content = unsavedBufferOverrides.value(absPath);
         } else if (unsavedBufferOverrides.contains(relPath)) {
@@ -330,10 +330,16 @@ QString ProjectManager::buildIndexedFilesSourceMarkdown(const QMap<QString, QStr
     return blocks.join("\n\n");
 }
 
+QString ProjectManager::buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides,
+                                                        int* outIncludedFilesCount) const {
+    return buildSelectedFilesSourceMarkdown(indexedFilePaths(), unsavedBufferOverrides, outIncludedFilesCount);
+}
+
 QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                                        const QStringList& selectedFilePaths,
                                                         const QMap<QString, QString>& unsavedBufferOverrides,
-                                                        int* outIndexedFilesCount) const {
-    if (outIndexedFilesCount) *outIndexedFilesCount = 0;
+                                                        int* outIncludedFilesCount) const {
+    if (outIncludedFilesCount) *outIncludedFilesCount = 0;
     QStringList sections;
 
     if (!m_projectSystemPrompt.trimmed().isEmpty()) {
@@ -357,14 +363,20 @@ QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptConte
 
     if (includeSources) {
         int count = 0;
-        QString sourcesMd = buildIndexedFilesSourceMarkdown(unsavedBufferOverrides, &count);
-        if (outIndexedFilesCount) *outIndexedFilesCount = count;
+        QString sourcesMd = buildSelectedFilesSourceMarkdown(selectedFilePaths, unsavedBufferOverrides, &count);
+        if (outIncludedFilesCount) *outIncludedFilesCount = count;
         if (!sourcesMd.trimmed().isEmpty()) {
-            sections << QString("=== ALL INDEXED PROJECT SOURCE FILES (%1 file(s)) ===\n\n%2")
+            sections << QString("=== SELECTED PROJECT SOURCE FILES (%1 file(s)) ===\n\n%2")
             .arg(count)
                 .arg(sourcesMd);
         }
     }
 
     return sections.join("\n\n");
+}
+
+QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                                        const QMap<QString, QString>& unsavedBufferOverrides,
+                                                        int* outIndexedFilesCount) const {
+    return buildProjectCustomPromptContext(mode, indexedFilePaths(), unsavedBufferOverrides, outIndexedFilesCount);
 }
