@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QXmlStreamReader>
 #include <QDir>
+#include <QMimeDatabase>
 
 LexicalHighlighter::LexicalHighlighter(QTextDocument* parent)
     : QSyntaxHighlighter(parent),
@@ -17,24 +18,63 @@ KdeSyntaxMetadata LexicalHighlighter::inspectSyntaxXml(const QString& xmlFilePat
     QFile f(xmlFilePath);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return meta;
 
+    QString mimeStr;
     QXmlStreamReader xml(&f);
     while (!xml.atEnd() && !xml.hasError()) {
-        if (xml.readNext() == QXmlStreamReader::StartElement && xml.name() == QLatin1String("language")) {
+        if (xml.readNext() == QXmlStreamReader::StartElement &&
+            xml.name().compare(QLatin1String("language"), Qt::CaseInsensitive) == 0) {
             meta.name = xml.attributes().value("name").toString().trimmed();
             meta.section = xml.attributes().value("section").toString().trimmed();
+            mimeStr = xml.attributes().value("mimetype").toString().trimmed();
+
             QString extStr = xml.attributes().value("extensions").toString();
             const auto parts = extStr.split(';', Qt::SkipEmptyParts);
             for (QString p : parts) {
                 p = p.trimmed();
-                if (p.startsWith("*.")) p = p.mid(2);
-                else if (p.startsWith('*')) p = p.mid(1);
-                if (!p.isEmpty() && !meta.extensions.contains(p.toLower()))
-                    meta.extensions.append(p.toLower());
+                if (p.startsWith("*.")) {
+                    p = p.mid(2);
+                } else if (p.startsWith('*')) {
+                    p = p.mid(1);
+                } else if (p.contains('.')) {
+                    // Для полных масок имён вроде CMakeLists.txt берём суффикс или пропускаем, если это не расширение
+                    QString sfx = QFileInfo(p).suffix();
+                    if (!sfx.isEmpty()) p = sfx;
+                } else {
+                    // Точное имя файла без расширения (например, Makefile, Dockerfile)
+                    p = p.toLower();
+                }
+                p = p.trimmed().toLower();
+                while (p.startsWith('.')) p.remove(0, 1);
+                if (!p.isEmpty() && !p.contains('*') && !p.contains('?') && !meta.extensions.contains(p)) {
+                    meta.extensions.append(p);
+                }
             }
             meta.valid = !meta.name.isEmpty();
             break;
         }
     }
+
+    // Если в XML-файле атрибут extensions пуст, запрашиваем системную базу QMimeDatabase по mimetype из XML
+    if (meta.extensions.isEmpty() && !mimeStr.isEmpty()) {
+        QMimeDatabase mimeDb;
+        for (QString mtName : mimeStr.split(';', Qt::SkipEmptyParts)) {
+            QMimeType mt = mimeDb.mimeTypeForName(mtName.trimmed());
+            if (mt.isValid() && !mt.isDefault()) {
+                for (const QString& sfx : mt.suffixes()) {
+                    QString clean = sfx.toLower().trimmed();
+                    if (!clean.isEmpty() && !meta.extensions.contains(clean)) {
+                        meta.extensions.append(clean);
+                    }
+                }
+            }
+        }
+    }
+
+    // Если и mimetype не дал расширений, проверяем встроенный словарь по имени XML-файла
+    if (meta.extensions.isEmpty()) {
+        meta.extensions = ConfigManager::knownExtensionsForLanguage(QFileInfo(xmlFilePath).baseName());
+    }
+
     return meta;
 }
 

@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QVector>
 #include <QString>
+#include <QTimer>
 
 class QTextEdit;
 class QPlainTextEdit;
@@ -16,7 +17,7 @@ class LexicalHighlighter;
 struct ExtractedCodeSnippet {
     int index = 0;
     QString language;
-    QString suggestedFilePath; // Распознанный путь к файлу (если есть)
+    QString suggestedFilePath;
     QString title;
     QString code;
 };
@@ -42,10 +43,12 @@ signals:
     void fileSavedToDisk(const QString& filePath);
 
 private slots:
+    void onStreamRenderTick();
     void onToggleRawView(bool showRaw);
     void onCopyFullMarkdown();
     void onSaveFullMarkdown();
     void onOpenFullMarkdownInEditor();
+
     void onSnippetSelectionChanged();
     void onCopySnippetCode();
     void onCopySelectedSnippetText();
@@ -56,15 +59,18 @@ private slots:
 private:
     void renderMarkdownView(bool scrollToBottom = false);
     void parseCodeSnippetsFromMarkdown();
-    static QString normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt = false);
+    static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
     static QString detectFilePathFromLine(const QString& line);
     static QString detectFilePathFromCodeComment(const QString& firstCodeLine);
-    static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
+    static QString normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt = false);
 
     QString m_projectRootPath;
     QString m_taskId;
     QString m_markdownText;
     bool m_isStreaming = true;
+    bool m_updatingRenderedView = false;
+    bool m_followStreamScroll = true;
+    QTimer m_streamRenderTimer;
     QVector<ExtractedCodeSnippet> m_snippets;
 
     QLabel* m_statusLabel = nullptr;

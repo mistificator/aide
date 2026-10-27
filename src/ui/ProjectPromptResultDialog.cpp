@@ -202,18 +202,38 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     connect(m_saveSnippetBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSaveSnippetAsFile);
     connect(m_openSnippetTabBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onOpenSnippetInEditor);
     connect(m_saveAllFilesBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSaveAllDetectedFiles);
+
+    m_streamRenderTimer.setSingleShot(true);
+    connect(&m_streamRenderTimer, &QTimer::timeout, this, &ProjectPromptResultDialog::onStreamRenderTick);
+
+    // Отслеживаем ручную прокрутку пользователем, чтобы не сбивать скролл при приходе новых токенов
+    QScrollBar* vbar = m_renderedView->verticalScrollBar();
+    connect(vbar, &QScrollBar::valueChanged, this, [this, vbar](int val) {
+        if (m_updatingRenderedView) return;
+        m_followStreamScroll = (vbar->maximum() == 0) || (val >= vbar->maximum() - 20);
+    });
+    connect(vbar, &QScrollBar::sliderReleased, this, [this]() {
+        if (m_isStreaming && !m_streamRenderTimer.isActive()) {
+            m_streamRenderTimer.start(50);
+        }
+    });
 }
 
 void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
     if (chunk.isEmpty()) return;
     m_markdownText += chunk;
     m_statusLabel->setText(QString("AI: Streaming Markdown response (%1 chars)...").arg(m_markdownText.length()));
-    renderMarkdownView(true);
-    parseCodeSnippetsFromMarkdown();
+
+    if (!m_streamRenderTimer.isActive()) {
+        // Адаптивный интервал коалесцирования (120..420 мс), чтобы цикл событий Qt не блокировался на больших текстах
+        int delayMs = qBound(120, m_markdownText.length() / 120, 420);
+        m_streamRenderTimer.start(delayMs);
+    }
 }
 
 void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText) {
     m_isStreaming = false;
+    m_streamRenderTimer.stop();
     if (!fullMarkdownText.trimmed().isEmpty()) {
         m_markdownText = fullMarkdownText;
     }
@@ -228,28 +248,54 @@ void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText
 
 void ProjectPromptResultDialog::markFailedOrCancelled(const QString& message) {
     m_isStreaming = false;
+    m_streamRenderTimer.stop();
     m_cancelBtn->hide();
     m_statusLabel->setStyleSheet("color: #ff5555; font-weight: bold;");
     m_statusLabel->setText(message);
+    renderMarkdownView(false);
     parseCodeSnippetsFromMarkdown();
 }
 
 void ProjectPromptResultDialog::renderMarkdownView(bool scrollToBottom) {
-    QScrollBar* vbar = m_renderedView->verticalScrollBar();
-    int oldScroll = vbar->value();
-    int oldMax = vbar->maximum();
-    bool wasAtBottom = (oldMax == 0) || (oldScroll >= oldMax - 8);
+    m_updatingRenderedView = true;
 
-    m_renderedView->setHtml(MarkdownRenderer::toHtml(m_markdownText));
     if (m_leftStack->currentWidget() == m_rawView) {
+        QScrollBar* rawBar = m_rawView->verticalScrollBar();
+        int oldRawPos = rawBar->value();
+        bool rawAtBottom = (rawBar->maximum() == 0) || (oldRawPos >= rawBar->maximum() - 20);
+        m_rawView->setUpdatesEnabled(false);
         m_rawView->setPlainText(m_markdownText);
+        rawBar->setValue((scrollToBottom && rawAtBottom) ? rawBar->maximum() : oldRawPos);
+        m_rawView->setUpdatesEnabled(true);
+    } else {
+        QScrollBar* vbar = m_renderedView->verticalScrollBar();
+        int oldScroll = vbar->value();
+        m_renderedView->setUpdatesEnabled(false);
+        m_renderedView->setHtml(MarkdownRenderer::toHtml(m_markdownText));
+        if (scrollToBottom && m_followStreamScroll) {
+            vbar->setValue(vbar->maximum());
+        } else {
+            vbar->setValue(oldScroll);
+        }
+        m_renderedView->setUpdatesEnabled(true);
     }
 
-    if (scrollToBottom && wasAtBottom) {
-        vbar->setValue(vbar->maximum());
-    } else {
-        vbar->setValue(oldScroll);
+    m_updatingRenderedView = false;
+}
+
+void ProjectPromptResultDialog::onStreamRenderTick() {
+    if (!m_isStreaming) return;
+
+    // Если пользователь прямо сейчас тянет ползунок скроллбара мышью — откладываем перерисовку,
+    // чтобы не прерывать перетаскивание
+    if (m_renderedView->verticalScrollBar()->isSliderDown() ||
+        m_rawView->verticalScrollBar()->isSliderDown()) {
+        m_streamRenderTimer.start(100);
+        return;
     }
+
+    renderMarkdownView(m_followStreamScroll);
+    parseCodeSnippetsFromMarkdown();
 }
 
 void ProjectPromptResultDialog::onToggleRawView(bool showRaw) {
@@ -590,12 +636,33 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
 }
 
 void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
-    int prevRow = m_snippetTree->currentIndex().row();
-    m_snippets = extractSnippets(m_markdownText);
+    QVector<ExtractedCodeSnippet> newSnippets = extractSnippets(m_markdownText);
 
+    // Во время стриминга избегаем пересоздания QTreeWidget и повторной подсветки кода,
+    // если количество и содержимое закрытых кодовых блоков не изменились
+    if (newSnippets.size() == m_snippets.size()) {
+        bool identical = true;
+        for (int i = 0; i < newSnippets.size(); ++i) {
+            if (newSnippets[i].title != m_snippets[i].title ||
+                newSnippets[i].code.length() != m_snippets[i].code.length() ||
+                newSnippets[i].language != m_snippets[i].language) {
+                identical = false;
+                break;
+            }
+        }
+        if (identical && (!newSnippets.isEmpty() || m_snippetTree->topLevelItemCount() == 0)) {
+            return;
+        }
+    }
+
+    int prevRow = m_snippetTree->indexOfTopLevelItem(m_snippetTree->currentItem());
+    m_snippets = std::move(newSnippets);
+
+    m_snippetTree->setUpdatesEnabled(false);
+    m_snippetTree->blockSignals(true);
     m_snippetTree->clear();
-    int detectedFileCount = 0;
 
+    int detectedFileCount = 0;
     for (const auto& s : m_snippets) {
         int lineCount = s.code.isEmpty() ? 0 : (s.code.count('\n') + 1);
         auto* item = new QTreeWidgetItem(m_snippetTree);
@@ -615,9 +682,17 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
                                    ? QString("Save All Detected Files (%1)...").arg(detectedFileCount)
                                    : "Save All Detected Files...");
 
+    int targetRow = -1;
     if (!m_snippets.isEmpty()) {
-        int targetRow = (prevRow >= 0 && prevRow < m_snippets.size()) ? prevRow : 0;
+        targetRow = (prevRow >= 0 && prevRow < m_snippets.size()) ? prevRow : 0;
         m_snippetTree->setCurrentItem(m_snippetTree->topLevelItem(targetRow));
+    }
+
+    m_snippetTree->blockSignals(false);
+    m_snippetTree->setUpdatesEnabled(true);
+
+    if (targetRow >= 0) {
+        onSnippetSelectionChanged();
     } else {
         m_snippetCodeEdit->clear();
         m_snippetHeaderLabel->setText("No fenced code blocks (```) found in Markdown yet.");

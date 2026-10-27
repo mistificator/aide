@@ -140,6 +140,10 @@ public:
     QVector<FileTypeRule> fileTypeRules() const { return m_fileTypes; }
     void setFileTypeRules(const QVector<FileTypeRule>& rules);
     void upsertFileTypeRule(const FileTypeRule& rule);
+    bool hasFileTypeRule(const QString& langId) const;
+    void repairFileTypeExtensions();
+    static QStringList knownExtensionsForLanguage(const QString& langIdOrFile);
+
     QString languageIdForFile(const QString& filePath) const;
     FileTypeRule ruleForLanguage(const QString& langId) const;
 
