@@ -33,7 +33,8 @@ constexpr PromptActionMeta kPromptActions[] = {
     {"AddDocumentation",    "Add Documentation / Comments",             "Triggered by 'AI -> Add Documentation / Comments'. Replaces selected or full code in editor."},
     {"GenerateUnitTests",   "Generate Unit Tests",                      "Triggered by 'AI -> Generate Unit Tests'. Replaces or appends unit test code in editor."},
     {"CompleteCode",        "Complete / Continue Code",                 "Triggered by 'AI -> Complete / Continue Code'. Completes implementation in editor."},
-    {"CustomPrompt",        "Custom Prompt... (Appended Instruction)",  "Appended after user's custom instruction in 'AI -> Custom Prompt...'."},
+    {"CustomPrompt",        "Custom Prompt... (Document Instruction)",  "Appended after user's custom instruction in 'AI -> Custom Prompt...' for a document."},
+    {"ProjectCustomPrompt", "Custom Prompt for Project... (Markdown)",  "Appended after user's custom instruction in 'AI -> Custom Prompt for Project...'. Requests Markdown output."},
     {"FileSummary",         "Rebuild File Summary",                     "Used when indexing a source file into Markdown summary (background or manual)."},
     {"ProjectSummary",      "Rebuild Project Summary",                  "Used when synthesizing the global project architecture summary from file summaries."}
 };
@@ -155,6 +156,24 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     promptLay->addWidget(m_useDocSummaryCheck);
     promptLay->addWidget(m_useProjSummaryCheck);
     behLay->addWidget(promptGroup);
+
+    auto* projPromptCtxGroup = new QGroupBox("Custom Prompt for Project — Context Source", behPage);
+    auto* projPromptCtxLay = new QHBoxLayout(projPromptCtxGroup);
+    projPromptCtxLay->addWidget(new QLabel("Context Provided to LLM:", projPromptCtxGroup));
+    m_projCustomPromptCtxCombo = new QComboBox(projPromptCtxGroup);
+    m_projCustomPromptCtxCombo->addItem(
+        "1. Project Summary Only",
+        static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
+    m_projCustomPromptCtxCombo->addItem(
+        "2. All Indexed Project Files (Concatenated Internal Markdown)",
+        static_cast<int>(ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly));
+    m_projCustomPromptCtxCombo->addItem(
+        "3. Both Project Summary and Indexed Files Markdown",
+        static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+    m_projCustomPromptCtxCombo->setCurrentIndex(
+        qBound(0, static_cast<int>(behCfg.projectCustomPromptContextMode), 2));
+    projPromptCtxLay->addWidget(m_projCustomPromptCtxCombo, 1);
+    behLay->addWidget(projPromptCtxGroup);
 
     auto* filterGroup = new QGroupBox("Automatic & Recursive File Summary Generation Rules", behPage);
     auto* filterLay = new QVBoxLayout(filterGroup);
@@ -530,5 +549,9 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
     }
     b.summaryIgnoredDirs = splitCommaSeparated(m_ignoredDirsEdit->toPlainText());
     b.promptHistoryLimit = m_promptHistoryLimitSpin ? m_promptHistoryLimitSpin->value() : 50;
+    b.projectCustomPromptContextMode = static_cast<ProjectCustomPromptContextMode>(
+        m_projCustomPromptCtxCombo
+            ? m_projCustomPromptCtxCombo->currentData().toInt()
+            : static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
     return b;
 }

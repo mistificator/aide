@@ -10,6 +10,7 @@
 #include "DiffViewerDialog.h"
 #include "MarkdownRenderer.h"
 #include "PromptHistoryDock.h"
+#include "ProjectPromptResultDialog.h"
 #include "../core/ConfigManager.h"
 #include "../core/ProjectManager.h"
 #include "../editor/EditorTabWidget.h"
@@ -18,6 +19,9 @@
 #include "../ai/SummaryWorker.h"
 #include "../syntax/ThemeAndSyntaxDownloader.h"
 
+#include <QComboBox>
+#include <QPlainTextEdit>
+#include <QDialogButtonBox>
 #include <QMenuBar>
 #include <QStatusBar>
 #include <QTreeView>
@@ -142,10 +146,11 @@ void MainWindow::setupUiAndDocks() {
     m_centralStack->addWidget(m_tabWidget);
     setCentralWidget(m_centralStack);
 
-    // Док 1: Project Explorer с отображением пути к проекту
+    // Док 1: Project Explorer
     m_projectDock = new QDockWidget("Project Explorer", this);
     m_projectDock->setObjectName("ProjectExplorerDock");
     m_projectDockStack = new QStackedWidget(m_projectDock);
+
     auto* noProjExplorerLabel = new QLabel("No project loaded.\nUse File -> Open Folder / Project...", m_projectDockStack);
     noProjExplorerLabel->setAlignment(Qt::AlignCenter);
     noProjExplorerLabel->setStyleSheet("color: #777;");
@@ -160,24 +165,39 @@ void MainWindow::setupUiAndDocks() {
         "QWidget { background-color: rgba(128, 128, 150, 0.12); border-bottom: 1px solid rgba(128, 128, 150, 0.25); }");
     auto* pathHeaderLay = new QVBoxLayout(pathHeaderBox);
     pathHeaderLay->setContentsMargins(8, 5, 8, 5);
-    pathHeaderLay->setSpacing(1);
-
+    pathHeaderLay->setSpacing(3);
     auto* pathTitleLbl = new QLabel("PROJECT PATH:", pathHeaderBox);
     pathTitleLbl->setStyleSheet("color: #888899; font-size: 9px; font-weight: bold; border: none; background: transparent;");
     m_projectPathLabel = new QLabel("-", pathHeaderBox);
     m_projectPathLabel->setStyleSheet("color: #bd93f9; font-size: 11px; font-weight: bold; border: none; background: transparent;");
     m_projectPathLabel->setWordWrap(true);
     m_projectPathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    auto* filterRow = new QHBoxLayout();
+    filterRow->setContentsMargins(0, 2, 0, 0);
+    auto* filterLbl = new QLabel("Files:", pathHeaderBox);
+    filterLbl->setStyleSheet("color: #888899; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+    m_projectFilterCombo = new QComboBox(pathHeaderBox);
+    m_projectFilterCombo->addItem("All Files (*)", false);
+    m_projectFilterCombo->addItem("Supported Extensions Only", true);
+    m_projectFilterCombo->setCurrentIndex(ConfigManager::instance().projectExplorerFilterSupported() ? 1 : 0);
+    filterRow->addWidget(filterLbl);
+    filterRow->addWidget(m_projectFilterCombo, 1);
+
     pathHeaderLay->addWidget(pathTitleLbl);
     pathHeaderLay->addWidget(m_projectPathLabel);
+    pathHeaderLay->addLayout(filterRow);
 
     m_projectTree = new QTreeView(projExplorerPage);
     m_fsModel = new ProjectTreeModel(m_projectMgr, this);
     m_fsModel->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
+    m_fsModel->setNameFilterDisables(false);
     m_projectTree->setModel(m_fsModel);
     for (int col = 1; col < 4; ++col) m_projectTree->hideColumn(col);
     m_projectTree->header()->hide();
     m_projectTree->setContextMenuPolicy(Qt::CustomContextMenu);
+
+    applyProjectExplorerFilter();
 
     projExplorerLay->addWidget(pathHeaderBox);
     projExplorerLay->addWidget(m_projectTree, 1);
@@ -305,6 +325,9 @@ void MainWindow::setupMenus() {
     };
     for (const auto& [label, act] : aiActs)
         aiMenu->addAction(label, this, [this, act]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(act); });
+    aiMenu->addAction("Custom Prompt for Project...", QKeySequence("Ctrl+Shift+P"), this, [this]() {
+        onProjectCustomPrompt();
+    });
 
     aiMenu->addSeparator();
     aiMenu->addAction("Rebuild File Summary", this, [this]() {
@@ -395,6 +418,8 @@ void MainWindow::setupConnections() {
 
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &MainWindow::onTaskCompleted);
     connect(m_taskQueue, &AiTaskQueue::taskFailed, this, &MainWindow::onTaskFailed);
+    connect(m_taskQueue, &AiTaskQueue::taskStreamChunk, this, &MainWindow::onTaskStreamChunk);
+    connect(m_taskQueue, &AiTaskQueue::taskCancelled, this, &MainWindow::onTaskCancelled);
 
     connect(m_downloader, &ThemeAndSyntaxDownloader::allDownloadsFinished, this, [this]() {
         statusBar()->showMessage("Syntax definitions and color schemes are up to date.", 4000);
@@ -415,6 +440,25 @@ void MainWindow::setupConnections() {
         if (ed) {
             ed->triggerCustomPromptWithText(promptText);
         }
+    });
+    connect(m_promptHistoryDock, &PromptHistoryDock::useProjectPromptRequested, this, [this](const QString& promptText) {
+        onProjectCustomPrompt(promptText);
+    });
+
+    connect(m_projectFilterCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        bool filterOnly = m_projectFilterCombo->itemData(idx).toBool();
+        ConfigManager::instance().setProjectExplorerFilterSupported(filterOnly);
+    });
+    connect(&ConfigManager::instance(), &ConfigManager::projectExplorerFilterChanged, this, [this](bool filterOnly) {
+        int targetIdx = filterOnly ? 1 : 0;
+        if (m_projectFilterCombo->currentIndex() != targetIdx) {
+            m_projectFilterCombo->setCurrentIndex(targetIdx);
+        }
+        applyProjectExplorerFilter();
+    });
+    connect(&ConfigManager::instance(), &ConfigManager::fileTypesChanged, this, &MainWindow::applyProjectExplorerFilter);
+    connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
+        applyProjectExplorerFilter();
     });
 }
 
@@ -448,6 +492,16 @@ void MainWindow::clearSingleFileSummary(const QString& filePath) {
     statusBar()->showMessage("File summary cleared (marked as created & empty).", 3000);
 }
 
+QMap<QString, QString> MainWindow::collectOpenEditorBuffers() const {
+    QMap<QString, QString> buffers;
+    for (int i = 0; i < m_tabWidget->count(); ++i) {
+        if (auto* ed = m_tabWidget->editorAt(i); ed && !ed->filePath().isEmpty()) {
+            buffers.insert(QFileInfo(ed->filePath()).absoluteFilePath(), ed->toPlainText());
+        }
+    }
+    return buffers;
+}
+
 void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
     if (!m_projectMgr->hasOpenProject()) {
         QMessageBox::information(this, "Recursive Summary", "Please open a project folder first.");
@@ -468,6 +522,146 @@ void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
     if (scheduled > 0) {
         statusBar()->showMessage(QString("Queued %1 file(s) for background AI summary generation.").arg(scheduled), 5000);
     }
+}
+
+void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
+    if (!m_projectMgr->hasOpenProject()) {
+        QMessageBox::information(this, "Custom Prompt for Project",
+                                 "Please open a project folder first (File -> Open Folder / Project...).");
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("AI Custom Prompt for Project");
+    dlg.resize(680, 440);
+    auto* lay = new QVBoxLayout(&dlg);
+
+    bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() ||
+                      !m_projectMgr->buildAggregatedFilesDigest().trimmed().isEmpty();
+    int indexedCount = m_projectMgr->indexedFilesCount();
+
+    auto* statusLbl = new QLabel(
+        QString("<b>Project:</b> %1<br>"
+                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b></span>")
+            .arg(QDir::toNativeSeparators(m_projectMgr->projectRootPath()),
+                 hasSummary ? "Yes" : "No (Empty)",
+                 QString::number(indexedCount)),
+        &dlg);
+    statusLbl->setWordWrap(true);
+    lay->addWidget(statusLbl);
+
+    auto* ctxRow = new QHBoxLayout();
+    ctxRow->addWidget(new QLabel("Project Context Option:", &dlg));
+    auto* ctxCombo = new QComboBox(&dlg);
+    ctxCombo->addItem("1. Project Summary Only",
+                      static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
+    ctxCombo->addItem("2. All Indexed Project Files (Concatenated Internal Markdown)",
+                      static_cast<int>(ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly));
+    ctxCombo->addItem("3. Both Project Summary and Indexed Files Markdown",
+                      static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+
+    auto beh = ConfigManager::instance().aiBehavior();
+    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 2));
+    ctxRow->addWidget(ctxCombo, 1);
+    lay->addLayout(ctxRow);
+
+    lay->addWidget(new QLabel("Enter instructions for the LLM (response will be generated as a Markdown document in a separate window):", &dlg));
+    auto* promptEdit = new QPlainTextEdit(&dlg);
+    promptEdit->setPlaceholderText("e.g. Analyze the project architecture, propose new classes/files, or generate implementation files...");
+    QString seedText = initialPromptText.isEmpty() ? ConfigManager::instance().lastCustomPrompt() : initialPromptText;
+    promptEdit->setPlainText(seedText);
+    lay->addWidget(promptEdit, 1);
+
+    auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    if (auto* okBtn = btns->button(QDialogButtonBox::Ok)) {
+        okBtn->setText("Run Project Prompt");
+    }
+    lay->addWidget(btns);
+
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString customInst = promptEdit->toPlainText().trimmed();
+    if (customInst.isEmpty()) return;
+
+    auto selectedMode = static_cast<ProjectCustomPromptContextMode>(ctxCombo->currentData().toInt());
+    if (beh.projectCustomPromptContextMode != selectedMode) {
+        beh.projectCustomPromptContextMode = selectedMode;
+        ConfigManager::instance().setAiBehavior(beh);
+    }
+
+    ConfigManager::instance().setLastCustomPrompt(customInst);
+
+    int includedFiles = 0;
+    QString projectContext = m_projectMgr->buildProjectCustomPromptContext(
+        selectedMode, collectOpenEditorBuffers(), &includedFiles);
+
+    if (projectContext.trimmed().isEmpty()) {
+        auto ans = QMessageBox::question(
+            this,
+            "Empty Project Context",
+            "The selected project context is currently empty (no indexed files or project summary found).\n"
+            "Do you want to send the prompt anyway?",
+            QMessageBox::Yes | QMessageBox::No);
+        if (ans == QMessageBox::No) return;
+    }
+
+    QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+    QString fullUserPrompt = customInst;
+    if (!mdSuffix.trimmed().isEmpty()) {
+        fullUserPrompt += "\n\n" + mdSuffix.trimmed();
+    }
+    if (!projectContext.trimmed().isEmpty()) {
+        fullUserPrompt += "\n\n" + projectContext;
+    }
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    AiTask task;
+    task.priority = TaskPriority::High_UserAction;
+    task.targetType = TaskTargetType::ProjectCustomPrompt;
+    task.filePath = "[Project Custom Prompt]";
+    task.llmModel = cfg.llmIdentifier();
+    task.maxOutputTokens = cfg.maxOutputCodeTokens;
+    task.systemPrompt = m_projectMgr->projectSystemPrompt();
+    task.userPrompt = fullUserPrompt;
+    task.stream = true;
+
+    QString taskId = m_taskQueue->enqueueTask(task);
+
+    auto* resWin = new ProjectPromptResultDialog(customInst, m_projectMgr->projectRootPath(), taskId, this);
+    m_projectPromptWindows.insert(taskId, resWin);
+
+    connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
+    connect(resWin, &ProjectPromptResultDialog::openContentInEditorRequested, this,
+            [this](const QString& suggestedPath, const QString& code, const QString& langId) {
+                if (!suggestedPath.isEmpty() && m_projectMgr->hasOpenProject()) {
+                    QString abs = QDir(m_projectMgr->projectRootPath()).filePath(suggestedPath);
+                    if (QFileInfo::exists(abs)) {
+                        if (auto* ed = m_tabWidget->openFile(abs)) {
+                            updateCentralViewState();
+                            return;
+                        }
+                    }
+                }
+                CodeEditor* ed = m_tabWidget->newDocument();
+                if (ed) {
+                    ed->setPlainText(code);
+                    if (!langId.isEmpty()) ed->setSyntaxLanguage(langId);
+                    updateCentralViewState();
+                }
+            });
+    connect(resWin, &ProjectPromptResultDialog::fileSavedToDisk, this, [this](const QString& savedPath) {
+        if (auto* ed = m_tabWidget->findEditorByPath(savedPath)) {
+            ed->loadFile(savedPath);
+        }
+        statusBar()->showMessage("Saved: " + QDir::toNativeSeparators(savedPath), 4000);
+    });
+
+    resWin->show();
+    resWin->raise();
+    resWin->activateWindow();
 }
 
 void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
@@ -497,8 +691,18 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         menu.addAction(QString("Generate Summaries in '%1' (Recursive)...").arg(QFileInfo(clickedPath).fileName()),
                        this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
     }
+    menu.addAction("Custom Prompt for Project...", this, [this]() {
+        onProjectCustomPrompt();
+    });
     menu.addAction("Generate Summaries for Entire Project (Recursive)...", this, [this]() {
         onRecursiveProjectSummary(m_projectMgr->projectRootPath());
+    });
+    menu.addSeparator();
+    QAction* filterAct = menu.addAction("Show Only Supported File Extensions");
+    filterAct->setCheckable(true);
+    filterAct->setChecked(ConfigManager::instance().projectExplorerFilterSupported());
+    connect(filterAct, &QAction::toggled, this, [](bool checked) {
+        ConfigManager::instance().setProjectExplorerFilterSupported(checked);
     });
 
     menu.addSeparator();
@@ -517,6 +721,17 @@ void MainWindow::updateCentralViewState() {
     bool hasProj = m_projectMgr->hasOpenProject();
     m_projectDockStack->setCurrentIndex(hasProj ? 1 : 0);
     m_centralStack->setCurrentWidget(hasTabs ? static_cast<QWidget*>(m_tabWidget) : m_welcomeWidget);
+}
+
+void MainWindow::applyProjectExplorerFilter() {
+    if (!m_fsModel) return;
+    if (ConfigManager::instance().projectExplorerFilterSupported()) {
+        QStringList filters = ConfigManager::instance().supportedProjectFileNameFilters();
+        m_fsModel->setNameFilterDisables(false);
+        m_fsModel->setNameFilters(filters.isEmpty() ? QStringList{"*"} : filters);
+    } else {
+        m_fsModel->setNameFilters({});
+    }
 }
 
 void MainWindow::openProjectAtPath(const QString& dirPath) {
@@ -677,7 +892,21 @@ void MainWindow::onEditorAiAction(CodeEditor* editor, AiEditAction action, const
     m_taskQueue->enqueueTask(task);
 }
 
+void MainWindow::onTaskStreamChunk(const AiTask& task, const QString& chunk) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.value(task.taskId)) {
+            win->appendStreamChunk(chunk);
+        }
+    }
+}
+
 void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->finalizeResponse(resultText);
+        }
+        return;
+    }
     if (task.targetType != TaskTargetType::ExplainToDialog) return;
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -693,9 +922,22 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
 }
 
 void MainWindow::onTaskFailed(const AiTask& task, const QString& errorText) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->markFailedOrCancelled("AI Request Error: " + errorText);
+        }
+    }
     statusBar()->showMessage("AI Request Error: " + errorText, 6000);
     if (task.priority == TaskPriority::High_UserAction)
         QMessageBox::warning(this, "AI Request Failed", "Error communicating with LLM endpoint:\n" + errorText);
+}
+
+void MainWindow::onTaskCancelled(const AiTask& task) {
+    if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
+        if (auto win = m_projectPromptWindows.take(task.taskId)) {
+            win->markFailedOrCancelled("Generation cancelled by user.");
+        }
+    }
 }
 
 void MainWindow::onAiPreferences() {

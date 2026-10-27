@@ -277,9 +277,12 @@ void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
 
 void AiTaskQueue::processNext() {
     if (m_isProcessing) return;
-    while (!m_highQueue.isEmpty() && m_highQueue.head().priority == TaskPriority::High_UserAction && !m_highQueue.head().targetEditor)
+    while (!m_highQueue.isEmpty() &&
+           m_highQueue.head().priority == TaskPriority::High_UserAction &&
+           m_highQueue.head().targetType != TaskTargetType::ProjectCustomPrompt &&
+           !m_highQueue.head().targetEditor) {
         m_highQueue.dequeue();
-
+    }
     if (!m_highQueue.isEmpty()) m_currentTask = m_highQueue.dequeue();
     else if (!m_lowQueue.isEmpty()) m_currentTask = m_lowQueue.dequeue();
     else { emitStatus(); return; }

@@ -8,7 +8,13 @@
 #include "../editor/CodeEditor.h"
 
 enum class TaskPriority { High_UserAction, Low_BackgroundSummary };
-enum class TaskTargetType { ModifyEditorCode, ExplainToDialog, FileSummary, ProjectSummary };
+enum class TaskTargetType {
+    ModifyEditorCode,
+    ExplainToDialog,
+    ProjectCustomPrompt,
+    FileSummary,
+    ProjectSummary
+};
 
 struct AiTask {
     QString taskId, filePath, fileSha256, llmModel, systemPrompt, userPrompt;

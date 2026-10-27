@@ -1,11 +1,14 @@
 // src/ui/MainWindow.h
 #pragma once
 #include <QMainWindow>
+#include <QMap>
+#include <QPointer>
 #include "../editor/CodeEditor.h"
 
 class QTreeView;
 class QLabel;
 class QPushButton;
+class QComboBox;
 class QMenu;
 class QStackedWidget;
 class ProjectManager;
@@ -19,6 +22,7 @@ class AiTaskQueue;
 class SummaryWorker;
 class ThemeAndSyntaxDownloader;
 class PromptHistoryDock;
+class ProjectPromptResultDialog;
 struct AiTask;
 
 class MainWindow : public QMainWindow {
@@ -40,11 +44,14 @@ private slots:
     void onEditorPreferences();
     void onAiPreferences();
     void onRecursiveProjectSummary(const QString& startDir = {});
+    void onProjectCustomPrompt(const QString& initialPromptText = {});
     void onProjectTreeContextMenu(const QPoint& pos);
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
+    void onTaskStreamChunk(const AiTask& task, const QString& chunk);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
+    void onTaskCancelled(const AiTask& task);
     void populateRecentProjectsMenu();
     void populateWindowMenu();
     void populateThemeMenu();
@@ -56,8 +63,10 @@ private:
     void setupConnections();
     void openProjectAtPath(const QString& dirPath);
     void updateCentralViewState();
+    void applyProjectExplorerFilter();
     void rebuildSingleFileSummary(const QString& filePath);
     void clearSingleFileSummary(const QString& filePath);
+    QMap<QString, QString> collectOpenEditorBuffers() const;
     static QString actionKeyForEnum(AiEditAction action);
 
     ProjectManager* m_projectMgr = nullptr;
@@ -73,6 +82,7 @@ private:
     QDockWidget* m_projectDock = nullptr;
     QStackedWidget* m_projectDockStack = nullptr;
     QLabel* m_projectPathLabel = nullptr;
+    QComboBox* m_projectFilterCombo = nullptr;
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
 
@@ -80,6 +90,8 @@ private:
     PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
+
+    QMap<QString, QPointer<ProjectPromptResultDialog>> m_projectPromptWindows;
 
     QMenu* m_recentProjectsMenu = nullptr;
     QMenu* m_windowMenu = nullptr;

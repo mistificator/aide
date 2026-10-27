@@ -21,11 +21,13 @@ public slots:
 
 signals:
     void usePromptRequested(const QString& promptText);
+    void useProjectPromptRequested(const QString& promptText);
 
 private slots:
     void onSearchTextChanged(const QString& text);
     void onSelectionChanged();
     void onUseSelectedClicked();
+    void onUseSelectedForProjectClicked();
     void onTogglePinClicked();
     void onMoveUpClicked();
     void onMoveDownClicked();
@@ -44,6 +46,7 @@ private:
     QListWidget* m_listWidget = nullptr;
 
     QPushButton* m_useBtn = nullptr;
+    QPushButton* m_useProjectBtn = nullptr;
     QPushButton* m_pinBtn = nullptr;
     QPushButton* m_upBtn = nullptr;
     QPushButton* m_downBtn = nullptr;

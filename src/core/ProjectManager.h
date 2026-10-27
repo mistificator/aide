@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QDateTime>
+#include "ConfigManager.h"
 
 struct FileContextData {
     QString relativePath;
@@ -42,6 +43,7 @@ public:
 
     FileContextData fileContext(const QString& absoluteOrRelPath) const;
     bool hasFileSummary(const QString& absoluteOrRelPath) const;
+    int indexedFilesCount() const;
 
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
     void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
@@ -54,6 +56,14 @@ public:
     QString toRelativePath(const QString& path) const;
     QString buildEffectiveSystemContext(const QString& filePath) const;
     QString buildAggregatedFilesDigest() const;
+
+    // Склеивает все проиндексированные файлы проекта в один внутренний Markdown в памяти
+    QString buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                            int* outIncludedFilesCount = nullptr) const;
+    // Формирует контекст для Custom Prompt по проекту согласно выбранной опции (1, 2 или 3)
+    QString buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                            const QMap<QString, QString>& unsavedBufferOverrides = {},
+                                            int* outIndexedFilesCount = nullptr) const;
 
     static QString computeSha256(const QByteArray& data);
 

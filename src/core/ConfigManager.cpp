@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QCryptographicHash>
+#include <QSet>
 #include <algorithm>
 
 ConfigManager::ConfigManager(QObject* parent) : QObject(parent) {
@@ -36,7 +37,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     AiConnectionConfig ollamaLocal;
     ollamaLocal.profileName = "Ollama (Offline)";
     ollamaLocal.backend = AiBackendType::Ollama;
-    ollamaLocal.endpointUrl = "[http://127.0.0.1:11434](http://127.0.0.1:11434)";
+    ollamaLocal.endpointUrl = "http://127.0.0.1:11434";
     ollamaLocal.modelName = "qwen2.5-coder:7b";
     ollamaLocal.maxOutputCodeTokens = 65536;
     ollamaLocal.maxOutputSummaryTokens = 1024;
@@ -54,7 +55,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
     AiConnectionConfig ollamaOnline;
     ollamaOnline.profileName = "Ollama.com (Online)";
     ollamaOnline.backend = AiBackendType::Ollama;
-    ollamaOnline.endpointUrl = "[https://ollama.com](https://ollama.com)";
+    ollamaOnline.endpointUrl = "https://ollama.com";
     ollamaOnline.modelName = "qwen2.5-coder:7b";
     ollamaOnline.maxOutputCodeTokens = 65536;
     ollamaOnline.maxOutputSummaryTokens = 1024;
@@ -68,6 +69,7 @@ AiBehaviorConfig ConfigManager::defaultAiBehavior() {
     b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
     b.includeDocumentSummaryInPrompt = true;
     b.includeProjectSummaryInPrompt = true;
+    b.projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     b.summaryUseSyntaxExtensions = true;
     b.promptHistoryLimit = 50;
     b.summaryAllowedFilenames = {
@@ -120,6 +122,7 @@ QJsonObject ConfigManager::defaultPromptTemplates() {
         {"GenerateUnitTests", "Generate unit tests covering main scenarios and edge cases for the following code. Output ONLY raw code without markdown fences:"},
         {"CompleteCode", "Complete the implementation of the following code based on its context and signatures. Output ONLY raw code without markdown fences:"},
         {"CustomPrompt", "If modifying code, output ONLY raw code without markdown fences:"},
+        {"ProjectCustomPrompt", "Provide a comprehensive, well-structured response in Markdown format. When outputting files or code fragments, always use fenced code blocks with the language identifier and precede each file block with a Markdown heading containing its relative path (e.g., `### File: src/path/file.ext`):"},
         {"FileSummary", "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
         {"ProjectSummary", "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
     };
@@ -155,11 +158,10 @@ void ConfigManager::setPromptTemplates(const QJsonObject& templates) {
 
 void ConfigManager::enforcePromptHistoryLimit() {
     int limit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);
-    // Стабильно держим приколотые в начале списка, неприколотые — после них
+
     std::stable_partition(m_promptHistory.begin(), m_promptHistory.end(),
                           [](const PromptHistoryItem& item) { return item.pinned; });
 
-    // Удаляем с конца неприколотые элементы, если превышен лимит
     while (m_promptHistory.size() > limit) {
         int lastUnpinned = -1;
         for (int i = m_promptHistory.size() - 1; i >= 0; --i) {
@@ -179,6 +181,7 @@ void ConfigManager::enforcePromptHistoryLimit() {
 void ConfigManager::setPromptHistory(const QVector<PromptHistoryItem>& items) {
     m_promptHistory.clear();
     QSet<QString> seenHashes;
+
     for (auto it : items) {
         it.text = it.text.trimmed();
         if (it.text.isEmpty()) continue;
@@ -188,6 +191,7 @@ void ConfigManager::setPromptHistory(const QVector<PromptHistoryItem>& items) {
         if (!it.updatedAt.isValid()) it.updatedAt = QDateTime::currentDateTimeUtc();
         m_promptHistory.append(it);
     }
+
     enforcePromptHistoryLimit();
     saveConfig();
     emit promptHistoryChanged();
@@ -218,10 +222,8 @@ void ConfigManager::addPromptToHistory(const QString& promptText) {
         item.text = clean;
         item.updatedAt = now;
         if (item.pinned) {
-            // Приколотый поднимаем на самый верх приколотых
             m_promptHistory.prepend(item);
         } else {
-            // Пересчитываем границу приколотых после takeAt и ставим первым среди неприколотых
             int insertPos = 0;
             while (insertPos < m_promptHistory.size() && m_promptHistory[insertPos].pinned) {
                 ++insertPos;
@@ -284,7 +286,7 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     AiConnectionConfig cfg;
     cfg.profileName = ai["profileName"].toString(fallbackName);
     cfg.backend = static_cast<AiBackendType>(ai["backend"].toInt(0));
-    cfg.endpointUrl = ai["endpointUrl"].toString("[http://127.0.0.1:11434](http://127.0.0.1:11434)");
+    cfg.endpointUrl = ai["endpointUrl"].toString("http://127.0.0.1:11434");
     cfg.apiKey = ai["apiKey"].toString();
     cfg.modelName = ai["modelName"].toString("qwen2.5-coder:7b");
     cfg.temperature = ai["temperature"].toDouble(0.2);
@@ -298,7 +300,7 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
 
     if (cfg.profileName == "KoboldCpp (Offline)" &&
         cfg.backend == AiBackendType::KoboldCpp &&
-        (cfg.endpointUrl == "[http://127.0.0.1:5001](http://127.0.0.1:5001)" || cfg.endpointUrl == "http://localhost:5001")) {
+        (cfg.endpointUrl == "http://127.0.0.1:5001" || cfg.endpointUrl == "http://localhost:5001")) {
         cfg.backend = AiBackendType::OpenAiCompatible;
         cfg.endpointUrl = "http://localhost:5001/v1/";
     }
@@ -310,12 +312,13 @@ void ConfigManager::loadConfig() {
     if (cfgFile.open(QIODevice::ReadOnly)) {
         auto obj = QJsonDocument::fromJson(cfgFile.readAll()).object();
         m_activeTheme = obj["activeTheme"].toString("dracula");
+        m_projectExplorerFilterSupported = obj["projectExplorerFilterSupported"].toBool(false);
         m_lastProjectPath = obj["lastProjectPath"].toString();
         m_lastDialogDir = obj["lastDialogDir"].toString();
         m_lastCustomPrompt = obj["lastCustomPrompt"].toString();
         m_windowGeometry = QByteArray::fromBase64(obj["windowGeometry"].toString().toLatin1());
         m_windowState = QByteArray::fromBase64(obj["windowState"].toString().toLatin1());
-        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("[https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/](https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/)");
+        m_syntaxBaseUrl = obj["syntaxBaseUrl"].toString("https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/");
 
         m_recentProjects.clear();
         for (const auto& v : obj["recentProjects"].toArray()) {
@@ -364,6 +367,10 @@ void ConfigManager::loadConfig() {
             m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
+            int projCtxVal = beh["projectCustomPromptContextMode"].toInt(
+                static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+            m_aiBehavior.projectCustomPromptContextMode =
+                static_cast<ProjectCustomPromptContextMode>(qBound(0, projCtxVal, 2));
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
             m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
 
@@ -402,6 +409,7 @@ void ConfigManager::loadConfig() {
                 if (hash.isEmpty()) hash = computePromptHash(txt);
                 if (seen.contains(hash)) continue;
                 seen.insert(hash);
+
                 PromptHistoryItem item;
                 item.text = txt;
                 item.sha256 = hash;
@@ -467,6 +475,7 @@ void ConfigManager::saveConfig() {
         {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
+        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
         {"summaryAllowedFilenames", allowedFilesArr},
@@ -501,6 +510,7 @@ void ConfigManager::saveConfig() {
 
     QJsonObject root{
         {"activeTheme", m_activeTheme},
+        {"projectExplorerFilterSupported", m_projectExplorerFilterSupported},
         {"lastProjectPath", m_lastProjectPath},
         {"lastDialogDir", m_lastDialogDir},
         {"recentProjects", recentArr},
@@ -564,6 +574,13 @@ void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
     emit aiBehaviorChanged(m_aiBehavior);
 }
 
+void ConfigManager::setProjectExplorerFilterSupported(bool filterSupportedOnly) {
+    if (m_projectExplorerFilterSupported == filterSupportedOnly) return;
+    m_projectExplorerFilterSupported = filterSupportedOnly;
+    saveConfig();
+    emit projectExplorerFilterChanged(m_projectExplorerFilterSupported);
+}
+
 QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
     QStringList result;
     QString synDir = syntaxDirPath();
@@ -581,9 +598,39 @@ QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
     return result;
 }
 
+QStringList ConfigManager::supportedProjectFileNameFilters() const {
+    QStringList filters;
+    auto addExt = [&](QString ext) {
+        ext = ext.trimmed().toLower();
+        if (ext.startsWith("*.")) ext = ext.mid(2);
+        else if (ext.startsWith('.')) ext = ext.mid(1);
+        if (!ext.isEmpty()) {
+            QString mask = "*." + ext;
+            if (!filters.contains(mask, Qt::CaseInsensitive)) {
+                filters.append(mask);
+            }
+        }
+    };
+
+    for (const auto& r : m_fileTypes) {
+        for (const QString& ext : r.extensions) {
+            addExt(ext);
+        }
+    }
+    for (const QString& ext : m_aiBehavior.summaryAllowedExtensions) {
+        addExt(ext);
+    }
+    for (const QString& fn : m_aiBehavior.summaryAllowedFilenames) {
+        QString clean = fn.trimmed();
+        if (!clean.isEmpty() && !filters.contains(clean, Qt::CaseInsensitive)) {
+            filters.append(clean);
+        }
+    }
+    return filters;
+}
+
 bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown) const {
     if (filePath.isEmpty()) return false;
-
     QFileInfo fi(filePath);
     QString fileName = fi.fileName();
     QString ext = fi.suffix().toLower();
@@ -603,7 +650,6 @@ bool ConfigManager::shouldGenerateSummaryForFile(const QString& filePath, QStrin
                 return true;
             }
         }
-
         if (m_aiBehavior.summaryUseSyntaxExtensions) {
             const QStringList synExts = extensionsFromLoadedSyntaxes();
             if (synExts.contains(ext, Qt::CaseInsensitive)) {

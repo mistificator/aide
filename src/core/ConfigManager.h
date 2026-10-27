@@ -11,15 +11,21 @@
 enum class AiBackendType { Ollama, KoboldCpp, OpenAiCompatible };
 
 enum class AutoSummaryMode {
-    None = 0,            // Не автосоздавать саммари
-    FilesOnly = 1,       // Создавать только саммари файлов
-    FilesAndProject = 2  // Создавать саммари файлов и проектов
+    None = 0,
+    FilesOnly = 1,
+    FilesAndProject = 2
+};
+
+enum class ProjectCustomPromptContextMode {
+    ProjectSummaryOnly = 0,             // 1. Только саммари проекта
+    IndexedSourcesMarkdownOnly = 1,     // 2. Все проиндексированные файлы в одном внутреннем Markdown
+    BothSummaryAndSourcesMarkdown = 2   // 3. И саммари проекта, и внутренний Markdown с исходниками
 };
 
 struct AiConnectionConfig {
     QString profileName = "Ollama (Offline)";
     AiBackendType backend = AiBackendType::Ollama;
-    QString endpointUrl = "[http://127.0.0.1:11434](http://127.0.0.1:11434)";
+    QString endpointUrl = "http://127.0.0.1:11434";
     QString apiKey;
     QString modelName = "qwen2.5-coder:7b";
     double temperature = 0.2;
@@ -43,6 +49,7 @@ struct AiBehaviorConfig {
     AutoSummaryMode autoSummaryMode = AutoSummaryMode::FilesAndProject;
     bool includeDocumentSummaryInPrompt = true;
     bool includeProjectSummaryInPrompt = true;
+    ProjectCustomPromptContextMode projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     bool summaryUseSyntaxExtensions = true;
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
@@ -88,8 +95,13 @@ public:
     static AiBehaviorConfig defaultAiBehavior();
 
     QStringList extensionsFromLoadedSyntaxes() const;
+    QStringList supportedProjectFileNameFilters() const;
     bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
     bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
+
+    // Фильтр файлов в Project Explorer
+    bool projectExplorerFilterSupported() const { return m_projectExplorerFilterSupported; }
+    void setProjectExplorerFilterSupported(bool filterSupportedOnly);
 
     // Глобальная история кастомных промптов
     QVector<PromptHistoryItem> promptHistory() const { return m_promptHistory; }
@@ -145,6 +157,7 @@ public:
 signals:
     void aiConfigChanged(const AiConnectionConfig& newConfig);
     void aiBehaviorChanged(const AiBehaviorConfig& newBehavior);
+    void projectExplorerFilterChanged(bool filterSupportedOnly);
     void promptsChanged();
     void promptHistoryChanged();
     void themeChanged(const QString& themeName);
@@ -166,13 +179,14 @@ private:
     QVector<PromptHistoryItem> m_promptHistory;
 
     QString m_activeTheme = "dracula";
+    bool m_projectExplorerFilterSupported = false;
     QString m_lastProjectPath;
     QString m_lastDialogDir;
     QStringList m_recentProjects;
     QString m_lastCustomPrompt;
     QByteArray m_windowGeometry;
     QByteArray m_windowState;
-    QString m_syntaxBaseUrl = "[https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/](https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/)";
+    QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;
 };

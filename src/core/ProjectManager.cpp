@@ -273,3 +273,98 @@ QString ProjectManager::buildAggregatedFilesDigest() const {
         digest << QString("## File: %1\n%2").arg(fc.relativePath, fc.aiSummary.trimmed());
     return digest.join("\n\n");
 }
+
+int ProjectManager::indexedFilesCount() const {
+    int count = 0;
+    for (const auto& [relPath, fc] : m_files.asKeyValueRange()) {
+        if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) continue;
+        QString absPath = m_rootPath.isEmpty() ? relPath : QDir(m_rootPath).filePath(relPath);
+        if (QFileInfo::exists(absPath)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+QString ProjectManager::buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides,
+                                                        int* outIncludedFilesCount) const {
+    if (outIncludedFilesCount) *outIncludedFilesCount = 0;
+    if (m_rootPath.isEmpty()) return {};
+
+    QStringList blocks;
+    int fileCounter = 0;
+
+    for (const auto& [relPath, fc] : m_files.asKeyValueRange()) {
+        if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) {
+            continue;
+        }
+
+        QString absPath = QFileInfo(QDir(m_rootPath).filePath(relPath)).absoluteFilePath();
+        QString content;
+
+        if (unsavedBufferOverrides.contains(absPath)) {
+            content = unsavedBufferOverrides.value(absPath);
+        } else if (unsavedBufferOverrides.contains(relPath)) {
+            content = unsavedBufferOverrides.value(relPath);
+        } else {
+            QFile f(absPath);
+            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                continue;
+            }
+            content = QString::fromUtf8(f.readAll());
+        }
+
+        QString langId = ConfigManager::instance().languageIdForFile(absPath);
+        QString fence = "```";
+        while (content.contains(fence)) {
+            fence += '`';
+        }
+
+        QString block = QString("## File: `%1`\n%2%3\n%4\n%2")
+                            .arg(relPath, fence, langId, content);
+        blocks.append(block);
+        ++fileCounter;
+    }
+
+    if (outIncludedFilesCount) *outIncludedFilesCount = fileCounter;
+    return blocks.join("\n\n");
+}
+
+QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
+                                                        const QMap<QString, QString>& unsavedBufferOverrides,
+                                                        int* outIndexedFilesCount) const {
+    if (outIndexedFilesCount) *outIndexedFilesCount = 0;
+    QStringList sections;
+
+    if (!m_projectSystemPrompt.trimmed().isEmpty()) {
+        sections << "=== PROJECT SYSTEM INSTRUCTIONS ===\n" + m_projectSystemPrompt.trimmed();
+    }
+
+    bool includeSummary = (mode == ProjectCustomPromptContextMode::ProjectSummaryOnly ||
+                           mode == ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown);
+    bool includeSources = (mode == ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly ||
+                           mode == ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown);
+
+    if (includeSummary) {
+        QString sumText = m_projectSummary.trimmed();
+        if (sumText.isEmpty()) {
+            sumText = buildAggregatedFilesDigest().trimmed();
+        }
+        if (!sumText.isEmpty()) {
+            sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + sumText;
+        }
+    }
+
+    if (includeSources) {
+        int count = 0;
+        QString sourcesMd = buildIndexedFilesSourceMarkdown(unsavedBufferOverrides, &count);
+        if (outIndexedFilesCount) *outIndexedFilesCount = count;
+        if (!sourcesMd.trimmed().isEmpty()) {
+            sections << QString("=== ALL INDEXED PROJECT SOURCE FILES (%1 file(s)) ===\n\n%2")
+            .arg(count)
+                .arg(sourcesMd);
+        }
+    }
+
+    return sections.join("\n\n");
+}

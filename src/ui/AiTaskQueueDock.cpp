@@ -98,10 +98,11 @@ QString AiTaskQueueDock::formatDurationMs(qint64 ms) {
 
 QString AiTaskQueueDock::targetTypeToString(const AiTask& task) {
     switch (task.targetType) {
-    case TaskTargetType::ModifyEditorCode: return "Code Edit (User)";
-    case TaskTargetType::ExplainToDialog:  return "Explain Code (User)";
-    case TaskTargetType::FileSummary:      return "File Summary (Bg)";
-    case TaskTargetType::ProjectSummary:   return "Project Summary (Bg)";
+    case TaskTargetType::ModifyEditorCode:    return "Code Edit (User)";
+    case TaskTargetType::ExplainToDialog:     return "Explain Code (User)";
+    case TaskTargetType::ProjectCustomPrompt: return "Project Prompt (User)";
+    case TaskTargetType::FileSummary:         return "File Summary (Bg)";
+    case TaskTargetType::ProjectSummary:      return "Project Summary (Bg)";
     }
     return "Task";
 }

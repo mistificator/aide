@@ -137,6 +137,8 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/ui/MarkdownRenderer.cpp
     src/ui/PromptHistoryDock.h
     src/ui/PromptHistoryDock.cpp
+    src/ui/ProjectPromptResultDialog.h
+    src/ui/ProjectPromptResultDialog.cpp
 
     ${AIDE_PLATFORM_SOURCES}
 
