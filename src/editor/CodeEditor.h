@@ -22,6 +22,7 @@ public:
     bool loadFile(const QString& filePath);
     bool saveFile();
     bool saveFileAs(const QString& newFilePath);
+    void replaceContentUnsaved(const QString& newContent);
 
     QString filePath() const { return m_filePath; }
     QString savedDiskContent() const { return m_savedDiskContent; }

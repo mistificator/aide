@@ -12,7 +12,9 @@ public:
                      const QString& oldText,
                      const QString& newText,
                      const QString& langId,
-                     QWidget* parent = nullptr);
+                     QWidget* parent = nullptr,
+                     const QString& leftTitle = "BEFORE (Saved on Disk)",
+                     const QString& rightTitle = "AFTER (Current Unsaved Buffer)");
 
 private:
     void computeAndRenderDiff(const QString& oldText, const QString& newText);

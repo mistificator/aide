@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QVector>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 class QTextEdit;
@@ -18,6 +19,7 @@ struct ExtractedCodeSnippet {
     int index = 0;
     QString language;
     QString suggestedFilePath;
+    QString matchedProjectFilePath;
     QString title;
     QString code;
 };
@@ -40,6 +42,7 @@ public:
 signals:
     void cancelTaskRequested(const QString& taskId);
     void openContentInEditorRequested(const QString& suggestedPath, const QString& code, const QString& langId);
+    void replaceFileInEditorRequested(const QString& existingFilePath, const QString& newCode, const QString& langId);
     void fileSavedToDisk(const QString& filePath);
 
 private slots:
@@ -50,13 +53,18 @@ private slots:
     void onOpenFullMarkdownInEditor();
 
     void onSnippetSelectionChanged();
+    void onSnippetContextMenu(const QPoint& pos);
     void onCopySnippetCode();
     void onCopySelectedSnippetText();
     void onSaveSnippetAsFile();
     void onOpenSnippetInEditor();
+    void onReplaceSnippetInEditor();
+    void onDiffSnippetWithProjectFile();
     void onSaveAllDetectedFiles();
 
 private:
+    void refreshProjectFilesIndex();
+    QString resolveExistingProjectFile(const QString& suggestedPath) const;
     void renderMarkdownView(bool scrollToBottom = false);
     void parseCodeSnippetsFromMarkdown();
     static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
@@ -65,6 +73,7 @@ private:
     static QString normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt = false);
 
     QString m_projectRootPath;
+    QStringList m_projectFiles;
     QString m_taskId;
     QString m_markdownText;
     bool m_isStreaming = true;
@@ -89,6 +98,8 @@ private:
     QPlainTextEdit* m_snippetCodeEdit = nullptr;
     LexicalHighlighter* m_snippetHighlighter = nullptr;
 
+    QPushButton* m_replaceInEditorBtn = nullptr;
+    QPushButton* m_diffWithProjectBtn = nullptr;
     QPushButton* m_copySnippetBtn = nullptr;
     QPushButton* m_copySelectedSnippetBtn = nullptr;
     QPushButton* m_saveSnippetBtn = nullptr;
