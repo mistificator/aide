@@ -2,6 +2,7 @@
 #pragma once
 #include <QMainWindow>
 #include <QMap>
+#include <QList>
 #include <QPointer>
 #include "../editor/CodeEditor.h"
 
@@ -10,6 +11,8 @@ class QLabel;
 class QPushButton;
 class QComboBox;
 class QMenu;
+class QToolBar;
+class QAction;
 class QStackedWidget;
 class ProjectManager;
 class ProjectTreeModel;
@@ -66,6 +69,7 @@ private:
     void setupConnections();
     void openProjectAtPath(const QString& dirPath);
     void updateCentralViewState();
+    void updateAiActionsState();
     void applyProjectExplorerFilter();
     void rebuildSingleFileSummary(const QString& filePath,
                                   bool checkLimits = true,
@@ -107,10 +111,21 @@ private:
 
     QMap<QString, QPointer<ProjectPromptResultDialog>> m_projectPromptWindows;
 
+    QToolBar* m_aiToolBar = nullptr;
+    QAction* m_actProjCustomPrompt = nullptr;
+    QAction* m_actProjSummaryRebuild = nullptr;
+    QAction* m_actProjRecursiveSummary = nullptr;
+    QAction* m_actFileCustomPrompt = nullptr;
+    QAction* m_actFileSummaryRebuild = nullptr;
+    QAction* m_actCodeExplain = nullptr;
+    QAction* m_actAddDocs = nullptr;
+    QList<QAction*> m_otherFileAiActions;
+
     QMenu* m_recentProjectsMenu = nullptr;
     QMenu* m_windowMenu = nullptr;
     QMenu* m_themeMenu = nullptr;
     QMenu* m_langMenu = nullptr;
+
     QPushButton* m_queueStatusBtn = nullptr;
     QLabel* m_langStatusLabel = nullptr;
 };

@@ -33,6 +33,7 @@ private slots:
     void onBackendChanged(int index);
     void onFetchModelsClicked();
     void onSyncSyntaxExtensionsClicked();
+
     void onPromptSelectionChanged(int index);
     void onResetCurrentPromptClicked();
     void onResetAllPromptsClicked();
@@ -70,6 +71,7 @@ private:
     QSpinBox* m_summaryIntervalSpin = nullptr;
 
     // Вкладка 2: Behavior & Summary Rules
+    QComboBox* m_localeCombo = nullptr;
     QComboBox* m_autoSummaryModeCombo = nullptr;
     QCheckBox* m_useDocSummaryCheck = nullptr;
     QCheckBox* m_useProjSummaryCheck = nullptr;

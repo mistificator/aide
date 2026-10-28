@@ -51,6 +51,8 @@
 #include <QFormLayout>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QToolBar>
+#include <algorithm>
 
 class ProjectTreeModel : public QFileSystemModel {
 public:
@@ -259,10 +261,8 @@ void MainWindow::setupMenus() {
     });
     fileMenu->addAction("Open File...", QKeySequence::Open, this, &MainWindow::onOpenFile);
     fileMenu->addAction("Open Folder / Project...", QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onOpenFolder);
-
     m_recentProjectsMenu = fileMenu->addMenu("Recent Projects");
     connect(m_recentProjectsMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentProjectsMenu);
-
     fileMenu->addAction("Close All Projects", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::onCloseAllProjects);
     fileMenu->addSeparator();
     fileMenu->addAction("Save", QKeySequence::Save, m_tabWidget, &EditorTabWidget::saveCurrentDocument);
@@ -298,8 +298,17 @@ void MainWindow::setupMenus() {
     editMenu->addSeparator();
     editMenu->addAction("Preferences...", this, &MainWindow::onEditorPreferences);
 
+    // Скрываемый AI-тулбар
+    m_aiToolBar = addToolBar("AI Toolbar");
+    m_aiToolBar->setObjectName("AiMainToolBar");
+    m_aiToolBar->setIconSize(QSize(22, 22));
+    m_aiToolBar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_aiToolBar->setMovable(true);
+
     // 3. VIEW
     QMenu* viewMenu = menuBar()->addMenu("&View");
+    viewMenu->addAction(m_aiToolBar->toggleViewAction());
+    viewMenu->addSeparator();
     viewMenu->addAction(m_projectDock->toggleViewAction());
     viewMenu->addAction(m_inspectorDock->toggleViewAction());
     viewMenu->addAction(m_promptHistoryDock->toggleViewAction());
@@ -308,46 +317,110 @@ void MainWindow::setupMenus() {
     viewMenu->addSeparator();
     m_themeMenu = viewMenu->addMenu("Color Scheme");
     connect(m_themeMenu, &QMenu::aboutToShow, this, &MainWindow::populateThemeMenu);
-
     m_langMenu = viewMenu->addMenu("Syntax Highlighting");
     connect(m_langMenu, &QMenu::aboutToShow, this, &MainWindow::populateSyntaxMenu);
-
+    viewMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
+        statusBar()->showMessage("Downloading syntax & theme files...", 3000);
+        m_downloader->forceDownloadAll();
+    });
     viewMenu->addSeparator();
     viewMenu->addAction("Zoom In", QKeySequence::ZoomIn, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomIn(1); });
     viewMenu->addAction("Zoom Out", QKeySequence::ZoomOut, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomOut(1); });
 
     // 4. AI
     QMenu* aiMenu = menuBar()->addMenu("&AI");
-    const QList<QPair<QString, AiEditAction>> aiActs = {
-        {"Explain Code", AiEditAction::ExplainCode},
-        {"Refactor && Clean Up", AiEditAction::RefactorCode},
-        {"Find Bugs && Edge Cases", AiEditAction::FindBugs},
-        {"Optimize Performance", AiEditAction::OptimizePerformance},
-        {"Add Documentation / Comments", AiEditAction::AddDocumentation},
-        {"Generate Unit Tests", AiEditAction::GenerateUnitTests},
-        {"Complete / Continue Code", AiEditAction::CompleteCode},
-        {"Custom Prompt...", AiEditAction::CustomPrompt}
+
+    // 4.1. Подменю Current File
+    QMenu* currentFileMenu = aiMenu->addMenu("Current &File");
+    m_otherFileAiActions.clear();
+
+    m_actCodeExplain = currentFileMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::CodeExplain),
+        "Explain Code",
+        this,
+        [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(AiEditAction::ExplainCode); });
+    m_actCodeExplain->setToolTip("Explain Code (Current File / Selection)");
+
+    auto addFileAiAct = [&](const QString& label, AiEditAction act) -> QAction* {
+        QAction* a = currentFileMenu->addAction(label, this, [this, act]() {
+            if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(act);
+        });
+        m_otherFileAiActions.append(a);
+        return a;
     };
-    for (const auto& [label, act] : aiActs)
-        aiMenu->addAction(label, this, [this, act]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(act); });
-    aiMenu->addAction("Custom Prompt for Project...", QKeySequence("Ctrl+Shift+P"), this, [this]() {
-        onProjectCustomPrompt();
-    });
+
+    addFileAiAct("Refactor && Clean Up", AiEditAction::RefactorCode);
+    addFileAiAct("Find Bugs && Edge Cases", AiEditAction::FindBugs);
+    addFileAiAct("Optimize Performance", AiEditAction::OptimizePerformance);
+
+    m_actAddDocs = currentFileMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::AddDocs),
+        "Add Documentation / Comments",
+        this,
+        [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(AiEditAction::AddDocumentation); });
+    m_actAddDocs->setToolTip("Add Documentation / Comments (Current File / Selection)");
+
+    addFileAiAct("Generate Unit Tests", AiEditAction::GenerateUnitTests);
+    addFileAiAct("Complete / Continue Code", AiEditAction::CompleteCode);
+
+    currentFileMenu->addSeparator();
+    m_actFileCustomPrompt = currentFileMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::FileCustomPrompt),
+        "Custom Prompt...",
+        this,
+        [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(AiEditAction::CustomPrompt); });
+    m_actFileCustomPrompt->setToolTip("File Custom Prompt...");
+
+    currentFileMenu->addSeparator();
+    m_actFileSummaryRebuild = currentFileMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::FileSummaryRebuild),
+        "Rebuild Summary",
+        this,
+        [this]() {
+            if (auto* e = m_tabWidget->currentEditor(); e && !e->filePath().isEmpty())
+                rebuildSingleFileSummary(e->filePath(), true);
+        });
+    m_actFileSummaryRebuild->setToolTip("Rebuild File Summary");
+
+    // 4.2. Подменю Project
+    QMenu* projectAiMenu = aiMenu->addMenu("&Project");
+    m_actProjCustomPrompt = projectAiMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::ProjectCustomPrompt),
+        "Custom Prompt...",
+        QKeySequence("Ctrl+Shift+P"),
+        this,
+        [this]() { onProjectCustomPrompt(); });
+    m_actProjCustomPrompt->setToolTip("Project Custom Prompt... (Ctrl+Shift+P)");
+
+    projectAiMenu->addSeparator();
+    m_actProjSummaryRebuild = projectAiMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::ProjectSummaryRebuild),
+        "Rebuild Summary",
+        this,
+        &MainWindow::onRebuildProjectSummary);
+    m_actProjSummaryRebuild->setToolTip("Rebuild Project Summary");
+
+    m_actProjRecursiveSummary = projectAiMenu->addAction(
+        AppIcon::actionIcon(AppIcon::ActionIcon::ProjectRecursiveSummary),
+        "Generate Summaries (Recursive)...",
+        this,
+        [this]() { onRecursiveProjectSummary(); });
+    m_actProjRecursiveSummary->setToolTip("Generate Summaries for Project Files (Recursive)...");
+
+    // Заполнение AI-тулбара в заданном порядке:
+    // Project Custom Prompt, Project Summary Rebuild, Project Recursive Generate Summary |
+    // File Custom Prompt, File Summary Rebuild, Code Explain, Add Docs
+    m_aiToolBar->addAction(m_actProjCustomPrompt);
+    m_aiToolBar->addAction(m_actProjSummaryRebuild);
+    m_aiToolBar->addAction(m_actProjRecursiveSummary);
+    m_aiToolBar->addSeparator();
+    m_aiToolBar->addAction(m_actFileCustomPrompt);
+    m_aiToolBar->addAction(m_actFileSummaryRebuild);
+    m_aiToolBar->addAction(m_actCodeExplain);
+    m_aiToolBar->addAction(m_actAddDocs);
 
     aiMenu->addSeparator();
-    aiMenu->addAction("Rebuild File Summary", this, [this]() {
-        if (auto* e = m_tabWidget->currentEditor(); e && !e->filePath().isEmpty())
-            rebuildSingleFileSummary(e->filePath(), true);
-    });
-    aiMenu->addAction("Generate Summaries for Project Files (Recursive)...", this, [this]() {
-        onRecursiveProjectSummary();
-    });
-    aiMenu->addAction("Rebuild Project Summary", this, &MainWindow::onRebuildProjectSummary);
     aiMenu->addAction("Cancel All Background Tasks", m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
-    aiMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
-        statusBar()->showMessage("Downloading syntax & theme files...", 3000);
-        m_downloader->forceDownloadAll();
-    });
     aiMenu->addAction("Show AI Task Queue", this, [this]() {
         m_taskQueueDock->show();
         m_taskQueueDock->raise();
@@ -376,12 +449,13 @@ void MainWindow::setupMenus() {
         aboutBox.setText(
             QString("<b>AIDE (AI Development Environment)</b><br>"
                     "<b>Version:</b> %1<br><br>"
-                    "Qt6 Multi-Document Code Editor with Streaming LLM Integration, "
-                    "Dynamic KDE Syntax Highlighting, Side-by-Side Diff, and Two-Tier Priority Queue.")
+                    "Multi-Document Code Editor with Streaming LLM Integration")
                 .arg(QApplication::applicationVersion()));
         aboutBox.exec();
     });
     helpMenu->addAction("About Qt", qApp, &QApplication::aboutQt);
+
+    updateAiActionsState();
 }
 
 void MainWindow::setupConnections() {
@@ -414,6 +488,15 @@ void MainWindow::setupConnections() {
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
         m_projectTree->viewport()->update();
+    });
+    connect(m_projectMgr, &ProjectManager::projectLoaded, this, [this](const QString&) {
+        updateAiActionsState();
+    });
+    connect(m_projectMgr, &ProjectManager::projectClosed, this, [this]() {
+        updateAiActionsState();
+    });
+    connect(m_tabWidget, &EditorTabWidget::documentSaved, this, [this](const QString&, const QByteArray&) {
+        updateAiActionsState();
     });
 
     connect(m_taskQueue, &AiTaskQueue::queueStatusChanged, this, [this](int high, int low, bool busy) {
@@ -1040,20 +1123,36 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
     connect(resWin, &ProjectPromptResultDialog::openContentInEditorRequested, this,
             [this](const QString& suggestedPath, const QString& code, const QString& langId) {
-                if (!suggestedPath.isEmpty() && m_projectMgr->hasOpenProject()) {
-                    QString abs = QDir(m_projectMgr->projectRootPath()).filePath(suggestedPath);
-                    if (QFileInfo::exists(abs)) {
-                        if (auto* ed = m_tabWidget->openFile(abs)) {
-                            updateCentralViewState();
-                            return;
-                        }
-                    }
-                }
                 CodeEditor* ed = m_tabWidget->newDocument();
                 if (ed) {
                     ed->setPlainText(code);
-                    if (!langId.isEmpty()) ed->setSyntaxLanguage(langId);
+                    if (!langId.isEmpty()) {
+                        ed->setSyntaxLanguage(langId);
+                    } else if (!suggestedPath.isEmpty()) {
+                        ed->setSyntaxLanguage(ConfigManager::instance().languageIdForFile(suggestedPath));
+                    }
                     updateCentralViewState();
+                    raise();
+                    activateWindow();
+                    ed->setFocus();
+                }
+            });
+    connect(resWin, &ProjectPromptResultDialog::replaceFileInEditorRequested, this,
+            [this](const QString& existingFilePath, const QString& newCode, const QString& langId) {
+                if (existingFilePath.isEmpty()) return;
+                if (auto* ed = m_tabWidget->openFile(existingFilePath)) {
+                    ed->replaceContentUnsaved(newCode);
+                    if (!langId.isEmpty()) {
+                        ed->setSyntaxLanguage(langId);
+                    }
+                    updateCentralViewState();
+                    raise();
+                    activateWindow();
+                    ed->setFocus();
+                    statusBar()->showMessage(
+                        "Replaced content in editor (unsaved): " + QDir::toNativeSeparators(existingFilePath) +
+                            " — press Ctrl+S to save or Ctrl+Z to undo.",
+                        5000);
                 }
             });
     connect(resWin, &ProjectPromptResultDialog::fileSavedToDisk, this, [this](const QString& savedPath) {
@@ -1125,6 +1224,27 @@ void MainWindow::updateCentralViewState() {
     bool hasProj = m_projectMgr->hasOpenProject();
     m_projectDockStack->setCurrentIndex(hasProj ? 1 : 0);
     m_centralStack->setCurrentWidget(hasTabs ? static_cast<QWidget*>(m_tabWidget) : m_welcomeWidget);
+    updateAiActionsState();
+}
+
+void MainWindow::updateAiActionsState() {
+    const bool hasProj = (m_projectMgr && m_projectMgr->hasOpenProject());
+    CodeEditor* ed = m_tabWidget ? m_tabWidget->currentEditor() : nullptr;
+    const bool hasDoc = (ed != nullptr) && !ed->isAiBusy();
+    const bool hasSavedFileDoc = (ed != nullptr) && !ed->filePath().isEmpty();
+
+    if (m_actProjCustomPrompt)     m_actProjCustomPrompt->setEnabled(hasProj);
+    if (m_actProjSummaryRebuild)   m_actProjSummaryRebuild->setEnabled(hasProj);
+    if (m_actProjRecursiveSummary) m_actProjRecursiveSummary->setEnabled(hasProj);
+
+    if (m_actFileCustomPrompt)     m_actFileCustomPrompt->setEnabled(hasDoc);
+    if (m_actFileSummaryRebuild)   m_actFileSummaryRebuild->setEnabled(hasSavedFileDoc);
+    if (m_actCodeExplain)          m_actCodeExplain->setEnabled(hasDoc);
+    if (m_actAddDocs)              m_actAddDocs->setEnabled(hasDoc);
+
+    for (QAction* act : m_otherFileAiActions) {
+        if (act) act->setEnabled(hasDoc);
+    }
 }
 
 void MainWindow::applyProjectExplorerFilter() {
@@ -1233,7 +1353,13 @@ void MainWindow::populateRecentProjectsMenu() {
 
 void MainWindow::populateSyntaxMenu() {
     m_langMenu->clear();
-    const auto rules = ConfigManager::instance().fileTypeRules();
+    auto rules = ConfigManager::instance().fileTypeRules();
+    std::sort(rules.begin(), rules.end(), [](const FileTypeRule& a, const FileTypeRule& b) {
+        int cmp = a.displayName.compare(b.displayName, Qt::CaseInsensitive);
+        if (cmp != 0) return cmp < 0;
+        return a.langId.compare(b.langId, Qt::CaseInsensitive) < 0;
+    });
+
     for (const auto& r : rules) {
         QAction* act = m_langMenu->addAction(QString("%1 (%2)").arg(r.displayName, r.langId));
         if (auto* e = m_tabWidget->currentEditor()) {
@@ -1250,6 +1376,7 @@ void MainWindow::populateSyntaxMenu() {
 }
 
 void MainWindow::onActiveEditorChanged(CodeEditor* editor) {
+    updateAiActionsState();
     if (!editor) {
         m_inspectorDock->setActiveFile({});
         m_langStatusLabel->setText("Lang: -");

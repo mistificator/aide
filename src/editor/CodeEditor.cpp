@@ -113,6 +113,16 @@ bool CodeEditor::saveFileAs(const QString& newFilePath) {
     return true;
 }
 
+void CodeEditor::replaceContentUnsaved(const QString& newContent) {
+    if (toPlainText() == newContent) return;
+    QTextCursor c(document());
+    c.beginEditBlock();
+    c.select(QTextCursor::Document);
+    c.insertText(newContent);
+    c.endEditBlock();
+    document()->setModified(true);
+}
+
 QString CodeEditor::displayName() const {
     return m_filePath.isEmpty() ? "Untitled" : QFileInfo(m_filePath).fileName();
 }

@@ -16,6 +16,7 @@
 #include <QFile>
 #include <QDialogButtonBox>
 #include <QMessageBox>
+#include <algorithm>
 
 EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downloader, QWidget* parent)
     : QDialog(parent), m_downloader(downloader) {
@@ -24,7 +25,7 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
 
     auto* mainLay = new QVBoxLayout(this);
 
-    // 1. Блок загрузки из Интернета и с диска
+    // 1. Источник определений синтаксиса
     auto* srcGroup = new QGroupBox("Syntax Definitions Source (KDE Kate XML Format)", this);
     auto* srcLay = new QVBoxLayout(srcGroup);
 
@@ -55,7 +56,7 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
     srcLay->addWidget(m_statusLabel);
     mainLay->addWidget(srcGroup);
 
-    // 2. Таблица типов файлов и расширений
+    // 2. Таблица поддерживаемых типов файлов (с сортировкой по Language ID)
     auto* tableGroup = new QGroupBox("Supported File Types & Extensions Mapping", this);
     auto* tableLay = new QVBoxLayout(tableGroup);
 
@@ -65,15 +66,18 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
     m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSortIndicatorShown(true);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     tableLay->addWidget(m_table);
 
     auto* tblBtnRow = new QHBoxLayout();
     auto* addRowBtn = new QPushButton("+ Add File Type", tableGroup);
     auto* removeRowBtn = new QPushButton("- Remove Selected", tableGroup);
+    auto* sortByLangBtn = new QPushButton("Sort by Language ID", tableGroup);
     auto* syncAllBtn = new QPushButton("Download All Missing XMLs", tableGroup);
     tblBtnRow->addWidget(addRowBtn);
     tblBtnRow->addWidget(removeRowBtn);
+    tblBtnRow->addWidget(sortByLangBtn);
     tblBtnRow->addStretch();
     tblBtnRow->addWidget(syncAllBtn);
     tableLay->addLayout(tblBtnRow);
@@ -86,7 +90,7 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
     ConfigManager::instance().repairFileTypeExtensions();
     populateTable(ConfigManager::instance().fileTypeRules());
 
-    // Автоматически подставляем известные расширения и имя .xml файла, когда пользователь меняет Language ID в таблице
+    // Автозаполнение .xml и расширений при изменении Language ID
     connect(m_table, &QTableWidget::cellChanged, this, [this](int row, int col) {
         if (col != 0) return;
         auto* langItem = m_table->item(row, 0);
@@ -95,9 +99,12 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
         if (langId.isEmpty() || langId == "custom") return;
 
         m_table->blockSignals(true);
-        auto* nameItem = m_table->item(row, 1);
-        auto* xmlItem = m_table->item(row, 2);
-        auto* extItem = m_table->item(row, 3);
+        m_table->setSortingEnabled(false);
+
+        int currentRow = m_table->row(langItem);
+        auto* nameItem = m_table->item(currentRow, 1);
+        auto* xmlItem = m_table->item(currentRow, 2);
+        auto* extItem = m_table->item(currentRow, 3);
 
         QString xmlFile = langId + ".xml";
         if (xmlItem && (xmlItem->text().trimmed().isEmpty() || xmlItem->text() == "custom.xml")) {
@@ -127,6 +134,9 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
                 extItem->setText(knownExts.join(", "));
             }
         }
+
+        m_table->setSortingEnabled(true);
+        m_table->sortItems(0, Qt::AscendingOrder);
         m_table->blockSignals(false);
     });
 
@@ -138,6 +148,10 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
     connect(importLocalBtn, &QPushButton::clicked, this, &EditorPreferencesDialog::onImportLocalSyntaxFile);
     connect(addRowBtn, &QPushButton::clicked, this, &EditorPreferencesDialog::onAddCustomRow);
     connect(removeRowBtn, &QPushButton::clicked, this, &EditorPreferencesDialog::onRemoveSelectedRow);
+    connect(sortByLangBtn, &QPushButton::clicked, this, [this]() {
+        m_table->sortItems(0, Qt::AscendingOrder);
+    });
+
     connect(syncAllBtn, &QPushButton::clicked, this, [this]() {
         ConfigManager::instance().setSyntaxBaseUrl(m_baseUrlEdit->text());
         ConfigManager::instance().setFileTypeRules(collectRulesFromTable());
@@ -168,8 +182,16 @@ EditorPreferencesDialog::EditorPreferencesDialog(ThemeAndSyntaxDownloader* downl
 }
 
 void EditorPreferencesDialog::populateTable(const QVector<FileTypeRule>& rules) {
+    QVector<FileTypeRule> sortedRules = rules;
+    std::sort(sortedRules.begin(), sortedRules.end(), [](const FileTypeRule& a, const FileTypeRule& b) {
+        return a.langId.compare(b.langId, Qt::CaseInsensitive) < 0;
+    });
+
+    m_table->blockSignals(true);
+    m_table->setSortingEnabled(false);
     m_table->setRowCount(0);
-    for (const auto& r : rules) {
+
+    for (const auto& r : sortedRules) {
         int row = m_table->rowCount();
         m_table->insertRow(row);
         m_table->setItem(row, 0, new QTableWidgetItem(r.langId));
@@ -177,6 +199,10 @@ void EditorPreferencesDialog::populateTable(const QVector<FileTypeRule>& rules) 
         m_table->setItem(row, 2, new QTableWidgetItem(r.syntaxFile));
         m_table->setItem(row, 3, new QTableWidgetItem(r.extensions.join(", ")));
     }
+
+    m_table->setSortingEnabled(true);
+    m_table->sortItems(0, Qt::AscendingOrder);
+    m_table->blockSignals(false);
 }
 
 QVector<FileTypeRule> EditorPreferencesDialog::collectRulesFromTable() const {
@@ -200,6 +226,10 @@ QVector<FileTypeRule> EditorPreferencesDialog::collectRulesFromTable() const {
         }
         if (!r.langId.isEmpty()) rules.append(r);
     }
+
+    std::sort(rules.begin(), rules.end(), [](const FileTypeRule& a, const FileTypeRule& b) {
+        return a.langId.compare(b.langId, Qt::CaseInsensitive) < 0;
+    });
     return rules;
 }
 
@@ -223,8 +253,8 @@ void EditorPreferencesDialog::onImportLocalSyntaxFile() {
     QString path = QFileDialog::getOpenFileName(this, "Import Syntax Highlighting XML File",
                                                 startDir, "Syntax Files (*.xml *.json);;All Files (*)");
     if (path.isEmpty()) return;
-    ConfigManager::instance().setLastDialogDir(path);
 
+    ConfigManager::instance().setLastDialogDir(path);
     QFileInfo fi(path);
     QString destPath = ConfigManager::instance().syntaxDirPath() + "/" + fi.fileName();
     if (QFile::exists(destPath) && QFileInfo(destPath).canonicalFilePath() != fi.canonicalFilePath()) {
@@ -233,6 +263,7 @@ void EditorPreferencesDialog::onImportLocalSyntaxFile() {
     QFile::copy(path, destPath);
 
     auto meta = LexicalHighlighter::inspectSyntaxXml(destPath);
+
     FileTypeRule r;
     r.langId = fi.baseName().toLower();
     r.displayName = meta.valid ? meta.name : fi.baseName().toUpper();
@@ -248,18 +279,29 @@ void EditorPreferencesDialog::onImportLocalSyntaxFile() {
     ConfigManager::instance().setFileTypeRules(current);
     ConfigManager::instance().upsertFileTypeRule(r);
     populateTable(ConfigManager::instance().fileTypeRules());
+
     m_statusLabel->setText(QString("Imported '%1' (%2) with extensions: %3")
                                .arg(r.displayName, r.syntaxFile, r.extensions.join(", ")));
 }
 
 void EditorPreferencesDialog::onAddCustomRow() {
+    m_table->blockSignals(true);
+    m_table->setSortingEnabled(false);
+
     int row = m_table->rowCount();
     m_table->insertRow(row);
-    m_table->setItem(row, 0, new QTableWidgetItem("custom"));
+    auto* langItem = new QTableWidgetItem("custom");
+    m_table->setItem(row, 0, langItem);
     m_table->setItem(row, 1, new QTableWidgetItem("Custom Language"));
     m_table->setItem(row, 2, new QTableWidgetItem("custom.xml"));
     m_table->setItem(row, 3, new QTableWidgetItem("ext"));
-    m_table->selectRow(row);
+
+    m_table->setSortingEnabled(true);
+    m_table->blockSignals(false);
+
+    int sortedRow = m_table->row(langItem);
+    m_table->selectRow(sortedRow);
+    m_table->scrollToItem(langItem);
 }
 
 void EditorPreferencesDialog::onRemoveSelectedRow() {

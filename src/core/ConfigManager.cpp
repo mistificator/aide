@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QCryptographicHash>
 #include <QSet>
+#include <QLocale>
 #include <algorithm>
 
 ConfigManager::ConfigManager(QObject* parent) : QObject(parent) {
@@ -72,6 +73,7 @@ AiBehaviorConfig ConfigManager::defaultAiBehavior() {
     b.includeDocumentSummaryInPrompt = true;
     b.includeProjectSummaryInPrompt = true;
     b.projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
+    b.responseLocale = "default";
     b.summaryUseSyntaxExtensions = true;
     b.promptHistoryLimit = 50;
     b.summaryAllowedFilenames = {
@@ -398,6 +400,10 @@ void ConfigManager::loadConfig() {
                 static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
             m_aiBehavior.projectCustomPromptContextMode =
                 static_cast<ProjectCustomPromptContextMode>(qBound(0, projCtxVal, 2));
+            m_aiBehavior.responseLocale = beh["responseLocale"].toString("default").trimmed();
+            if (m_aiBehavior.responseLocale.isEmpty()) {
+                m_aiBehavior.responseLocale = "default";
+            }
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
             m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
 
@@ -694,6 +700,7 @@ void ConfigManager::saveConfig() {
         {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
+        {"responseLocale", m_aiBehavior.responseLocale.isEmpty() ? QStringLiteral("default") : m_aiBehavior.responseLocale},
         {"summaryAllowedFilenames", allowedFilesArr},
         {"summaryAllowedExtensions", allowedExtsArr},
         {"summaryIgnoredDirs", ignoredDirsArr}
@@ -1022,7 +1029,54 @@ FileTypeRule ConfigManager::ruleForLanguage(const QString& langId) const {
     return {langId, langId.toUpper(), langId + ".xml", {langId}};
 }
 
+QString ConfigManager::promptLanguageInstruction() const {
+    const QString locName = m_aiBehavior.responseLocale.trimmed();
+    if (locName.isEmpty() || locName.compare(QLatin1String("default"), Qt::CaseInsensitive) == 0) {
+        return {};
+    }
+
+    QLocale loc(locName);
+    QLocale::Language lang = loc.language();
+    if (lang == QLocale::C || lang == QLocale::AnyLanguage) {
+        lang = QLocale::codeToLanguage(locName);
+    }
+    if (lang == QLocale::C || lang == QLocale::AnyLanguage) {
+        return {};
+    }
+
+    const QString engLang = QLocale::languageToString(lang).trimmed();
+    if (engLang.isEmpty()) {
+        return {};
+    }
+
+    QString nativeLang = QLocale(lang).nativeLanguageName().trimmed();
+    if (nativeLang.isEmpty()) {
+        nativeLang = loc.nativeLanguageName().trimmed();
+    }
+
+    QString langDesc = engLang;
+    if (!nativeLang.isEmpty() && nativeLang.compare(engLang, Qt::CaseInsensitive) != 0) {
+        langDesc += QString(" (%1)").arg(nativeLang);
+    }
+
+    return QString("LANGUAGE REQUIREMENT: Write all Markdown text, explanations, summaries, documentation, and code comments in %1.")
+        .arg(langDesc);
+}
+
 QString ConfigManager::promptTemplate(const QString& actionKey) const {
-    QString val = m_promptTemplates[actionKey].toString();
-    return val.isEmpty() ? defaultPromptTemplate(actionKey) : val;
+    QString val = m_promptTemplates[actionKey].toString().trimmed();
+    if (val.isEmpty()) {
+        val = defaultPromptTemplate(actionKey).trimmed();
+    }
+
+    const QString langInst = promptLanguageInstruction();
+    if (langInst.isEmpty()) {
+        return val;
+    }
+
+    if (val.endsWith(':')) {
+        val.chop(1);
+        return val.trimmed() + "\n" + langInst + ":";
+    }
+    return val + "\n" + langInst;
 }

@@ -1,9 +1,11 @@
 // src/ui/ProjectPromptResultDialog.cpp
 #include "ProjectPromptResultDialog.h"
+#include "DiffViewerDialog.h"
 #include "MarkdownRenderer.h"
 #include "../syntax/LexicalHighlighter.h"
 #include "../syntax/ColorScheme.h"
 #include "../core/ConfigManager.h"
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QSplitter>
@@ -17,10 +19,12 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QFileDialog>
+#include <QFile>
 #include <QSaveFile>
 #include <QFileInfo>
 #include <QDir>
 #include <QMessageBox>
+#include <QMenu>
 #include <QScrollBar>
 #include <QFontDatabase>
 #include <QRegularExpression>
@@ -33,16 +37,18 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_projectRootPath(projectRootPath),
     m_taskId(taskId) {
     setAttribute(Qt::WA_DeleteOnClose);
+
+    refreshProjectFilesIndex();
+
     QString shortPrompt = promptTitle.simplified().left(70);
     if (promptTitle.simplified().length() > 70) shortPrompt += "...";
     setWindowTitle("AI Project Custom Prompt Result — " + shortPrompt);
-    resize(1220, 780);
+    resize(1260, 780);
 
     auto* mainLay = new QVBoxLayout(this);
     mainLay->setContentsMargins(8, 8, 8, 8);
     mainLay->setSpacing(6);
 
-    // Верхняя панель статуса и действий со всем Markdown-документом
     auto* topBar = new QHBoxLayout();
     m_statusLabel = new QLabel("AI: Generating Markdown response...", this);
     m_statusLabel->setStyleSheet("color: #8be9fd; font-weight: bold;");
@@ -54,7 +60,6 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
 
     m_toggleRawBtn = new QPushButton("View Raw Markdown", this);
     m_toggleRawBtn->setCheckable(true);
-
     m_copyMdBtn = new QPushButton("Copy Full Markdown", this);
     m_saveMdBtn = new QPushButton("Save Markdown Document (.md)...", this);
     m_saveMdBtn->setStyleSheet(
@@ -71,7 +76,6 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     topBar->addWidget(m_saveMdBtn);
     mainLay->addLayout(topBar);
 
-    // Главный горизонтальный сплиттер: слева Markdown-документ, справа извлечённые файлы и фрагменты кода
     auto* mainSplitter = new QSplitter(Qt::Horizontal, this);
     mainSplitter->setChildrenCollapsible(false);
 
@@ -86,6 +90,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     QFont monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     monoFont.setPointSize(10);
     m_rawView->setFont(monoFont);
+
     auto scheme = ColorScheme::loadByName(ConfigManager::instance().activeTheme());
     QString edStyle = QString("QPlainTextEdit { background-color: %1; color: %2; selection-background-color: %3; }")
                           .arg(scheme.editorBg.name(), scheme.editorFg.name(), scheme.selectionBg.name());
@@ -94,7 +99,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_leftStack->addWidget(m_renderedView);
     m_leftStack->addWidget(m_rawView);
 
-    // Правая панель: Извлечённые файлы и фрагменты кода
+    // Правая панель: Извлечённые файлы и блоки кода
     auto* rightPane = new QWidget(mainSplitter);
     auto* rightLay = new QVBoxLayout(rightPane);
     rightLay->setContentsMargins(0, 0, 0, 0);
@@ -120,13 +125,14 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_snippetTree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     m_snippetTree->setAlternatingRowColors(true);
     m_snippetTree->setRootIsDecorated(false);
+    m_snippetTree->setContextMenuPolicy(Qt::CustomContextMenu);
 
     auto* previewBox = new QWidget(rightSplit);
     auto* previewLay = new QVBoxLayout(previewBox);
     previewLay->setContentsMargins(0, 0, 0, 0);
     previewLay->setSpacing(4);
 
-    m_snippetHeaderLabel = new QLabel("Select a file or code fragment above to preview, copy, or save.", previewBox);
+    m_snippetHeaderLabel = new QLabel("Select a file or code fragment above to preview, diff, or open.", previewBox);
     m_snippetHeaderLabel->setStyleSheet("color: #888899; font-size: 11px; font-weight: bold;");
     m_snippetHeaderLabel->setWordWrap(true);
 
@@ -137,25 +143,50 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_snippetHighlighter = new LexicalHighlighter(m_snippetCodeEdit->document());
     m_snippetHighlighter->setColorScheme(scheme);
 
-    auto* snippetBtnRow = new QHBoxLayout();
+    // Ряд кнопок 1: действия с существующим файлом проекта (Replace in Editor, Diff) и открытие в новой вкладке
+    auto* snippetActionRow1 = new QHBoxLayout();
+    m_replaceInEditorBtn = new QPushButton("Open && Replace in Editor (Unsaved)", previewBox);
+    m_replaceInEditorBtn->setToolTip(
+        "Open the matching project file in the editor and replace its content with this code without saving to disk");
+    m_replaceInEditorBtn->setStyleSheet(
+        "QPushButton { background-color: #ffb86c; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 10px; }"
+        "QPushButton:hover { background-color: #ffc98a; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_diffWithProjectBtn = new QPushButton("View Diff...", previewBox);
+    m_diffWithProjectBtn->setToolTip("Compare existing project file on disk with this generated code");
+    m_diffWithProjectBtn->setStyleSheet(
+        "QPushButton { background-color: #8be9fd; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 10px; }"
+        "QPushButton:hover { background-color: #a4f0ff; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_openSnippetTabBtn = new QPushButton("Open as New Tab", previewBox);
+    m_openSnippetTabBtn->setToolTip("Open this code fragment in a new untitled editor tab");
+
+    snippetActionRow1->addWidget(m_replaceInEditorBtn);
+    snippetActionRow1->addWidget(m_diffWithProjectBtn);
+    snippetActionRow1->addStretch();
+    snippetActionRow1->addWidget(m_openSnippetTabBtn);
+
+    // Ряд кнопок 2: копирование и сохранение файла на диск
+    auto* snippetActionRow2 = new QHBoxLayout();
     m_copySnippetBtn = new QPushButton("Copy Block", previewBox);
     m_copySelectedSnippetBtn = new QPushButton("Copy Selected", previewBox);
-    m_openSnippetTabBtn = new QPushButton("Open in Editor Tab", previewBox);
     m_saveSnippetBtn = new QPushButton("Save File / Fragment As...", previewBox);
     m_saveSnippetBtn->setStyleSheet(
         "QPushButton { background-color: #50fa7b; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 10px; }"
         "QPushButton:hover { background-color: #69ff94; }"
         "QPushButton:disabled { background-color: #44475a; color: #888899; }");
 
-    snippetBtnRow->addWidget(m_copySnippetBtn);
-    snippetBtnRow->addWidget(m_copySelectedSnippetBtn);
-    snippetBtnRow->addWidget(m_openSnippetTabBtn);
-    snippetBtnRow->addStretch();
-    snippetBtnRow->addWidget(m_saveSnippetBtn);
+    snippetActionRow2->addWidget(m_copySnippetBtn);
+    snippetActionRow2->addWidget(m_copySelectedSnippetBtn);
+    snippetActionRow2->addStretch();
+    snippetActionRow2->addWidget(m_saveSnippetBtn);
 
     previewLay->addWidget(m_snippetHeaderLabel);
     previewLay->addWidget(m_snippetCodeEdit, 1);
-    previewLay->addLayout(snippetBtnRow);
+    previewLay->addLayout(snippetActionRow1);
+    previewLay->addLayout(snippetActionRow2);
 
     rightSplit->addWidget(m_snippetTree);
     rightSplit->addWidget(previewBox);
@@ -169,10 +200,11 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     mainSplitter->addWidget(rightPane);
     mainSplitter->setStretchFactor(0, 3);
     mainSplitter->setStretchFactor(1, 2);
-    mainSplitter->setSizes({700, 500});
-
+    mainSplitter->setSizes({700, 540});
     mainLay->addWidget(mainSplitter, 1);
 
+    m_replaceInEditorBtn->setEnabled(false);
+    m_diffWithProjectBtn->setEnabled(false);
     m_copySnippetBtn->setEnabled(false);
     m_copySelectedSnippetBtn->setEnabled(false);
     m_openSnippetTabBtn->setEnabled(false);
@@ -196,7 +228,10 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     connect(m_snippetTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem*, QTreeWidgetItem*) {
         onSnippetSelectionChanged();
     });
+    connect(m_snippetTree, &QTreeWidget::customContextMenuRequested, this, &ProjectPromptResultDialog::onSnippetContextMenu);
     connect(m_snippetCodeEdit, &QPlainTextEdit::copyAvailable, m_copySelectedSnippetBtn, &QPushButton::setEnabled);
+    connect(m_replaceInEditorBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onReplaceSnippetInEditor);
+    connect(m_diffWithProjectBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onDiffSnippetWithProjectFile);
     connect(m_copySnippetBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onCopySnippetCode);
     connect(m_copySelectedSnippetBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onCopySelectedSnippetText);
     connect(m_saveSnippetBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSaveSnippetAsFile);
@@ -206,7 +241,6 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_streamRenderTimer.setSingleShot(true);
     connect(&m_streamRenderTimer, &QTimer::timeout, this, &ProjectPromptResultDialog::onStreamRenderTick);
 
-    // Отслеживаем ручную прокрутку пользователем, чтобы не сбивать скролл при приходе новых токенов
     QScrollBar* vbar = m_renderedView->verticalScrollBar();
     connect(vbar, &QScrollBar::valueChanged, this, [this, vbar](int val) {
         if (m_updatingRenderedView) return;
@@ -219,13 +253,81 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     });
 }
 
+void ProjectPromptResultDialog::refreshProjectFilesIndex() {
+    m_projectFiles.clear();
+    if (m_projectRootPath.isEmpty() || !QDir(m_projectRootPath).exists()) return;
+
+    const auto& cfgMgr = ConfigManager::instance();
+    QDir rootDir(m_projectRootPath);
+
+    auto scanDir = [&](auto& self, const QString& currentDirPath) -> void {
+        QDir dir(currentDirPath);
+        const QFileInfoList subDirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
+                                                        QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& subFi : subDirs) {
+            if (cfgMgr.isDirectoryIgnoredForSummary(subFi.fileName())) continue;
+            self(self, subFi.absoluteFilePath());
+        }
+        const QFileInfoList files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot,
+                                                      QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& fileFi : files) {
+            if (fileFi.suffix().compare("aide", Qt::CaseInsensitive) == 0) continue;
+            QString rel = rootDir.relativeFilePath(fileFi.absoluteFilePath());
+            rel.replace('\\', '/');
+            m_projectFiles.append(rel);
+        }
+    };
+
+    scanDir(scanDir, m_projectRootPath);
+}
+
+QString ProjectPromptResultDialog::resolveExistingProjectFile(const QString& suggestedPath) const {
+    if (m_projectRootPath.isEmpty() || suggestedPath.trimmed().isEmpty()) return {};
+
+    QString clean = QDir::cleanPath(suggestedPath.trimmed());
+    clean.replace('\\', '/');
+    while (clean.startsWith("./")) clean.remove(0, 2);
+    while (clean.startsWith('/')) clean.remove(0, 1);
+    if (clean.isEmpty()) return {};
+
+    // 1. Прямая проверка относительного пути от корня проекта
+    QFileInfo directFi(QDir(m_projectRootPath).filePath(clean));
+    if (directFi.exists() && directFi.isFile()) {
+        return directFi.absoluteFilePath();
+    }
+
+    // 2. Поиск по индексу файлов проекта (регистронезависимое совпадение пути или суффикса пути / имени файла)
+    QString suffixTarget = "/" + clean;
+    QStringList matches;
+    for (const QString& rel : m_projectFiles) {
+        if (rel.compare(clean, Qt::CaseInsensitive) == 0) {
+            return QFileInfo(QDir(m_projectRootPath).filePath(rel)).absoluteFilePath();
+        }
+        if (rel.endsWith(suffixTarget, Qt::CaseInsensitive)) {
+            matches.append(rel);
+        }
+    }
+
+    if (matches.size() == 1) {
+        return QFileInfo(QDir(m_projectRootPath).filePath(matches.first())).absoluteFilePath();
+    }
+    if (matches.size() > 1) {
+        // Выбираем файл с самым коротким относительным путём (ближе к корню проекта)
+        std::sort(matches.begin(), matches.end(), [](const QString& a, const QString& b) {
+            return a.length() < b.length();
+        });
+        return QFileInfo(QDir(m_projectRootPath).filePath(matches.first())).absoluteFilePath();
+    }
+
+    return {};
+}
+
 void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
     if (chunk.isEmpty()) return;
     m_markdownText += chunk;
     m_statusLabel->setText(QString("AI: Streaming Markdown response (%1 chars)...").arg(m_markdownText.length()));
 
     if (!m_streamRenderTimer.isActive()) {
-        // Адаптивный интервал коалесцирования (120..420 мс), чтобы цикл событий Qt не блокировался на больших текстах
         int delayMs = qBound(120, m_markdownText.length() / 120, 420);
         m_streamRenderTimer.start(delayMs);
     }
@@ -234,12 +336,15 @@ void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
 void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText) {
     m_isStreaming = false;
     m_streamRenderTimer.stop();
+
     if (!fullMarkdownText.trimmed().isEmpty()) {
         m_markdownText = fullMarkdownText;
     }
     m_cancelBtn->hide();
+
     renderMarkdownView(false);
     parseCodeSnippetsFromMarkdown();
+
     m_statusLabel->setStyleSheet("color: #50fa7b; font-weight: bold;");
     m_statusLabel->setText(QString("Completed: %1 chars | Extracted %2 code block(s)")
                                .arg(m_markdownText.length())
@@ -285,15 +390,11 @@ void ProjectPromptResultDialog::renderMarkdownView(bool scrollToBottom) {
 
 void ProjectPromptResultDialog::onStreamRenderTick() {
     if (!m_isStreaming) return;
-
-    // Если пользователь прямо сейчас тянет ползунок скроллбара мышью — откладываем перерисовку,
-    // чтобы не прерывать перетаскивание
     if (m_renderedView->verticalScrollBar()->isSliderDown() ||
         m_rawView->verticalScrollBar()->isSliderDown()) {
         m_streamRenderTimer.start(100);
         return;
     }
-
     renderMarkdownView(m_followStreamScroll);
     parseCodeSnippetsFromMarkdown();
 }
@@ -373,25 +474,21 @@ QString ProjectPromptResultDialog::normalizeAndValidatePathCandidate(QString can
     QString fileName = fi.fileName();
     QString ext = fi.suffix();
 
-    // Проверка известных имён файлов без расширения (Makefile, Dockerfile и т.д.)
     const QStringList allowedNames = ConfigManager::instance().aiBehavior().summaryAllowedFilenames;
     if (ext.isEmpty()) {
-        for (const QString& SpecialName : allowedNames) {
-            if (fileName.compare(SpecialName.trimmed(), Qt::CaseInsensitive) == 0) {
+        for (const QString& specialName : allowedNames) {
+            if (fileName.compare(specialName.trimmed(), Qt::CaseInsensitive) == 0) {
                 return candidate;
             }
         }
         return {};
     }
 
-    // Расширение должно начинаться с буквы (исключает числа вроде 1.2) и иметь разумную длину
     if (ext.length() > 12 || !ext[0].isLetter()) {
         return {};
     }
 
     if (requireKnownOrLowerExt && !candidate.contains('/')) {
-        // Если путь без '/' и не был выделен бэктиками, требуем строчное расширение
-        // (отсекает конструкции вида Boost.Beast, Qt.Core и т.п.)
         if (ext != ext.toLower()) {
             return {};
         }
@@ -404,13 +501,11 @@ QString ProjectPromptResultDialog::detectFilePathFromLine(const QString& line) {
     QString clean = line.trimmed();
     if (clean.isEmpty()) return {};
 
-    // 1. Наивысший приоритет: путь внутри обратных кавычек `path/to/file.ext`
     static const QRegularExpression rxBacktick(R"(`([^`]+)`)");
     auto btIt = rxBacktick.globalMatch(clean);
     while (btIt.hasNext()) {
         auto m = btIt.next();
         QString token = m.captured(1).trimmed();
-        // Пропускаем вызовы функций вроде `readLine()` или `split(' ')`
         if (token.contains('(') || token.contains(')') || token.contains(' ')) continue;
         QString valid = normalizeAndValidatePathCandidate(token, false);
         if (!valid.isEmpty()) {
@@ -418,7 +513,6 @@ QString ProjectPromptResultDialog::detectFilePathFromLine(const QString& line) {
         }
     }
 
-    // 2. Явная метка File: / Path: / Filename: / Файл:
     static const QRegularExpression rxExplicitLabel(
         R"((?:^|[\s\*#\-])(?:File(?:\s*name)?|Path|Файл)\s*[:\-]\s*[`\*\"']*([A-Za-z0-9_\-\./\\]+(?:\.[A-Za-z][A-Za-z0-9_+\-]*)?))",
         QRegularExpression::CaseInsensitiveOption);
@@ -430,7 +524,6 @@ QString ProjectPromptResultDialog::detectFilePathFromLine(const QString& line) {
         }
     }
 
-    // 3. Поиск пути в заголовке или строке-метке (с проверкой, что это не вызов метода и не число)
     static const QRegularExpression rxPath(
         R"((?:^|[\s:`\*#\-"\(\[])([A-Za-z0-9_\-\./\\]+\.[A-Za-z][A-Za-z0-9_+\-]*)(?=$|[\s:`\*\"'\)\],;]))");
     auto it = rxPath.globalMatch(clean);
@@ -461,17 +554,13 @@ QString ProjectPromptResultDialog::detectFilePathFromCodeComment(const QString& 
     } else if (trimmed.startsWith("--")) {
         commentBody = trimmed.mid(2).trimmed();
     } else if (trimmed.startsWith('#')) {
-        // Исключаем шебанг (#!/usr/bin/env ...)
         if (trimmed.startsWith("#!")) return {};
-
-        // Исключаем директивы препроцессора C/C++/C# (#include, #ifndef, #define, #pragma и т.д.)
         static const QRegularExpression rxPreproc(
             R"(^#\s*(?:include|pragma|ifndef|ifdef|if|elif|else|endif|define|undef|error|warning|line|import|using|region|endregion)\b)",
             QRegularExpression::CaseInsensitiveOption);
         if (rxPreproc.match(trimmed).hasMatch()) {
             return {};
         }
-
         int i = 1;
         while (i < trimmed.length() && trimmed[i] == '#') ++i;
         commentBody = trimmed.mid(i).trimmed();
@@ -481,15 +570,12 @@ QString ProjectPromptResultDialog::detectFilePathFromCodeComment(const QString& 
 
     if (commentBody.isEmpty()) return {};
 
-    // Убираем необязательный префикс "File:" или "Path:" в начале комментария
     static const QRegularExpression rxPrefix(
         R"(^(?:File(?:\s*name)?|Path|Файл)\s*[:\-]\s*)",
         QRegularExpression::CaseInsensitiveOption);
     commentBody.remove(rxPrefix);
     commentBody = commentBody.trimmed();
 
-    // Комментарий с путём к файлу должен начинаться непосредственно с пути
-    // и либо состоять только из него, либо отделяться дефисом/скобкой (например: "// src/main.cpp - entry point")
     static const QRegularExpression rxCommentPath(
         R"(^[`\*\"']*([A-Za-z0-9_\-\./\\]+(?:\.[A-Za-z][A-Za-z0-9_+\-]*)?)[`\*\"']*(?:\s*(?:[\-\—\|]|\(.*\)).*)?$)");
     auto m = rxCommentPath.match(commentBody);
@@ -525,9 +611,9 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
             fenceMarker = QString(backticks, '`');
             QString info = trimmed.mid(backticks).trimmed();
 
-            // Разбираем инфо-строку: ```cpp:src/main.cpp или ```cpp src/main.cpp
             fenceLang.clear();
             fenceHintPath.clear();
+
             if (!info.isEmpty()) {
                 int colonIdx = info.indexOf(':');
                 int spaceIdx = info.indexOf(' ');
@@ -560,20 +646,16 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                 snip.language = fenceLang.isEmpty() ? "txt" : fenceLang;
                 snip.code = codeLines.join('\n');
 
-                // 1. Приоритет 1: путь из открывающей строки ```lang:path
                 QString detectedPath = fenceHintPath;
 
-                // 2. Приоритет 2: заголовок секции (### File: `main.cpp`) или явная метка над блоком кода
                 if (detectedPath.isEmpty()) {
-                    static const QRegularExpression rxHr(R"(^(?:-\s*){3,}$|^(?:\*\s*){3,}$|^(?:_\s*){3,}$)");
+                    static const QRegularExpression rxHr(R"(^(?:-\s*){3,}$|^(?:\*\s*){3,}$\vert{}^(?:_\s*){3,}$)");
                     static const QRegularExpression rxLabelLine(
                         R"(^(?:[#]+|\*{1,2}|[-+]\s+\*{0,2})?\s*(?:File(?:\s*name)?|Path|Файл)\s*[:\-])",
                         QRegularExpression::CaseInsensitiveOption);
 
                     int minLine = qMax(lastFenceEndLine + 1, fenceStartLine - 25);
 
-                    // Проход А: ищем ближайший заголовок Markdown (# .. ######) или явную строку "File: ..."
-                    // (пропуская обычные абзацы текста между заголовком и блоком кода)
                     for (int prev = fenceStartLine - 1; prev >= minLine; --prev) {
                         QString prevLine = lines[prev].trimmed();
                         if (prevLine.isEmpty()) continue;
@@ -584,13 +666,10 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
 
                         if (isHeading || isExplicitFileLabel) {
                             detectedPath = detectFilePathFromLine(prevLine);
-                            // Останавливаемся на ближайшем заголовке секции
                             break;
                         }
                     }
 
-                    // Проход Б: если заголовка нет, проверяем строку непосредственно над блоком кода —
-                    // вдруг она состоит ТОЛЬКО из имени файла (например, "**`src/main.cpp`**" или "`main.cpp`:")
                     if (detectedPath.isEmpty()) {
                         for (int prev = fenceStartLine - 1; prev >= qMax(minLine, fenceStartLine - 3); --prev) {
                             QString prevLine = lines[prev].trimmed();
@@ -607,7 +686,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                     }
                 }
 
-                // 3. Приоритет 3: комментарий в первой строке самого кода (// src/foo.cpp или # script.py)
                 if (detectedPath.isEmpty() && !codeLines.isEmpty()) {
                     detectedPath = detectFilePathFromCodeComment(codeLines.first());
                 }
@@ -616,7 +694,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                 if (!detectedPath.isEmpty() && (snip.language == "txt" || snip.language.isEmpty())) {
                     snip.language = ConfigManager::instance().languageIdForFile(detectedPath);
                 }
-
                 snip.title = detectedPath.isEmpty()
                                  ? QString("Fragment #%1 (%2)").arg(snip.index).arg(snip.language)
                                  : detectedPath;
@@ -637,13 +714,17 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
 
 void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
     QVector<ExtractedCodeSnippet> newSnippets = extractSnippets(m_markdownText);
+    for (auto& snip : newSnippets) {
+        if (!snip.suggestedFilePath.isEmpty()) {
+            snip.matchedProjectFilePath = resolveExistingProjectFile(snip.suggestedFilePath);
+        }
+    }
 
-    // Во время стриминга избегаем пересоздания QTreeWidget и повторной подсветки кода,
-    // если количество и содержимое закрытых кодовых блоков не изменились
     if (newSnippets.size() == m_snippets.size()) {
         bool identical = true;
         for (int i = 0; i < newSnippets.size(); ++i) {
             if (newSnippets[i].title != m_snippets[i].title ||
+                newSnippets[i].matchedProjectFilePath != m_snippets[i].matchedProjectFilePath ||
                 newSnippets[i].code.length() != m_snippets[i].code.length() ||
                 newSnippets[i].language != m_snippets[i].language) {
                 identical = false;
@@ -667,14 +748,25 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
         int lineCount = s.code.isEmpty() ? 0 : (s.code.count('\n') + 1);
         auto* item = new QTreeWidgetItem(m_snippetTree);
         item->setText(0, QString::number(s.index));
-        item->setText(1, s.title);
-        item->setText(2, QString("%1 (%2 L)").arg(s.language).arg(lineCount));
-        if (!s.suggestedFilePath.isEmpty()) {
+
+        if (!s.matchedProjectFilePath.isEmpty()) {
+            QString relMatched = QDir(m_projectRootPath).relativeFilePath(s.matchedProjectFilePath);
+            item->setText(1, QString("%1 [Existing]").arg(relMatched));
+            item->setToolTip(1, QString("Matches existing project file:\n%1").arg(
+                                    QDir::toNativeSeparators(s.matchedProjectFilePath)));
+            item->setForeground(1, QColor("#8be9fd"));
+            ++detectedFileCount;
+        } else if (!s.suggestedFilePath.isEmpty()) {
+            item->setText(1, QString("%1 [New]").arg(s.title));
+            item->setToolTip(1, QString("New file path suggested by AI: %1").arg(s.suggestedFilePath));
             item->setForeground(1, QColor("#50fa7b"));
             ++detectedFileCount;
         } else {
+            item->setText(1, s.title);
             item->setForeground(1, QColor("#f8f8f2"));
         }
+
+        item->setText(2, QString("%1 (%2 L)").arg(s.language).arg(lineCount));
     }
 
     m_saveAllFilesBtn->setEnabled(detectedFileCount > 0);
@@ -696,6 +788,8 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
     } else {
         m_snippetCodeEdit->clear();
         m_snippetHeaderLabel->setText("No fenced code blocks (```) found in Markdown yet.");
+        m_replaceInEditorBtn->setEnabled(false);
+        m_diffWithProjectBtn->setEnabled(false);
         m_copySnippetBtn->setEnabled(false);
         m_openSnippetTabBtn->setEnabled(false);
         m_saveSnippetBtn->setEnabled(false);
@@ -705,6 +799,8 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
 void ProjectPromptResultDialog::onSnippetSelectionChanged() {
     int row = m_snippetTree->indexOfTopLevelItem(m_snippetTree->currentItem());
     if (row < 0 || row >= m_snippets.size()) {
+        m_replaceInEditorBtn->setEnabled(false);
+        m_diffWithProjectBtn->setEnabled(false);
         m_copySnippetBtn->setEnabled(false);
         m_openSnippetTabBtn->setEnabled(false);
         m_saveSnippetBtn->setEnabled(false);
@@ -712,23 +808,66 @@ void ProjectPromptResultDialog::onSnippetSelectionChanged() {
     }
 
     const auto& s = m_snippets[row];
-    m_snippetHeaderLabel->setText(
-        s.suggestedFilePath.isEmpty()
-            ? QString("Fragment #%1 | Language: %2 (you can edit or select lines below before saving/copying)")
-                  .arg(s.index)
-                  .arg(s.language)
-            : QString("Detected File: %1 | Language: %2")
-                  .arg(s.suggestedFilePath, s.language));
+    bool hasExistingMatch = !s.matchedProjectFilePath.isEmpty();
 
-    QString langId = s.suggestedFilePath.isEmpty()
+    if (hasExistingMatch) {
+        QString relMatched = QDir(m_projectRootPath).relativeFilePath(s.matchedProjectFilePath);
+        m_snippetHeaderLabel->setText(
+            QString("Matched Project File: %1 | Language: %2 (use 'Open & Replace in Editor' or 'View Diff...')")
+                .arg(relMatched, s.language));
+        m_snippetHeaderLabel->setStyleSheet("color: #8be9fd; font-size: 11px; font-weight: bold;");
+    } else if (!s.suggestedFilePath.isEmpty()) {
+        m_snippetHeaderLabel->setText(
+            QString("Detected New File: %1 | Language: %2")
+                .arg(s.suggestedFilePath, s.language));
+        m_snippetHeaderLabel->setStyleSheet("color: #50fa7b; font-size: 11px; font-weight: bold;");
+    } else {
+        m_snippetHeaderLabel->setText(
+            QString("Fragment #%1 | Language: %2 (you can edit or select lines below before saving/copying)")
+                .arg(s.index)
+                .arg(s.language));
+        m_snippetHeaderLabel->setStyleSheet("color: #888899; font-size: 11px; font-weight: bold;");
+    }
+
+    QString targetForLang = hasExistingMatch ? s.matchedProjectFilePath : s.suggestedFilePath;
+    QString langId = targetForLang.isEmpty()
                          ? s.language
-                         : ConfigManager::instance().languageIdForFile(s.suggestedFilePath);
+                         : ConfigManager::instance().languageIdForFile(targetForLang);
     m_snippetHighlighter->setLanguage(langId);
     m_snippetCodeEdit->setPlainText(s.code);
 
+    m_replaceInEditorBtn->setEnabled(hasExistingMatch);
+    m_diffWithProjectBtn->setEnabled(hasExistingMatch);
     m_copySnippetBtn->setEnabled(true);
     m_openSnippetTabBtn->setEnabled(true);
     m_saveSnippetBtn->setEnabled(true);
+}
+
+void ProjectPromptResultDialog::onSnippetContextMenu(const QPoint& pos) {
+    QTreeWidgetItem* item = m_snippetTree->itemAt(pos);
+    if (!item) return;
+    m_snippetTree->setCurrentItem(item);
+
+    int row = m_snippetTree->indexOfTopLevelItem(item);
+    if (row < 0 || row >= m_snippets.size()) return;
+    const auto& s = m_snippets[row];
+    bool hasExistingMatch = !s.matchedProjectFilePath.isEmpty();
+
+    QMenu menu(this);
+    QAction* replaceAct = menu.addAction("Open && Replace in Editor (Unsaved)",
+                                         this, &ProjectPromptResultDialog::onReplaceSnippetInEditor);
+    replaceAct->setEnabled(hasExistingMatch);
+
+    QAction* diffAct = menu.addAction("View Diff with Project File...",
+                                      this, &ProjectPromptResultDialog::onDiffSnippetWithProjectFile);
+    diffAct->setEnabled(hasExistingMatch);
+
+    menu.addSeparator();
+    menu.addAction("Open as New Editor Tab", this, &ProjectPromptResultDialog::onOpenSnippetInEditor);
+    menu.addAction("Copy Code Block", this, &ProjectPromptResultDialog::onCopySnippetCode);
+    menu.addAction("Save File / Fragment As...", this, &ProjectPromptResultDialog::onSaveSnippetAsFile);
+
+    menu.exec(m_snippetTree->viewport()->mapToGlobal(pos));
 }
 
 void ProjectPromptResultDialog::onCopySnippetCode() {
@@ -746,10 +885,9 @@ void ProjectPromptResultDialog::onCopySelectedSnippetText() {
 void ProjectPromptResultDialog::onSaveSnippetAsFile() {
     int row = m_snippetTree->indexOfTopLevelItem(m_snippetTree->currentItem());
     if (row < 0 || row >= m_snippets.size()) return;
-
     const auto& s = m_snippets[row];
+
     QTextCursor c = m_snippetCodeEdit->textCursor();
-    // Если пользователь выделил часть фрагмента в предпросмотре, спросим: сохранить весь блок или только выделенный фрагмент
     QString contentToSave = m_snippetCodeEdit->toPlainText();
     if (c.hasSelection()) {
         auto ans = QMessageBox::question(
@@ -765,7 +903,9 @@ void ProjectPromptResultDialog::onSaveSnippetAsFile() {
 
     QString baseDir = ConfigManager::instance().resolveInitialDialogDir(m_projectRootPath);
     QString initialPath;
-    if (!s.suggestedFilePath.isEmpty()) {
+    if (!s.matchedProjectFilePath.isEmpty()) {
+        initialPath = s.matchedProjectFilePath;
+    } else if (!s.suggestedFilePath.isEmpty()) {
         initialPath = QDir(baseDir).filePath(s.suggestedFilePath);
     } else {
         QString ext = s.language.isEmpty() ? "txt" : s.language;
@@ -789,6 +929,8 @@ void ProjectPromptResultDialog::onSaveSnippetAsFile() {
     f.write(contentToSave.toUtf8());
     if (f.commit()) {
         m_statusLabel->setText("Saved file: " + QDir::toNativeSeparators(savePath));
+        refreshProjectFilesIndex();
+        parseCodeSnippetsFromMarkdown();
         emit fileSavedToDisk(savePath);
     }
 }
@@ -798,6 +940,44 @@ void ProjectPromptResultDialog::onOpenSnippetInEditor() {
     if (row < 0 || row >= m_snippets.size()) return;
     const auto& s = m_snippets[row];
     emit openContentInEditorRequested(s.suggestedFilePath, m_snippetCodeEdit->toPlainText(), s.language);
+}
+
+void ProjectPromptResultDialog::onReplaceSnippetInEditor() {
+    int row = m_snippetTree->indexOfTopLevelItem(m_snippetTree->currentItem());
+    if (row < 0 || row >= m_snippets.size()) return;
+    const auto& s = m_snippets[row];
+    if (s.matchedProjectFilePath.isEmpty()) return;
+
+    QString langId = ConfigManager::instance().languageIdForFile(s.matchedProjectFilePath);
+    emit replaceFileInEditorRequested(s.matchedProjectFilePath, m_snippetCodeEdit->toPlainText(), langId);
+}
+
+void ProjectPromptResultDialog::onDiffSnippetWithProjectFile() {
+    int row = m_snippetTree->indexOfTopLevelItem(m_snippetTree->currentItem());
+    if (row < 0 || row >= m_snippets.size()) return;
+    const auto& s = m_snippets[row];
+    if (s.matchedProjectFilePath.isEmpty()) return;
+
+    QFile f(s.matchedProjectFilePath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Diff Error",
+                             "Failed to read existing project file:\n" +
+                                 QDir::toNativeSeparators(s.matchedProjectFilePath));
+        return;
+    }
+    QString existingContent = QString::fromUtf8(f.readAll());
+    QString newContent = m_snippetCodeEdit->toPlainText();
+    QString relTitle = QDir(m_projectRootPath).relativeFilePath(s.matchedProjectFilePath);
+    QString langId = ConfigManager::instance().languageIdForFile(s.matchedProjectFilePath);
+
+    DiffViewerDialog dlg(relTitle,
+                         existingContent,
+                         newContent,
+                         langId,
+                         this,
+                         "BEFORE (Existing Project File: " + relTitle + ")",
+                         "AFTER (AI Prompt Result)");
+    dlg.exec();
 }
 
 void ProjectPromptResultDialog::onSaveAllDetectedFiles() {
@@ -810,7 +990,10 @@ void ProjectPromptResultDialog::onSaveAllDetectedFiles() {
     int savedCount = 0;
     for (const auto& s : m_snippets) {
         if (s.suggestedFilePath.isEmpty()) continue;
-        QString absPath = QDir(targetRoot).filePath(s.suggestedFilePath);
+        QString relPath = !s.matchedProjectFilePath.isEmpty()
+                              ? QDir(m_projectRootPath).relativeFilePath(s.matchedProjectFilePath)
+                              : s.suggestedFilePath;
+        QString absPath = QDir(targetRoot).filePath(relPath);
         QFileInfo fi(absPath);
         QDir().mkpath(fi.absolutePath());
 
@@ -823,5 +1006,7 @@ void ProjectPromptResultDialog::onSaveAllDetectedFiles() {
             }
         }
     }
+    refreshProjectFilesIndex();
+    parseCodeSnippetsFromMarkdown();
     m_statusLabel->setText(QString("Saved %1 file(s) into %2").arg(savedCount).arg(QDir::toNativeSeparators(targetRoot)));
 }
