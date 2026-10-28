@@ -17,8 +17,12 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QLabel>
+#include <QLocale>
+#include <QSet>
+#include <algorithm>
 
 namespace {
+
 struct PromptActionMeta {
     const char* key;
     const char* menuLabel;
@@ -26,24 +30,25 @@ struct PromptActionMeta {
 };
 
 constexpr PromptActionMeta kPromptActions[] = {
-    {"ExplainCode",         "Explain Code",                             "Triggered by 'AI -> Explain Code'. Output is rendered as Markdown in a dialog."},
-    {"RefactorCode",        "Refactor & Clean Up",                      "Triggered by 'AI -> Refactor & Clean Up'. Replaces selected or full code in editor."},
-    {"FindBugs",            "Find Bugs & Edge Cases",                   "Triggered by 'AI -> Find Bugs & Edge Cases'. Replaces selected or full code in editor."},
-    {"OptimizePerformance", "Optimize Performance",                     "Triggered by 'AI -> Optimize Performance'. Replaces selected or full code in editor."},
-    {"AddDocumentation",    "Add Documentation / Comments",             "Triggered by 'AI -> Add Documentation / Comments'. Replaces selected or full code in editor."},
-    {"GenerateUnitTests",   "Generate Unit Tests",                      "Triggered by 'AI -> Generate Unit Tests'. Replaces or appends unit test code in editor."},
-    {"CompleteCode",        "Complete / Continue Code",                 "Triggered by 'AI -> Complete / Continue Code'. Completes implementation in editor."},
-    {"CustomPrompt",        "Custom Prompt... (Document Instruction)",  "Appended after user's custom instruction in 'AI -> Custom Prompt...' for a document."},
-    {"ProjectCustomPrompt", "Custom Prompt for Project... (Markdown)",  "Appended after user's custom instruction in 'AI -> Custom Prompt for Project...'. Requests Markdown output."},
+    {"ExplainCode",         "Explain Code",                             "Triggered by 'AI -> Current File -> Explain Code'. Output is rendered as Markdown in a dialog."},
+    {"RefactorCode",        "Refactor & Clean Up",                      "Triggered by 'AI -> Current File -> Refactor & Clean Up'. Replaces selected or full code in editor."},
+    {"FindBugs",            "Find Bugs & Edge Cases",                   "Triggered by 'AI -> Current File -> Find Bugs & Edge Cases'. Replaces selected or full code in editor."},
+    {"OptimizePerformance", "Optimize Performance",                     "Triggered by 'AI -> Current File -> Optimize Performance'. Replaces selected or full code in editor."},
+    {"AddDocumentation",    "Add Documentation / Comments",             "Triggered by 'AI -> Current File -> Add Documentation / Comments'. Replaces selected or full code in editor."},
+    {"GenerateUnitTests",   "Generate Unit Tests",                      "Triggered by 'AI -> Current File -> Generate Unit Tests'. Replaces or appends unit test code in editor."},
+    {"CompleteCode",        "Complete / Continue Code",                 "Triggered by 'AI -> Current File -> Complete / Continue Code'. Completes implementation in editor."},
+    {"CustomPrompt",        "Custom Prompt... (Document Instruction)",  "Appended after user's custom instruction in 'AI -> Current File -> Custom Prompt...' for a document."},
+    {"ProjectCustomPrompt", "Custom Prompt for Project... (Markdown)",  "Appended after user's custom instruction in 'AI -> Project -> Custom Prompt...'. Requests Markdown output."},
     {"FileSummary",         "Rebuild File Summary",                     "Used when indexing a source file into Markdown summary (background or manual)."},
     {"ProjectSummary",      "Rebuild Project Summary",                  "Used when synthesizing the global project architecture summary from file summaries."}
 };
+
 } // namespace
 
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(650, 640);
+    resize(660, 680);
 
     auto& cfgMgr = ConfigManager::instance();
     m_profiles = cfgMgr.aiProfiles();
@@ -65,6 +70,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_newProfileBtn = new QPushButton("New...", profileGroup);
     m_deleteProfileBtn = new QPushButton("Delete", profileGroup);
     m_resetProfilesBtn = new QPushButton("Reset Presets", profileGroup);
+
     profileRow->addWidget(new QLabel("Profile:", profileGroup));
     profileRow->addWidget(m_profileCombo, 1);
     profileRow->addWidget(m_newProfileBtn);
@@ -134,9 +140,9 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     form->addRow("Context Window:", m_ctxWindowSpin);
     form->addRow("Request Timeout:", m_timeoutSpin);
     form->addRow("Project Summary Rebuild:", m_summaryIntervalSpin);
+
     connLay->addLayout(form);
     connLay->addStretch();
-
     tabs->addTab(connPage, "Connection && Profiles");
 
     // =========================================================================
@@ -146,6 +152,79 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* behLay = new QVBoxLayout(behPage);
 
     auto behCfg = cfgMgr.aiBehavior();
+
+    // Группа выбора языка генерации Markdown и комментариев в коде
+    auto* localeGroup = new QGroupBox("Localization (Markdown && Code Comments Language)", behPage);
+    auto* localeLay = new QHBoxLayout(localeGroup);
+    localeLay->addWidget(new QLabel("Output Language:", localeGroup));
+    m_localeCombo = new QComboBox(localeGroup);
+    m_localeCombo->addItem("Default (No language instruction)", QStringLiteral("default"));
+
+    struct LanguageEntry {
+        QLocale::Language language = QLocale::AnyLanguage;
+        QString code;
+        QString langName;
+        QString label;
+    };
+
+    QVector<LanguageEntry> langEntries;
+    QSet<QLocale::Language> seenLanguages;
+    const QList<QLocale> sysLocales = QLocale::matchingLocales(
+        QLocale::AnyLanguage, QLocale::AnyScript, QLocale::AnyTerritory);
+
+    for (const QLocale& loc : sysLocales) {
+        const QLocale::Language lang = loc.language();
+        if (lang == QLocale::C || lang == QLocale::AnyLanguage || seenLanguages.contains(lang)) {
+            continue;
+        }
+
+        const QString langStr = QLocale::languageToString(lang).trimmed();
+        const QString langCode = QLocale::languageToCode(lang).trimmed();
+        if (langStr.isEmpty() || langCode.isEmpty()) {
+            continue;
+        }
+        seenLanguages.insert(lang);
+
+        // Предпочитаем самоназвание из базовой локали языка, при отсутствии — из текущей локали
+        QString nativeLang = QLocale(lang).nativeLanguageName().trimmed();
+        if (nativeLang.isEmpty()) {
+            nativeLang = loc.nativeLanguageName().trimmed();
+        }
+
+        QString disp = langStr;
+        if (!nativeLang.isEmpty() && nativeLang.compare(langStr, Qt::CaseInsensitive) != 0) {
+            disp += QString(" [%1]").arg(nativeLang);
+        }
+
+        langEntries.append({lang, langCode, langStr, disp});
+    }
+
+    std::sort(langEntries.begin(), langEntries.end(), [](const LanguageEntry& a, const LanguageEntry& b) {
+        return a.langName.compare(b.langName, Qt::CaseInsensitive) < 0;
+    });
+
+    int selectedLocaleIdx = 0;
+    const QString targetLocale = behCfg.responseLocale.trimmed().isEmpty()
+                                     ? QStringLiteral("default")
+                                     : behCfg.responseLocale.trimmed();
+    const QLocale::Language targetLangEnum =
+        (targetLocale.compare(QLatin1String("default"), Qt::CaseInsensitive) == 0)
+            ? QLocale::AnyLanguage
+            : QLocale(targetLocale).language();
+
+    for (int i = 0; i < langEntries.size(); ++i) {
+        m_localeCombo->addItem(langEntries[i].label, langEntries[i].code);
+        if (langEntries[i].code.compare(targetLocale, Qt::CaseInsensitive) == 0 ||
+            langEntries[i].langName.compare(targetLocale, Qt::CaseInsensitive) == 0 ||
+            (targetLangEnum != QLocale::AnyLanguage &&
+             targetLangEnum != QLocale::C &&
+             langEntries[i].language == targetLangEnum)) {
+            selectedLocaleIdx = i + 1;
+        }
+    }
+    m_localeCombo->setCurrentIndex(selectedLocaleIdx);
+    localeLay->addWidget(m_localeCombo, 1);
+    behLay->addWidget(localeGroup);
 
     auto* promptGroup = new QGroupBox("System Prompt Context Composition (When Working with a Document)", behPage);
     auto* promptLay = new QVBoxLayout(promptGroup);
@@ -175,7 +254,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     projPromptCtxLay->addWidget(m_projCustomPromptCtxCombo, 1);
     behLay->addWidget(projPromptCtxGroup);
 
-    auto* filterGroup = new QGroupBox("Automatic & Recursive File Summary Generation Rules", behPage);
+    auto* filterGroup = new QGroupBox("Automatic && Recursive File Summary Generation Rules", behPage);
     auto* filterLay = new QVBoxLayout(filterGroup);
 
     auto* autoModeRow = new QHBoxLayout();
@@ -222,7 +301,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
 
     behLay->addWidget(filterGroup);
     behLay->addStretch();
-
     tabs->addTab(behPage, "Behavior && Summary Rules");
 
     // =========================================================================
@@ -231,7 +309,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* promptsPage = new QWidget(tabs);
     auto* promptsLay = new QVBoxLayout(promptsPage);
 
-    auto* promptsGroup = new QGroupBox("AI Menu & Summary Prompt Templates", promptsPage);
+    auto* promptsGroup = new QGroupBox("AI Menu && Summary Prompt Templates", promptsPage);
     auto* promptsGroupLay = new QVBoxLayout(promptsGroup);
 
     auto* actionRow = new QHBoxLayout();
@@ -270,8 +348,8 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_promptHistoryLimitSpin->setValue(behCfg.promptHistoryLimit);
     historyLay->addWidget(m_promptHistoryLimitSpin);
     historyLay->addStretch();
-    promptsLay->addWidget(historyGroup);
 
+    promptsLay->addWidget(historyGroup);
     promptsLay->addWidget(promptsGroup, 1);
     tabs->addTab(promptsPage, "Prompts");
 
@@ -535,6 +613,8 @@ AiConnectionConfig AiPreferencesDialog::resultConfig() const {
 
 AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
     AiBehaviorConfig b;
+    b.responseLocale = m_localeCombo ? m_localeCombo->currentData().toString().trimmed() : QStringLiteral("default");
+    if (b.responseLocale.isEmpty()) b.responseLocale = QStringLiteral("default");
     b.autoSummaryMode = static_cast<AutoSummaryMode>(m_autoSummaryModeCombo->currentData().toInt());
     b.includeDocumentSummaryInPrompt = m_useDocSummaryCheck->isChecked();
     b.includeProjectSummaryInPrompt = m_useProjSummaryCheck->isChecked();

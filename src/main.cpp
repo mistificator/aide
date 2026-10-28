@@ -1,6 +1,7 @@
 // src/main.cpp
 #include <QApplication>
 #include "core/ConfigManager.h"
+#include "syntax/ColorScheme.h"
 #include "ui/AppIcon.h"
 #include "ui/MainWindow.h"
 
@@ -19,8 +20,15 @@ int main(int argc, char *argv[]) {
     cfg.initializeStorage();
     cfg.loadConfig();
 
+    ColorScheme::installWindowThemeFilter(&app);
+    ColorScheme::applyApplicationTheme(cfg.activeTheme());
+    QObject::connect(&cfg, &ConfigManager::themeChanged, &app, [](const QString& themeName) {
+        ColorScheme::applyApplicationTheme(themeName);
+    });
+
     MainWindow win;
     win.show();
+    ColorScheme::applyWindowDarkTitleBar(&win, ColorScheme::isDarkTheme(cfg.activeTheme()));
 
     return app.exec();
 }

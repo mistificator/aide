@@ -143,11 +143,21 @@ CodeEditor* EditorTabWidget::openFile(const QString& filePath) {
 }
 
 void EditorTabWidget::registerEditor(CodeEditor* ed) {
-    connect(ed->document(), &QTextDocument::modificationChanged, this, [this, ed](bool) { updateTabTitle(ed); });
-    connect(ed, &CodeEditor::busyStateChanged, this, [this, ed](CodeEditor*, bool) { updateTabTitle(ed); });
+    connect(ed->document(), &QTextDocument::modificationChanged, this, [this, ed](bool) {
+        updateTabTitle(ed);
+    });
+    connect(ed, &CodeEditor::busyStateChanged, this, [this, ed](CodeEditor*, bool) {
+        updateTabTitle(ed);
+        if (ed == currentEditor()) {
+            emit activeEditorChanged(ed);
+        }
+    });
     connect(ed, &CodeEditor::fileSaved, this, [this, ed](const QString& path, const QByteArray& content) {
         updateTabTitle(ed);
         emit documentSaved(path, content);
+        if (ed == currentEditor()) {
+            emit activeEditorChanged(ed);
+        }
     });
     connect(ed, &CodeEditor::aiActionRequested, this, &EditorTabWidget::aiActionTriggered);
     connect(ed, &CodeEditor::cancelAiRequested, this, &EditorTabWidget::cancelAiTriggered);

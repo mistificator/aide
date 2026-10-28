@@ -3,10 +3,10 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
-#include <QByteArray>
 #include <QJsonObject>
 #include <QVector>
 #include <QDateTime>
+#include <QByteArray>
 
 enum class AiBackendType { Ollama, KoboldCpp, OpenAiCompatible };
 
@@ -17,9 +17,9 @@ enum class AutoSummaryMode {
 };
 
 enum class ProjectCustomPromptContextMode {
-    ProjectSummaryOnly = 0,             // 1. Только саммари проекта
-    IndexedSourcesMarkdownOnly = 1,     // 2. Все проиндексированные файлы в одном внутреннем Markdown
-    BothSummaryAndSourcesMarkdown = 2   // 3. И саммари проекта, и внутренний Markdown с исходниками
+    ProjectSummaryOnly = 0,
+    IndexedSourcesMarkdownOnly = 1,
+    BothSummaryAndSourcesMarkdown = 2
 };
 
 struct AiConnectionConfig {
@@ -51,10 +51,11 @@ struct AiBehaviorConfig {
     bool includeProjectSummaryInPrompt = true;
     ProjectCustomPromptContextMode projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     bool summaryUseSyntaxExtensions = true;
+    int promptHistoryLimit = 50;
+    QString responseLocale = "default";
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
     QStringList summaryIgnoredDirs;
-    int promptHistoryLimit = 50;
 };
 
 struct PromptHistoryItem {
@@ -80,7 +81,7 @@ public:
     void loadConfig();
     void saveConfig();
 
-    // Профили и конфигурация подключения AI
+    // Профили подключения AI
     AiConnectionConfig aiConfig() const { return m_aiConfig; }
     void setAiConfig(const AiConnectionConfig& cfg);
 
@@ -89,21 +90,21 @@ public:
     void setAiProfiles(const QVector<AiConnectionConfig>& profiles, const QString& activeProfileName);
     static QVector<AiConnectionConfig> defaultAiProfiles();
 
-    // Настройки поведения AI и правил генерации саммари
+    // Настройки поведения AI и фильтрации саммари
     AiBehaviorConfig aiBehavior() const { return m_aiBehavior; }
     void setAiBehavior(const AiBehaviorConfig& behavior);
     static AiBehaviorConfig defaultAiBehavior();
 
-    QStringList extensionsFromLoadedSyntaxes() const;
-    QStringList supportedProjectFileNameFilters() const;
-    bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
-    bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
+    QString promptLanguageInstruction() const;
 
-    // Фильтр файлов в Project Explorer
-    bool projectExplorerFilterSupported() const { return m_projectExplorerFilterSupported; }
-    void setProjectExplorerFilterSupported(bool filterSupportedOnly);
+    // Шаблоны промптов
+    QJsonObject promptTemplates() const { return m_promptTemplates; }
+    void setPromptTemplates(const QJsonObject& templates);
+    QString promptTemplate(const QString& actionKey) const;
+    static QJsonObject defaultPromptTemplates();
+    static QString defaultPromptTemplate(const QString& actionKey);
 
-    // Глобальная история кастомных промптов
+    // История промптов
     QVector<PromptHistoryItem> promptHistory() const { return m_promptHistory; }
     void setPromptHistory(const QVector<PromptHistoryItem>& items);
     void addPromptToHistory(const QString& promptText);
@@ -111,7 +112,16 @@ public:
     void setPromptHistoryLimit(int limit);
     static QString computePromptHash(const QString& promptText);
 
-    // Тема и пути
+    QStringList extensionsFromLoadedSyntaxes() const;
+    bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
+    bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
+
+    // Фильтр дерева проекта
+    bool projectExplorerFilterSupported() const { return m_projectExplorerFilterSupported; }
+    void setProjectExplorerFilterSupported(bool filterOnlySupported);
+    QStringList supportedProjectFileNameFilters() const;
+
+    // Темы, пути и геометрия окна
     QString activeTheme() const { return m_activeTheme; }
     void setActiveTheme(const QString& themeName);
 
@@ -133,7 +143,7 @@ public:
     QByteArray windowState() const { return m_windowState; }
     void setWindowGeometryAndState(const QByteArray& geometry, const QByteArray& state);
 
-    // Типы файлов и подсветка синтаксиса
+    // Подсветка синтаксиса
     QString syntaxBaseUrl() const { return m_syntaxBaseUrl; }
     void setSyntaxBaseUrl(const QString& url);
 
@@ -142,17 +152,10 @@ public:
     void upsertFileTypeRule(const FileTypeRule& rule);
     bool hasFileTypeRule(const QString& langId) const;
     void repairFileTypeExtensions();
-    static QStringList knownExtensionsForLanguage(const QString& langIdOrFile);
+    static QStringList knownExtensionsForLanguage(const QString& langId);
 
     QString languageIdForFile(const QString& filePath) const;
     FileTypeRule ruleForLanguage(const QString& langId) const;
-
-    // Шаблоны промптов
-    QString promptTemplate(const QString& actionKey) const;
-    QJsonObject promptTemplates() const { return m_promptTemplates; }
-    void setPromptTemplates(const QJsonObject& templates);
-    static QJsonObject defaultPromptTemplates();
-    static QString defaultPromptTemplate(const QString& actionKey);
 
     QString configDirPath() const;
     QString syntaxDirPath() const { return configDirPath() + "/syntax"; }
@@ -161,12 +164,12 @@ public:
 signals:
     void aiConfigChanged(const AiConnectionConfig& newConfig);
     void aiBehaviorChanged(const AiBehaviorConfig& newBehavior);
-    void projectExplorerFilterChanged(bool filterSupportedOnly);
     void promptsChanged();
     void promptHistoryChanged();
     void themeChanged(const QString& themeName);
     void fileTypesChanged();
     void recentProjectsChanged();
+    void projectExplorerFilterChanged(bool filterOnlySupported);
 
 private:
     explicit ConfigManager(QObject* parent = nullptr);
@@ -183,13 +186,13 @@ private:
     QVector<PromptHistoryItem> m_promptHistory;
 
     QString m_activeTheme = "dracula";
-    bool m_projectExplorerFilterSupported = false;
     QString m_lastProjectPath;
     QString m_lastDialogDir;
     QStringList m_recentProjects;
     QString m_lastCustomPrompt;
     QByteArray m_windowGeometry;
     QByteArray m_windowState;
+    bool m_projectExplorerFilterSupported = false;
     QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;

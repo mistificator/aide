@@ -5,6 +5,9 @@
 #include <QMap>
 #include <QString>
 
+class QApplication;
+class QWidget;
+
 enum class TokenRole {
     Default, Keyword, DataType, BuiltinFunction, String, Comment, Number, Preprocessor, Operator, Error
 };
@@ -19,4 +22,9 @@ struct ColorScheme {
     static ColorScheme loadFromFile(const QString& filePath);
     static ColorScheme loadByName(const QString& themeName);
     static ColorScheme defaultDracula();
+
+    static bool isDarkTheme(const QString& themeName);
+    static void applyApplicationTheme(const QString& themeName);
+    static void applyWindowDarkTitleBar(QWidget* window, bool dark);
+    static void installWindowThemeFilter(QApplication* app);
 };
