@@ -32,14 +32,22 @@ public:
     explicit WindowDarkTitleBarFilter(QObject* parent = nullptr) : QObject(parent) {}
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override {
+        if (m_inFilter) {
+            return QObject::eventFilter(obj, event);
+        }
         if (event->type() == QEvent::Show || event->type() == QEvent::WinIdChange) {
-            if (auto* w = qobject_cast<QWidget*>(obj); w && w->isWindow()) {
+            if (auto* w = qobject_cast<QWidget*>(obj);
+                w && w->isWindow() && w->testAttribute(Qt::WA_WState_Created) && w->internalWinId() != 0) {
+                m_inFilter = true;
                 bool dark = ColorScheme::isDarkTheme(ConfigManager::instance().activeTheme());
                 ColorScheme::applyWindowDarkTitleBar(w, dark);
+                m_inFilter = false;
             }
         }
         return QObject::eventFilter(obj, event);
     }
+private:
+    bool m_inFilter = false;
 };
 
 // Прокси-стиль для Windows 10/8/7 и систем без плагина windows11:
@@ -279,9 +287,20 @@ bool ColorScheme::isDarkTheme(const QString& themeName) {
 
 void ColorScheme::applyWindowDarkTitleBar(QWidget* window, bool dark) {
     if (!window || !window->isWindow()) return;
+
+    // Пропускаем выпадающие списки (QComboBox), тултипы и окна без нативного HWND
+    const Qt::WindowType wt = window->windowType();
+    if (wt == Qt::Popup || wt == Qt::ToolTip || wt == Qt::SplashScreen) return;
+    if (!window->testAttribute(Qt::WA_WState_Created)) return;
+
 #ifdef Q_OS_WIN
-    HWND hwnd = reinterpret_cast<HWND>(window->winId());
-    if (!hwnd) return;
+    // ВАЖНО: используем internalWinId(), чтобы не вызывать QWidgetPrivate::create()
+    // и не провоцировать рекурсивную отправку QEvent::WinIdChange
+    WId wid = window->internalWinId();
+    if (!wid) return;
+
+    HWND hwnd = reinterpret_cast<HWND>(wid);
+    if (!hwnd || !IsWindow(hwnd)) return;
 
     using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
     static DwmSetWindowAttributeFn pDwmSetWindowAttribute = []() -> DwmSetWindowAttributeFn {
