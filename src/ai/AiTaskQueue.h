@@ -6,6 +6,7 @@
 #include <QPointer>
 #include <QElapsedTimer>
 #include "../editor/CodeEditor.h"
+#include "../core/ConfigManager.h"
 
 enum class TaskPriority { High_UserAction, Low_BackgroundSummary };
 enum class TaskTargetType {
@@ -32,6 +33,11 @@ struct AiTask {
     int thinkingTokens = 0;
     qint64 elapsedMs = 0;
     double tokensPerSec = 0.0;
+
+    QVector<AiChatMessage> conversationHistory;
+    bool isContinuation = false;
+    bool appendToPreviousOutput = false;
+    QString previousOutput;
 };
 
 class AiProvider;

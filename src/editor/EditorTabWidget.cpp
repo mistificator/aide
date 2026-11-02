@@ -162,6 +162,7 @@ void EditorTabWidget::registerEditor(CodeEditor* ed) {
     connect(ed, &CodeEditor::aiActionRequested, this, &EditorTabWidget::aiActionTriggered);
     connect(ed, &CodeEditor::cancelAiRequested, this, &EditorTabWidget::cancelAiTriggered);
     connect(ed, &CodeEditor::diffRequested, this, &EditorTabWidget::diffRequested);
+    connect(ed, &CodeEditor::aiContinueRequested, this, &EditorTabWidget::aiContinueTriggered);
 }
 
 void EditorTabWidget::updateTabTitle(CodeEditor* ed) {

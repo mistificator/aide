@@ -804,21 +804,42 @@ void ConfigManager::setProjectExplorerFilterSupported(bool filterSupportedOnly) 
     emit projectExplorerFilterChanged(m_projectExplorerFilterSupported);
 }
 
+void ConfigManager::invalidateSyntaxExtensionsCache() {
+    m_syntaxExtensionsCacheValid = false;
+    m_cachedSyntaxExtensions.clear();
+}
+
 QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
-    QStringList result;
-    QString synDir = syntaxDirPath();
+    if (m_syntaxExtensionsCacheValid) {
+        return m_cachedSyntaxExtensions;
+    }
+
+    QSet<QString> uniqueExts;
     for (const auto& r : m_fileTypes) {
-        bool hasXml = !r.syntaxFile.isEmpty() && QFile::exists(synDir + "/" + r.syntaxFile);
-        if (hasXml || !r.extensions.isEmpty()) {
-            for (const QString& ext : r.extensions) {
+        for (const QString& e : r.extensions) {
+            QString clean = e.trimmed().toLower();
+            if (clean.startsWith("*.")) clean = clean.mid(2);
+            else if (clean.startsWith('.')) clean = clean.mid(1);
+            if (!clean.isEmpty()) uniqueExts.insert(clean);
+        }
+    }
+
+    QDir synDir(syntaxDirPath());
+    const QStringList xmlFiles = synDir.entryList({"*.xml"}, QDir::Files);
+    for (const QString& fn : xmlFiles) {
+        auto meta = LexicalHighlighter::inspectSyntaxXml(synDir.filePath(fn));
+        if (meta.valid) {
+            for (const QString& ext : meta.extensions) {
                 QString clean = ext.trimmed().toLower();
-                if (!clean.isEmpty() && !result.contains(clean)) {
-                    result.append(clean);
-                }
+                if (!clean.isEmpty()) uniqueExts.insert(clean);
             }
         }
     }
-    return result;
+
+    m_cachedSyntaxExtensions = uniqueExts.values();
+    m_cachedSyntaxExtensions.sort(Qt::CaseInsensitive);
+    m_syntaxExtensionsCacheValid = true;
+    return m_cachedSyntaxExtensions;
 }
 
 QStringList ConfigManager::supportedProjectFileNameFilters() const {
@@ -995,6 +1016,7 @@ void ConfigManager::setSyntaxBaseUrl(const QString& url) {
 
 void ConfigManager::setFileTypeRules(const QVector<FileTypeRule>& rules) {
     m_fileTypes = rules;
+    invalidateSyntaxExtensionsCache();
     saveConfig();
     emit fileTypesChanged();
 }
@@ -1009,6 +1031,7 @@ void ConfigManager::upsertFileTypeRule(const FileTypeRule& rule) {
         }
     }
     m_fileTypes.append(rule);
+    invalidateSyntaxExtensionsCache();
     saveConfig();
     emit fileTypesChanged();
 }

@@ -154,6 +154,23 @@ void CodeEditor::beginAiStreamEdit() {
     m_tailBuf.clear();
 }
 
+void CodeEditor::beginAiStreamContinueEdit() {
+    if (m_streamCursor.isNull()) {
+        m_streamCursor = textCursor();
+        m_streamCursor.movePosition(QTextCursor::End);
+    } else {
+        m_streamCursor.clearSelection();
+    }
+    // Продолжаем присоединять к предыдущему блоку Undo
+    m_isFirstChunk = false;
+    m_headerResolved = false;
+    m_userScrolledUpDuringStream = false;
+    m_updatingStreamText = false;
+    m_lastAutoScrollValue = verticalScrollBar()->value();
+    m_headerBuf.clear();
+    m_tailBuf.clear();
+}
+
 void CodeEditor::appendAiStreamChunk(const QString& chunk) {
     auto commitText = [this](const QString& txt) {
         if (txt.isEmpty()) return;
@@ -292,6 +309,34 @@ void CodeEditor::triggerCustomPromptWithText(const QString& initialPromptText) {
     emit aiActionRequested(this, AiEditAction::CustomPrompt, targetText, customInst);
 }
 
+void CodeEditor::triggerContinueAiGeneration() {
+    if (m_isAiBusy || m_lastAiHistory.isEmpty()) return;
+    emit aiContinueRequested(this, {}, true);
+}
+
+void CodeEditor::triggerFollowUpAiPrompt() {
+    if (m_isAiBusy || m_lastAiHistory.isEmpty()) return;
+    bool ok = false;
+    QString followUp = QInputDialog::getMultiLineText(
+        this,
+        "Continue AI Request (Preserving Context)",
+        "Enter follow-up instructions for the LLM (previous request context is preserved):",
+        {},
+        &ok);
+    if (!ok || followUp.trimmed().isEmpty()) return;
+    followUp = followUp.trimmed();
+    ConfigManager::instance().setLastCustomPrompt(followUp);
+    emit aiContinueRequested(this, followUp, false);
+}
+
+void CodeEditor::setLastAiConversationContext(const QString& systemPrompt,
+                                              const QVector<AiChatMessage>& history,
+                                              AiEditAction lastAction) {
+    m_lastAiSystemPrompt = systemPrompt;
+    m_lastAiHistory = history;
+    m_lastAiAction = lastAction;
+}
+
 void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     QMenu* menu = createStandardContextMenu();
     menu->addSeparator();
@@ -317,6 +362,11 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     for (const auto& [title, act] : actions) {
         if (act == AiEditAction::CustomPrompt) aiMenu->addSeparator();
         aiMenu->addAction(title, this, [this, act]() { triggerAiAction(act); });
+    }
+    if (hasLastAiContext()) {
+        aiMenu->addSeparator();
+        aiMenu->addAction("Continue Last Generation (From End)", this, &CodeEditor::triggerContinueAiGeneration);
+        aiMenu->addAction("Continue Last Request (Follow-up)...", this, &CodeEditor::triggerFollowUpAiPrompt);
     }
     menu->exec(event->globalPos());
     delete menu;

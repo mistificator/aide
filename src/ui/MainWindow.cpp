@@ -371,6 +371,15 @@ void MainWindow::setupMenus() {
         [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerAiAction(AiEditAction::CustomPrompt); });
     m_actFileCustomPrompt->setToolTip("File Custom Prompt...");
 
+    m_actFileAiContinueGen = currentFileMenu->addAction(
+        "Continue Last AI Generation",
+        this,
+        [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerContinueAiGeneration(); });
+    m_actFileAiFollowUp = currentFileMenu->addAction(
+        "Continue Last AI Request (Follow-up)...",
+        this,
+        [this]() { if (auto* e = m_tabWidget->currentEditor()) e->triggerFollowUpAiPrompt(); });
+
     currentFileMenu->addSeparator();
     m_actFileSummaryRebuild = currentFileMenu->addAction(
         AppIcon::actionIcon(AppIcon::ActionIcon::FileSummaryRebuild),
@@ -381,6 +390,15 @@ void MainWindow::setupMenus() {
                 rebuildSingleFileSummary(e->filePath(), true);
         });
     m_actFileSummaryRebuild->setToolTip("Rebuild File Summary");
+
+    m_actFileSummaryRemove = currentFileMenu->addAction(
+        "Remove Summary",
+        this,
+        [this]() {
+            if (auto* e = m_tabWidget->currentEditor(); e && !e->filePath().isEmpty())
+                removeSingleFileSummary(e->filePath());
+        });
+    m_actFileSummaryRemove->setToolTip("Completely remove summary for the current file");
 
     // 4.2. Подменю Project
     QMenu* projectAiMenu = aiMenu->addMenu("&Project");
@@ -472,9 +490,12 @@ void MainWindow::setupConnections() {
         onActiveEditorChanged(ed);
         updateCentralViewState();
     });
+#if 0 // don't delete this
     connect(m_tabWidget, &EditorTabWidget::documentOpened, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
     connect(m_tabWidget, &EditorTabWidget::documentSaved, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
+#endif
     connect(m_tabWidget, &EditorTabWidget::aiActionTriggered, this, &MainWindow::onEditorAiAction);
+    connect(m_tabWidget, &EditorTabWidget::aiContinueTriggered, this, &MainWindow::onEditorAiContinue);
     connect(m_tabWidget, &EditorTabWidget::cancelAiTriggered, m_taskQueue, &AiTaskQueue::cancelTaskForEditor);
     connect(m_tabWidget, &EditorTabWidget::diffRequested, this, &MainWindow::onCompareUnsavedDiff);
 
@@ -483,9 +504,11 @@ void MainWindow::setupConnections() {
     connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, [this](const QString& path) {
         rebuildSingleFileSummary(path, true);
     });
+    connect(m_inspectorDock, &ContextInspectorDock::continueFileSummaryClicked, this, &MainWindow::continueSingleFileSummary);
     connect(m_inspectorDock, &ContextInspectorDock::clearFileSummaryClicked, this, &MainWindow::clearSingleFileSummary);
+    connect(m_inspectorDock, &ContextInspectorDock::removeFileSummaryClicked, this, &MainWindow::removeSingleFileSummary);
     connect(m_inspectorDock, &ContextInspectorDock::rebuildProjectSummaryClicked, this, &MainWindow::onRebuildProjectSummary);
-
+    connect(m_inspectorDock, &ContextInspectorDock::continueProjectSummaryClicked, this, &MainWindow::onContinueProjectSummary);
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString&) {
         m_projectTree->viewport()->update();
     });
@@ -884,9 +907,8 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     dlg.resize(840, 680);
     auto* lay = new QVBoxLayout(&dlg);
 
-    bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() ||
-                      !m_projectMgr->buildAggregatedFilesDigest().trimmed().isEmpty();
     int indexedCount = m_projectMgr->indexedFilesCount();
+    bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() || (indexedCount > 0);
 
     auto* statusLbl = new QLabel(
         QString("<b>Project:</b> %1<br>"
@@ -965,27 +987,35 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     const auto openBuffers = collectOpenEditorBuffers();
     const QString sysPrompt = m_projectMgr->projectSystemPrompt();
     const QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+    const int projSummaryChars = m_projectMgr->projectSummary().length();
 
     auto updateLiveContextEstimate = [&]() {
         auto mode = static_cast<ProjectCustomPromptContextMode>(ctxCombo->currentData().toInt());
         bool usesFiles = (mode != ProjectCustomPromptContextMode::ProjectSummaryOnly);
+        bool usesProjSum = (mode != ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly);
         filesBox->setEnabled(usesFiles);
 
-        QStringList selFiles = fileSelector->selectedFilePaths();
+        int selCount = fileSelector->selectedFilesCount();
+        qint64 selBytes = fileSelector->selectedFilesTotalBytes();
+
         if (usesFiles) {
-            selectedCountLbl->setText(QString("Selected for prompt context: %1 file(s)").arg(selFiles.size()));
+            selectedCountLbl->setText(
+                fileSelector->isLoading()
+                    ? QStringLiteral("Loading project tree...")
+                    : QString("Selected for prompt context: %1 file(s) (~%2 KB)")
+                          .arg(selCount)
+                          .arg(selBytes / 1024));
         } else {
             selectedCountLbl->setText("File selection is inactive in '1. Project Summary Only' mode.");
         }
 
-        QString projCtx = m_projectMgr->buildProjectCustomPromptContext(mode, selFiles, openBuffers);
-        QString customInst = promptEdit->toPlainText().trimmed();
-        QString fullUser = customInst;
-        if (!mdSuffix.trimmed().isEmpty()) fullUser += "\n\n" + mdSuffix.trimmed();
-        if (!projCtx.trimmed().isEmpty()) fullUser += "\n\n" + projCtx;
+        qint64 estProjCtxChars = 0;
+        if (usesProjSum) estProjCtxChars += projSummaryChars;
+        if (usesFiles) estProjCtxChars += selBytes + (selCount * 96); // + заголовки блоков Markdown
 
-        int totalChars = sysPrompt.length() + fullUser.length();
-        int promptTok = (totalChars + 3) / 4 + 128;
+        QString customInst = promptEdit->toPlainText().trimmed();
+        qint64 totalChars = sysPrompt.length() + customInst.length() + mdSuffix.length() + estProjCtxChars;
+        int promptTok = static_cast<int>((totalChars + 3) / 4) + 128;
         int recOutTok = qMax(2048, qMin(16384, promptTok / 3));
         int reqCtxTok = promptTok + recOutTok;
 
@@ -1117,10 +1147,42 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
 
     QString taskId = m_taskQueue->enqueueTask(task);
 
-    auto* resWin = new ProjectPromptResultDialog(finalCustomInst, m_projectMgr->projectRootPath(), taskId, this);
+    auto* resWin = new ProjectPromptResultDialog(
+        finalCustomInst, m_projectMgr->projectRootPath(), taskId, sysPrompt, finalFullUserPrompt, this);
     m_projectPromptWindows.insert(taskId, resWin);
 
     connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
+    connect(resWin, &ProjectPromptResultDialog::continueRequestTriggered, this,
+            [this](ProjectPromptResultDialog* dlgPtr,
+                   const QString& sysP,
+                   const QVector<AiChatMessage>& history,
+                   const QString& followUpUserPrompt,
+                   bool seamlessAppend) {
+                if (!dlgPtr) return;
+                const auto& aiCfg = ConfigManager::instance().aiConfig();
+                QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+                QString effectiveUser = (!seamlessAppend && !mdSuffix.trimmed().isEmpty())
+                                            ? (followUpUserPrompt + "\n\n" + mdSuffix.trimmed())
+                                            : followUpUserPrompt;
+
+                AiTask contTask;
+                contTask.priority = TaskPriority::High_UserAction;
+                contTask.targetType = TaskTargetType::ProjectCustomPrompt;
+                contTask.filePath = "[Project Custom Prompt — Continue]";
+                contTask.llmModel = aiCfg.llmIdentifier();
+                contTask.maxOutputTokens = aiCfg.maxOutputCodeTokens;
+                contTask.contextWindow = aiCfg.contextWindow;
+                contTask.systemPrompt = sysP;
+                contTask.conversationHistory = history;
+                contTask.userPrompt = effectiveUser;
+                contTask.isContinuation = true;
+                contTask.appendToPreviousOutput = seamlessAppend;
+                contTask.stream = true;
+
+                QString newId = m_taskQueue->enqueueTask(contTask);
+                m_projectPromptWindows.insert(newId, dlgPtr);
+                dlgPtr->beginFollowUpStream(newId, followUpUserPrompt, seamlessAppend);
+            });
     connect(resWin, &ProjectPromptResultDialog::openContentInEditorRequested, this,
             [this](const QString& suggestedPath, const QString& code, const QString& langId) {
                 CodeEditor* ed = m_tabWidget->newDocument();
@@ -1184,8 +1246,14 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         menu.addAction("Generate / Regenerate File Summary", this, [this, clickedPath]() {
             rebuildSingleFileSummary(clickedPath);
         });
+        menu.addAction("Continue File Summary", this, [this, clickedPath]() {
+            continueSingleFileSummary(clickedPath);
+        });
         menu.addAction("Clear File Summary (Mark Empty)", this, [this, clickedPath]() {
             clearSingleFileSummary(clickedPath);
+        });
+        menu.addAction("Remove File Summary", this, [this, clickedPath]() {
+            removeSingleFileSummary(clickedPath);
         });
         menu.addSeparator();
     }
@@ -1232,6 +1300,11 @@ void MainWindow::updateAiActionsState() {
     CodeEditor* ed = m_tabWidget ? m_tabWidget->currentEditor() : nullptr;
     const bool hasDoc = (ed != nullptr) && !ed->isAiBusy();
     const bool hasSavedFileDoc = (ed != nullptr) && !ed->filePath().isEmpty();
+    const bool hasCanContinue = hasDoc && ed->hasLastAiContext();
+
+    if (m_actFileAiContinueGen)   m_actFileAiContinueGen->setEnabled(hasCanContinue);
+    if (m_actFileAiFollowUp)      m_actFileAiFollowUp->setEnabled(hasCanContinue);
+    if (m_actFileSummaryRemove)   m_actFileSummaryRemove->setEnabled(hasSavedFileDoc);
 
     if (m_actProjCustomPrompt)     m_actProjCustomPrompt->setEnabled(hasProj);
     if (m_actProjSummaryRebuild)   m_actProjSummaryRebuild->setEnabled(hasProj);
@@ -1448,6 +1521,45 @@ void MainWindow::onEditorAiAction(CodeEditor* editor,
     m_taskQueue->enqueueTask(task);
 }
 
+void MainWindow::onEditorAiContinue(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend) {
+    if (!editor || !editor->hasLastAiContext()) return;
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
+
+    QString userPrompt;
+    if (seamlessAppend) {
+        userPrompt = QStringLiteral(
+            "Continue outputting ONLY the remaining raw code from the exact point where you stopped, "
+            "without repeating any already generated lines and without markdown fences:");
+    } else {
+        QTextCursor c = editor->textCursor();
+        QString currentCode = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : editor->toPlainText();
+        userPrompt = followUpInstruction
+                     + (customSuffix.isEmpty() ? QString() : ("\n" + customSuffix))
+                     + "\n\nCurrent code state:\n" + currentCode;
+    }
+
+    AiTask task;
+    task.priority = TaskPriority::High_UserAction;
+    task.targetType = (editor->lastAiAction() == AiEditAction::ExplainCode)
+                          ? TaskTargetType::ExplainToDialog
+                          : TaskTargetType::ModifyEditorCode;
+    task.targetEditor = editor;
+    task.filePath = editor->filePath();
+    task.llmModel = cfg.llmIdentifier();
+    task.maxOutputTokens = cfg.maxOutputCodeTokens;
+    task.contextWindow = cfg.contextWindow;
+    task.systemPrompt = editor->lastAiSystemPrompt();
+    task.conversationHistory = editor->lastAiHistory();
+    task.userPrompt = userPrompt;
+    task.isContinuation = true;
+    task.appendToPreviousOutput = seamlessAppend;
+    task.stream = true;
+
+    m_taskQueue->enqueueTask(task);
+}
+
 void MainWindow::onTaskStreamChunk(const AiTask& task, const QString& chunk) {
     if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
         if (auto win = m_projectPromptWindows.value(task.taskId)) {
@@ -1457,24 +1569,64 @@ void MainWindow::onTaskStreamChunk(const AiTask& task, const QString& chunk) {
 }
 
 void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) {
+    if (task.targetEditor) {
+        QVector<AiChatMessage> updatedHistory = task.conversationHistory;
+        updatedHistory.append({"user", task.userPrompt});
+        updatedHistory.append({"assistant", resultText});
+        task.targetEditor->setLastAiConversationContext(
+            task.systemPrompt,
+            updatedHistory,
+            task.targetType == TaskTargetType::ExplainToDialog ? AiEditAction::ExplainCode : AiEditAction::CustomPrompt);
+        updateAiActionsState();
+    }
+
     if (task.targetType == TaskTargetType::ProjectCustomPrompt) {
         if (auto win = m_projectPromptWindows.take(task.taskId)) {
             win->finalizeResponse(resultText);
         }
         return;
     }
+
     if (task.targetType != TaskTargetType::ExplainToDialog) return;
-    auto* dlg = new QDialog(this);
-    dlg->setAttribute(Qt::WA_DeleteOnClose);
-    dlg->setWindowTitle("AI Code Explanation");
-    dlg->resize(740, 560);
-    auto* lay = new QVBoxLayout(dlg);
-    auto* view = new QTextEdit(dlg);
-    view->setReadOnly(true);
-    MarkdownRenderer::configureViewer(view);
-    view->setHtml(MarkdownRenderer::toHtml(resultText));
-    lay->addWidget(view);
-    dlg->show();
+
+    auto* resWin = new ProjectPromptResultDialog(
+        "Explain Code: " + (task.filePath.isEmpty() ? QStringLiteral("Selection") : QFileInfo(task.filePath).fileName()),
+        m_projectMgr->projectRootPath(),
+        task.taskId,
+        task.systemPrompt,
+        task.userPrompt,
+        this);
+    resWin->setWindowTitle("AI Code Explanation");
+    resWin->finalizeResponse(resultText);
+
+    connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
+    connect(resWin, &ProjectPromptResultDialog::continueRequestTriggered, this,
+            [this](ProjectPromptResultDialog* dlgPtr,
+                   const QString& sysP,
+                   const QVector<AiChatMessage>& history,
+                   const QString& followUpUserPrompt,
+                   bool seamlessAppend) {
+                if (!dlgPtr) return;
+                const auto& aiCfg = ConfigManager::instance().aiConfig();
+                AiTask contTask;
+                contTask.priority = TaskPriority::High_UserAction;
+                contTask.targetType = TaskTargetType::ProjectCustomPrompt;
+                contTask.filePath = "[Explain Code — Continue]";
+                contTask.llmModel = aiCfg.llmIdentifier();
+                contTask.maxOutputTokens = aiCfg.maxOutputCodeTokens;
+                contTask.contextWindow = aiCfg.contextWindow;
+                contTask.systemPrompt = sysP;
+                contTask.conversationHistory = history;
+                contTask.userPrompt = followUpUserPrompt;
+                contTask.isContinuation = true;
+                contTask.appendToPreviousOutput = seamlessAppend;
+                contTask.stream = true;
+
+                QString newId = m_taskQueue->enqueueTask(contTask);
+                m_projectPromptWindows.insert(newId, dlgPtr);
+                dlgPtr->beginFollowUpStream(newId, followUpUserPrompt, seamlessAppend);
+            });
+    resWin->show();
 }
 
 void MainWindow::onTaskFailed(const AiTask& task, const QString& errorText) {
@@ -1609,4 +1761,33 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     m_projectMgr->saveProjectFile();
     if (m_tabWidget->closeAllDocuments()) event->accept();
     else event->ignore();
+}
+
+void MainWindow::removeSingleFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    QString relPath = m_projectMgr->toRelativePath(filePath);
+    m_taskQueue->cancelFileSummaryTask(relPath);
+    m_inspectorDock->resetLiveSummary(relPath, false);
+    m_projectMgr->removeFileSummary(filePath);
+    statusBar()->showMessage("File summary removed: " + relPath, 3000);
+}
+
+void MainWindow::continueSingleFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    QByteArray content;
+    if (auto* ed = m_tabWidget->findEditorByPath(filePath)) {
+        content = ed->toPlainText().toUtf8();
+    } else {
+        QFile f(filePath);
+        if (!f.open(QIODevice::ReadOnly)) return;
+        content = f.readAll();
+    }
+    if (content.trimmed().isEmpty()) return;
+    m_summaryWorker->continueFileSummary(filePath, content);
+    statusBar()->showMessage("Continuing file summary generation...", 3000);
+}
+
+void MainWindow::onContinueProjectSummary() {
+    m_summaryWorker->continueProjectSummary();
+    statusBar()->showMessage("Continuing project summary generation...", 3000);
 }

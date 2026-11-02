@@ -24,8 +24,11 @@ public slots:
 
 signals:
     void rebuildFileSummaryClicked(const QString& filePath);
+    void continueFileSummaryClicked(const QString& filePath);
     void clearFileSummaryClicked(const QString& filePath);
+    void removeFileSummaryClicked(const QString& filePath);
     void rebuildProjectSummaryClicked();
+    void continueProjectSummaryClicked();
 
 private:
     void updateEffectivePreview();
@@ -42,7 +45,6 @@ private:
     QLabel* m_fileHeaderLabel = nullptr;
     QLabel* m_fileMetaLabel = nullptr;
     QLabel* m_tokenEstimateLabel = nullptr;
-
     QPlainTextEdit* m_projectPromptEdit = nullptr;
     QTextEdit* m_projectSummaryView = nullptr;
     QPlainTextEdit* m_filePromptEdit = nullptr;
@@ -50,7 +52,10 @@ private:
     QTextEdit* m_effectiveContextPreview = nullptr;
 
     QPushButton* m_rebuildFileBtn = nullptr;
+    QPushButton* m_continueFileBtn = nullptr;
     QPushButton* m_clearFileBtn = nullptr;
+    QPushButton* m_removeFileBtn = nullptr;
     QPushButton* m_rebuildProjBtn = nullptr;
+    QPushButton* m_continueProjBtn = nullptr;
     QPushButton* m_editProjSummaryBtn = nullptr;
 };

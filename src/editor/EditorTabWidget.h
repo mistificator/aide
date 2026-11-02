@@ -30,6 +30,7 @@ signals:
     void aiActionTriggered(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void cancelAiTriggered(CodeEditor* editor);
     void diffRequested(CodeEditor* editor);
+    void aiContinueTriggered(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
 
 private slots:
     void onTabBarContextMenu(const QPoint& pos);

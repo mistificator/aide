@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include "../core/ConfigManager.h"
 
 class QTextEdit;
 class QPlainTextEdit;
@@ -30,17 +31,25 @@ public:
     explicit ProjectPromptResultDialog(const QString& promptTitle,
                                        const QString& projectRootPath,
                                        const QString& taskId,
+                                       const QString& systemPrompt,
+                                       const QString& initialUserPrompt,
                                        QWidget* parent = nullptr);
 
     QString taskId() const { return m_taskId; }
     void setTaskId(const QString& id) { m_taskId = id; }
 
+    void beginFollowUpStream(const QString& newTaskId, const QString& displayFollowUp, bool seamlessAppend);
     void appendStreamChunk(const QString& chunk);
     void finalizeResponse(const QString& fullMarkdownText);
     void markFailedOrCancelled(const QString& message);
 
 signals:
     void cancelTaskRequested(const QString& taskId);
+    void continueRequestTriggered(ProjectPromptResultDialog* dlg,
+                                  const QString& systemPrompt,
+                                  const QVector<AiChatMessage>& history,
+                                  const QString& followUpUserPrompt,
+                                  bool seamlessAppend);
     void openContentInEditorRequested(const QString& suggestedPath, const QString& code, const QString& langId);
     void replaceFileInEditorRequested(const QString& existingFilePath, const QString& newCode, const QString& langId);
     void fileSavedToDisk(const QString& filePath);
@@ -51,6 +60,8 @@ private slots:
     void onCopyFullMarkdown();
     void onSaveFullMarkdown();
     void onOpenFullMarkdownInEditor();
+    void onContinueCutOffClicked();
+    void onSendFollowUpClicked();
 
     void onSnippetSelectionChanged();
     void onSnippetContextMenu(const QPoint& pos);
@@ -75,6 +86,11 @@ private:
     QString m_projectRootPath;
     QStringList m_projectFiles;
     QString m_taskId;
+    QString m_systemPrompt;
+    QString m_currentTurnUserPrompt;
+    QString m_currentTurnAssistantText;
+    QVector<AiChatMessage> m_conversationHistory;
+
     QString m_markdownText;
     bool m_isStreaming = true;
     bool m_updatingRenderedView = false;
@@ -84,6 +100,7 @@ private:
 
     QLabel* m_statusLabel = nullptr;
     QPushButton* m_cancelBtn = nullptr;
+    QPushButton* m_continueGenBtn = nullptr;
     QPushButton* m_toggleRawBtn = nullptr;
     QPushButton* m_copyMdBtn = nullptr;
     QPushButton* m_saveMdBtn = nullptr;
@@ -92,6 +109,9 @@ private:
     QStackedWidget* m_leftStack = nullptr;
     QTextEdit* m_renderedView = nullptr;
     QPlainTextEdit* m_rawView = nullptr;
+
+    QPlainTextEdit* m_followUpEdit = nullptr;
+    QPushButton* m_sendFollowUpBtn = nullptr;
 
     QTreeWidget* m_snippetTree = nullptr;
     QLabel* m_snippetHeaderLabel = nullptr;

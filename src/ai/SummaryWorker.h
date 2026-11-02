@@ -17,8 +17,16 @@ public slots:
                                  const QByteArray& content,
                                  int maxOutputTokensOverride = 0,
                                  int contextWindowOverride = 0);
+    void continueFileSummary(const QString& filePath,
+                             const QByteArray& content,
+                             const QString& followUpInstruction = {},
+                             int maxOutputTokensOverride = 0,
+                             int contextWindowOverride = 0);
     void forceRebuildProjectSummary(int maxOutputTokensOverride = 0,
                                     int contextWindowOverride = 0);
+    void continueProjectSummary(const QString& followUpInstruction = {},
+                                int maxOutputTokensOverride = 0,
+                                int contextWindowOverride = 0);
 
 signals:
     void summaryStreamingChunk(const QString& filePath, bool isProjectSummary, const QString& chunk);

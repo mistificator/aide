@@ -53,6 +53,7 @@ private slots:
 
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
+    void onEditorAiContinue(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
     void onTaskStreamChunk(const AiTask& task, const QString& chunk);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
@@ -86,6 +87,9 @@ private:
                                       int& inOutContextWindow);
     static int roundUpTokenStep(int needed, int maxCap);
     static QString actionKeyForEnum(AiEditAction action);
+    void removeSingleFileSummary(const QString& filePath);
+    void continueSingleFileSummary(const QString& filePath);
+    void onContinueProjectSummary();
 
     ProjectManager* m_projectMgr = nullptr;
     AiProvider* m_aiProvider = nullptr;
@@ -117,6 +121,9 @@ private:
     QAction* m_actProjRecursiveSummary = nullptr;
     QAction* m_actFileCustomPrompt = nullptr;
     QAction* m_actFileSummaryRebuild = nullptr;
+    QAction* m_actFileSummaryRemove = nullptr;
+    QAction* m_actFileAiContinueGen = nullptr;
+    QAction* m_actFileAiFollowUp = nullptr;
     QAction* m_actCodeExplain = nullptr;
     QAction* m_actAddDocs = nullptr;
     QList<QAction*> m_otherFileAiActions;

@@ -3,6 +3,7 @@
 #include "MarkdownRenderer.h"
 #include "../core/ProjectManager.h"
 #include "../core/ConfigManager.h"
+
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -18,7 +19,6 @@
 ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* parent)
     : QDockWidget("AI Context Inspector", parent), m_projectMgr(projMgr) {
     setObjectName("ContextInspectorDock");
-    // Позволяем доку свободно сжиматься сплиттером до компактной ширины
     setMinimumWidth(220);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
@@ -26,7 +26,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     tabs->setMinimumWidth(0);
     tabs->setUsesScrollButtons(true);
 
-    // Вкладка 1: Документ (верхние 2/3 — Document Summary, нижняя 1/3 — Document Prompt)
+    // Вкладка 1: Document
     auto* docSplit = new QSplitter(Qt::Vertical, tabs);
     docSplit->setMinimumWidth(0);
     docSplit->setChildrenCollapsible(false);
@@ -49,20 +49,30 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_fileMetaLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
     auto* docSumHdr = new QHBoxLayout();
-    auto* docSumTitle = new QLabel("Document Summary:", docTop);
+    docSumHdr->setSpacing(4);
+    auto* docSumTitle = new QLabel("Summary:", docTop);
     docSumTitle->setMinimumWidth(0);
     docSumTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
+    m_removeFileBtn = new QPushButton("Remove", docTop);
+    m_removeFileBtn->setToolTip("Completely remove file summary (reset to unindexed state)");
     m_clearFileBtn = new QPushButton("Clear", docTop);
     m_clearFileBtn->setToolTip("Clear summary text while marking summary as created (empty)");
+    m_continueFileBtn = new QPushButton("Continue", docTop);
+    m_continueFileBtn->setToolTip("Continue / expand current file summary preserving previous context");
     m_rebuildFileBtn = new QPushButton("Regenerate", docTop);
+    m_rebuildFileBtn->setToolTip("Rebuild file summary from scratch");
+
     docSumHdr->addWidget(docSumTitle, 1);
+    docSumHdr->addWidget(m_removeFileBtn);
     docSumHdr->addWidget(m_clearFileBtn);
+    docSumHdr->addWidget(m_continueFileBtn);
     docSumHdr->addWidget(m_rebuildFileBtn);
 
     m_fileSummaryView = new QTextEdit(docTop);
     m_fileSummaryView->setMinimumWidth(0);
     m_fileSummaryView->setReadOnly(true);
-    m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
+    m_fileSummaryView->setPlaceholderText("AI summary for this document...");
     setupMarkdownViewerStyle(m_fileSummaryView);
 
     docTopLay->addWidget(m_fileHeaderLabel);
@@ -74,12 +84,15 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docBot->setMinimumWidth(0);
     auto* docBotLay = new QVBoxLayout(docBot);
     docBotLay->setContentsMargins(6, 6, 6, 6);
+
     auto* docPromptLbl = new QLabel("Document Prompt / Instructions:", docBot);
     docPromptLbl->setMinimumWidth(0);
     docPromptLbl->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
     m_filePromptEdit = new QPlainTextEdit(docBot);
     m_filePromptEdit->setMinimumWidth(0);
     m_filePromptEdit->setPlaceholderText("Enter specific AI instructions for this file...");
+
     docBotLay->addWidget(docPromptLbl);
     docBotLay->addWidget(m_filePromptEdit, 1);
 
@@ -88,7 +101,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setSizes({420, 210});
     tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Проект (верхние 2/3 — Project Summary, нижняя 1/3 — Project System Prompt)
+    // Вкладка 2: Project
     auto* projSplit = new QSplitter(Qt::Vertical, tabs);
     projSplit->setMinimumWidth(0);
     projSplit->setChildrenCollapsible(false);
@@ -97,16 +110,23 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projTop->setMinimumWidth(0);
     auto* projTopLay = new QVBoxLayout(projTop);
     projTopLay->setContentsMargins(6, 6, 6, 6);
+
     auto* projSumHdr = new QHBoxLayout();
+    projSumHdr->setSpacing(4);
     auto* projSumTitle = new QLabel("Project Summary:", projTop);
     projSumTitle->setMinimumWidth(0);
     projSumTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
     m_editProjSummaryBtn = new QPushButton("Edit MD", projTop);
     m_editProjSummaryBtn->setCheckable(true);
+    m_continueProjBtn = new QPushButton("Continue", projTop);
+    m_continueProjBtn->setToolTip("Continue / expand project summary preserving previous context");
     m_rebuildProjBtn = new QPushButton("Rebuild", projTop);
     m_rebuildProjBtn->setToolTip("Rebuild Project Architecture Summary");
+
     projSumHdr->addWidget(projSumTitle, 1);
     projSumHdr->addWidget(m_editProjSummaryBtn);
+    projSumHdr->addWidget(m_continueProjBtn);
     projSumHdr->addWidget(m_rebuildProjBtn);
 
     m_projectSummaryView = new QTextEdit(projTop);
@@ -114,6 +134,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_projectSummaryView->setReadOnly(true);
     m_projectSummaryView->setPlaceholderText("Synthesized project architecture summary...");
     setupMarkdownViewerStyle(m_projectSummaryView);
+
     projTopLay->addLayout(projSumHdr);
     projTopLay->addWidget(m_projectSummaryView, 1);
 
@@ -121,12 +142,15 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projBot->setMinimumWidth(0);
     auto* projBotLay = new QVBoxLayout(projBot);
     projBotLay->setContentsMargins(6, 6, 6, 6);
+
     auto* projPromptLbl = new QLabel("Project System Prompt (Global):", projBot);
     projPromptLbl->setMinimumWidth(0);
     projPromptLbl->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
     m_projectPromptEdit = new QPlainTextEdit(projBot);
     m_projectPromptEdit->setMinimumWidth(0);
     m_projectPromptEdit->setPlaceholderText("Global project instructions (e.g. Use C++20, Qt6 style, no exceptions)...");
+
     projBotLay->addWidget(projPromptLbl);
     projBotLay->addWidget(m_projectPromptEdit, 1);
 
@@ -135,18 +159,21 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projSplit->setSizes({420, 210});
     tabs->addTab(projSplit, "Project");
 
-    // Вкладка 3: Итоговый контекст LLM
+    // Вкладка 3: Effective Context
     auto* effPage = new QWidget(tabs);
     effPage->setMinimumWidth(0);
     auto* effLay = new QVBoxLayout(effPage);
     effLay->setContentsMargins(6, 6, 6, 6);
+
     m_tokenEstimateLabel = new QLabel("Estimated size: 0 chars (~0 tokens)", effPage);
     m_tokenEstimateLabel->setMinimumWidth(0);
     m_tokenEstimateLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
     m_effectiveContextPreview = new QTextEdit(effPage);
     m_effectiveContextPreview->setMinimumWidth(0);
     m_effectiveContextPreview->setReadOnly(true);
     setupMarkdownViewerStyle(m_effectiveContextPreview);
+
     effLay->addWidget(m_tokenEstimateLabel);
     effLay->addWidget(m_effectiveContextPreview);
     tabs->addTab(effPage, "Effective Context");
@@ -197,6 +224,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         }
     });
 
+    connect(m_continueFileBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_activeFilePath.isEmpty()) {
+            emit continueFileSummaryClicked(m_activeFilePath);
+        }
+    });
+
     connect(m_clearFileBtn, &QPushButton::clicked, this, [this]() {
         if (!m_activeFilePath.isEmpty()) {
             QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
@@ -206,11 +239,25 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         }
     });
 
+    connect(m_removeFileBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_activeFilePath.isEmpty()) {
+            QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
+            m_liveFileMarkdownByPath.remove(rel);
+            m_fileSummaryView->clear();
+            emit removeFileSummaryClicked(m_activeFilePath);
+        }
+    });
+
     connect(m_rebuildProjBtn, &QPushButton::clicked, this, [this]() {
         if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
         m_liveProjectMarkdown.clear();
         m_projectSummaryView->clear();
         emit rebuildProjectSummaryClicked();
+    });
+
+    connect(m_continueProjBtn, &QPushButton::clicked, this, [this]() {
+        if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
+        emit continueProjectSummaryClicked();
     });
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString& relPath) {
@@ -284,15 +331,17 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bo
 
 void ContextInspectorDock::refreshDisplay() {
     m_updatingUi = true;
-
     if (m_projectPromptEdit->toPlainText() != m_projectMgr->projectSystemPrompt())
         m_projectPromptEdit->setPlainText(m_projectMgr->projectSystemPrompt());
+
+    const QString projSum = m_projectMgr->projectSummary();
+    m_continueProjBtn->setEnabled(!projSum.trimmed().isEmpty());
 
     if (!m_editingProjectMarkdown) {
         if (!m_liveProjectMarkdown.isEmpty()) {
             renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
         } else {
-            renderMarkdownPreservingScroll(m_projectSummaryView, m_projectMgr->projectSummary());
+            renderMarkdownPreservingScroll(m_projectSummaryView, projSum);
         }
     }
 
@@ -303,6 +352,10 @@ void ContextInspectorDock::refreshDisplay() {
 
     if (hasFile) {
         auto fc = m_projectMgr->fileContext(m_activeFilePath);
+        bool hasAnySummaryState = fc.summaryCreated || !fc.aiSummary.isEmpty() || fc.isSummaryPending;
+        m_removeFileBtn->setEnabled(hasAnySummaryState);
+        m_continueFileBtn->setEnabled(!fc.aiSummary.trimmed().isEmpty() && !fc.isSummaryPending);
+
         QString skipReasonMd;
         bool summaryAllowed = ConfigManager::instance().shouldGenerateSummaryForFile(m_activeFilePath, &skipReasonMd);
         bool isClearedEmpty = fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && !fc.isSummaryPending;
@@ -327,16 +380,16 @@ void ContextInspectorDock::refreshDisplay() {
         if (!fc.isSummaryPending) {
             m_liveFileMarkdownByPath.remove(fc.relativePath);
             if (!fc.aiSummary.trimmed().isEmpty()) {
-                m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
+                m_fileSummaryView->setPlaceholderText("Click 'Regenerate' to build AI summary for this file...");
                 renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
             } else if (isClearedEmpty) {
                 m_fileSummaryView->clear();
-                m_fileSummaryView->setPlaceholderText("Summary is created and intentionally empty (cleared). Click 'Regenerate' to rebuild.");
+                m_fileSummaryView->setPlaceholderText("Summary is created and intentionally empty (cleared). Click 'Regenerate' to rebuild or 'Remove' to reset.");
             } else if (!summaryAllowed) {
                 renderMarkdownPreservingScroll(m_fileSummaryView, skipReasonMd);
             } else {
                 m_fileSummaryView->clear();
-                m_fileSummaryView->setPlaceholderText("AI summary will be generated automatically on first open...");
+                m_fileSummaryView->setPlaceholderText("No summary yet. Click 'Regenerate' to build AI summary for this file...");
             }
         } else {
             const QString liveMd = m_liveFileMarkdownByPath.value(fc.relativePath);
@@ -347,6 +400,8 @@ void ContextInspectorDock::refreshDisplay() {
             }
         }
     } else {
+        m_removeFileBtn->setEnabled(false);
+        m_continueFileBtn->setEnabled(false);
         m_fileHeaderLabel->setText("Document: None (Unsaved or Closed)");
         m_fileHeaderLabel->setToolTip({});
         m_fileMetaLabel->setText("LLM: - | SHA-256: -");

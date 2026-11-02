@@ -302,9 +302,14 @@ void AiTaskQueue::processNext() {
     emitStatus();
 
     if (m_currentTask.targetEditor) {
-        m_currentTask.targetEditor->setAiBusy(true, "Generating...");
-        if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode)
-            m_currentTask.targetEditor->beginAiStreamEdit();
+        m_currentTask.targetEditor->setAiBusy(true, m_currentTask.isContinuation ? "Continuing..." : "Generating...");
+        if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode) {
+            if (m_currentTask.appendToPreviousOutput) {
+                m_currentTask.targetEditor->beginAiStreamContinueEdit();
+            } else {
+                m_currentTask.targetEditor->beginAiStreamEdit();
+            }
+        }
     }
 
     AiConnectionConfig reqCfg = ConfigManager::instance().aiConfig();
@@ -324,7 +329,8 @@ void AiTaskQueue::processNext() {
                             m_currentTask.userPrompt,
                             m_currentTask.stream,
                             reqCfg,
-                            maxTokens);
+                            maxTokens,
+                            m_currentTask.conversationHistory);
 }
 
 void AiTaskQueue::onProviderThinkingChanged(const QString& taskId, bool isThinking) {

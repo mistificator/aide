@@ -32,18 +32,21 @@
 ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
                                                      const QString& projectRootPath,
                                                      const QString& taskId,
+                                                     const QString& systemPrompt,
+                                                     const QString& initialUserPrompt,
                                                      QWidget* parent)
     : QDialog(parent, Qt::Window | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint),
     m_projectRootPath(projectRootPath),
-    m_taskId(taskId) {
+    m_taskId(taskId),
+    m_systemPrompt(systemPrompt),
+    m_currentTurnUserPrompt(initialUserPrompt) {
     setAttribute(Qt::WA_DeleteOnClose);
-
     refreshProjectFilesIndex();
 
     QString shortPrompt = promptTitle.simplified().left(70);
     if (promptTitle.simplified().length() > 70) shortPrompt += "...";
     setWindowTitle("AI Project Custom Prompt Result — " + shortPrompt);
-    resize(1260, 780);
+    resize(1260, 820);
 
     auto* mainLay = new QVBoxLayout(this);
     mainLay->setContentsMargins(8, 8, 8, 8);
@@ -58,6 +61,13 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
         "QPushButton { background-color: #ff5555; color: #ffffff; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }"
         "QPushButton:hover { background-color: #ff6e6e; }");
 
+    m_continueGenBtn = new QPushButton("Continue Generation", this);
+    m_continueGenBtn->setToolTip("Continue generating from where the response stopped, preserving previous context");
+    m_continueGenBtn->setStyleSheet(
+        "QPushButton { background-color: #50fa7b; color: #191a24; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #69ff94; }");
+    m_continueGenBtn->hide();
+
     m_toggleRawBtn = new QPushButton("View Raw Markdown", this);
     m_toggleRawBtn->setCheckable(true);
     m_copyMdBtn = new QPushButton("Copy Full Markdown", this);
@@ -69,6 +79,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
 
     topBar->addWidget(m_statusLabel);
     topBar->addWidget(m_cancelBtn);
+    topBar->addWidget(m_continueGenBtn);
     topBar->addStretch();
     topBar->addWidget(m_toggleRawBtn);
     topBar->addWidget(m_copyMdBtn);
@@ -203,6 +214,31 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     mainSplitter->setSizes({700, 540});
     mainLay->addWidget(mainSplitter, 1);
 
+    auto* followUpBox = new QWidget(this);
+    auto* followUpLay = new QHBoxLayout(followUpBox);
+    followUpLay->setContentsMargins(0, 4, 0, 0);
+    followUpLay->setSpacing(6);
+
+    m_followUpEdit = new QPlainTextEdit(followUpBox);
+    m_followUpEdit->setPlaceholderText("Continue request / ask follow-up question (previous project context and AI responses are preserved)...");
+    m_followUpEdit->setMaximumHeight(64);
+    m_followUpEdit->setEnabled(false);
+
+    m_sendFollowUpBtn = new QPushButton("Continue / Send\nFollow-up", followUpBox);
+    m_sendFollowUpBtn->setMinimumHeight(56);
+    m_sendFollowUpBtn->setStyleSheet(
+        "QPushButton { background-color: #bd93f9; color: #191a24; font-weight: bold; border-radius: 4px; padding: 6px 14px; }"
+        "QPushButton:hover { background-color: #caa6ff; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+    m_sendFollowUpBtn->setEnabled(false);
+
+    followUpLay->addWidget(m_followUpEdit, 1);
+    followUpLay->addWidget(m_sendFollowUpBtn);
+    mainLay->addWidget(followUpBox);
+
+    connect(m_continueGenBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onContinueCutOffClicked);
+    connect(m_sendFollowUpBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSendFollowUpClicked);
+
     m_replaceInEditorBtn->setEnabled(false);
     m_diffWithProjectBtn->setEnabled(false);
     m_copySnippetBtn->setEnabled(false);
@@ -322,11 +358,33 @@ QString ProjectPromptResultDialog::resolveExistingProjectFile(const QString& sug
     return {};
 }
 
+void ProjectPromptResultDialog::beginFollowUpStream(const QString& newTaskId,
+                                                    const QString& displayFollowUp,
+                                                    bool seamlessAppend) {
+    m_taskId = newTaskId;
+    m_isStreaming = true;
+    m_followStreamScroll = true;
+    m_currentTurnAssistantText.clear();
+
+    if (!seamlessAppend && !displayFollowUp.trimmed().isEmpty()) {
+        if (!m_markdownText.endsWith('\n')) m_markdownText += "\n";
+        m_markdownText += QString("\n---\n### Follow-up Prompt\n> %1\n\n").arg(displayFollowUp.trimmed());
+    }
+
+    m_cancelBtn->show();
+    m_continueGenBtn->hide();
+    m_followUpEdit->setEnabled(false);
+    m_sendFollowUpBtn->setEnabled(false);
+    m_statusLabel->setStyleSheet("color: #8be9fd; font-weight: bold;");
+    m_statusLabel->setText("AI: Continuing Markdown response...");
+    renderMarkdownView(true);
+}
+
 void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
     if (chunk.isEmpty()) return;
+    m_currentTurnAssistantText += chunk;
     m_markdownText += chunk;
     m_statusLabel->setText(QString("AI: Streaming Markdown response (%1 chars)...").arg(m_markdownText.length()));
-
     if (!m_streamRenderTimer.isActive()) {
         int delayMs = qBound(120, m_markdownText.length() / 120, 420);
         m_streamRenderTimer.start(delayMs);
@@ -336,15 +394,25 @@ void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
 void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText) {
     m_isStreaming = false;
     m_streamRenderTimer.stop();
-
-    if (!fullMarkdownText.trimmed().isEmpty()) {
+    if (m_conversationHistory.isEmpty() && !fullMarkdownText.trimmed().isEmpty() && m_markdownText.isEmpty()) {
         m_markdownText = fullMarkdownText;
+        m_currentTurnAssistantText = fullMarkdownText;
     }
+
+    if (!m_currentTurnUserPrompt.isEmpty() && !m_currentTurnAssistantText.isEmpty()) {
+        m_conversationHistory.append({"user", m_currentTurnUserPrompt});
+        m_conversationHistory.append({"assistant", m_currentTurnAssistantText});
+        m_currentTurnUserPrompt.clear();
+        m_currentTurnAssistantText.clear();
+    }
+
     m_cancelBtn->hide();
+    m_continueGenBtn->show();
+    m_followUpEdit->setEnabled(true);
+    m_sendFollowUpBtn->setEnabled(true);
 
     renderMarkdownView(false);
     parseCodeSnippetsFromMarkdown();
-
     m_statusLabel->setStyleSheet("color: #50fa7b; font-weight: bold;");
     m_statusLabel->setText(QString("Completed: %1 chars | Extracted %2 code block(s)")
                                .arg(m_markdownText.length())
@@ -354,7 +422,19 @@ void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText
 void ProjectPromptResultDialog::markFailedOrCancelled(const QString& message) {
     m_isStreaming = false;
     m_streamRenderTimer.stop();
+
+    if (!m_currentTurnUserPrompt.isEmpty() && !m_currentTurnAssistantText.isEmpty()) {
+        m_conversationHistory.append({"user", m_currentTurnUserPrompt});
+        m_conversationHistory.append({"assistant", m_currentTurnAssistantText});
+        m_currentTurnUserPrompt.clear();
+        m_currentTurnAssistantText.clear();
+    }
+
     m_cancelBtn->hide();
+    m_continueGenBtn->setVisible(!m_markdownText.trimmed().isEmpty());
+    m_followUpEdit->setEnabled(true);
+    m_sendFollowUpBtn->setEnabled(true);
+
     m_statusLabel->setStyleSheet("color: #ff5555; font-weight: bold;");
     m_statusLabel->setText(message);
     renderMarkdownView(false);
@@ -439,6 +519,28 @@ void ProjectPromptResultDialog::onSaveFullMarkdown() {
 
 void ProjectPromptResultDialog::onOpenFullMarkdownInEditor() {
     emit openContentInEditorRequested("project_ai_response.md", m_markdownText, "markdown");
+}
+
+void ProjectPromptResultDialog::onContinueCutOffClicked() {
+    if (m_isStreaming) return;
+    QString contPrompt = QStringLiteral(
+        "Continue generating the response from the exact line/character where you stopped. "
+        "Do NOT repeat already generated text or headings.");
+    m_currentTurnUserPrompt = contPrompt;
+    emit continueRequestTriggered(this, m_systemPrompt, m_conversationHistory, contPrompt, true);
+}
+
+void ProjectPromptResultDialog::onSendFollowUpClicked() {
+    if (m_isStreaming) return;
+    QString followUp = m_followUpEdit->toPlainText().trimmed();
+    if (followUp.isEmpty()) {
+        onContinueCutOffClicked();
+        return;
+    }
+    ConfigManager::instance().setLastCustomPrompt(followUp);
+    m_followUpEdit->clear();
+    m_currentTurnUserPrompt = followUp;
+    emit continueRequestTriggered(this, m_systemPrompt, m_conversationHistory, followUp, false);
 }
 
 QString ProjectPromptResultDialog::normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt) {

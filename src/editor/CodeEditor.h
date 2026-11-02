@@ -2,7 +2,9 @@
 #pragma once
 #include <QPlainTextEdit>
 #include <QTextCursor>
+#include <QVector>
 #include "../syntax/ColorScheme.h"
+#include "../core/ConfigManager.h"
 
 class QWidget;
 class QLabel;
@@ -34,10 +36,22 @@ public:
 
     void triggerAiAction(AiEditAction action);
     void triggerCustomPromptWithText(const QString& initialPromptText);
+    void triggerContinueAiGeneration();
+    void triggerFollowUpAiPrompt();
+
+    void setLastAiConversationContext(const QString& systemPrompt,
+                                      const QVector<AiChatMessage>& history,
+                                      AiEditAction lastAction);
+    bool hasLastAiContext() const { return !m_lastAiHistory.isEmpty(); }
+    QString lastAiSystemPrompt() const { return m_lastAiSystemPrompt; }
+    QVector<AiChatMessage> lastAiHistory() const { return m_lastAiHistory; }
+    AiEditAction lastAiAction() const { return m_lastAiAction; }
+
     void setAiBusy(bool busy, const QString& statusText = {});
     bool isAiBusy() const { return m_isAiBusy; }
 
     void beginAiStreamEdit();
+    void beginAiStreamContinueEdit();
     void appendAiStreamChunk(const QString& chunk);
     void finishAiStreamEdit();
     void cancelAndRollbackAiEdit();
@@ -47,6 +61,7 @@ public:
 
 signals:
     void aiActionRequested(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
+    void aiContinueRequested(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
     void cancelAiRequested(CodeEditor* editor);
     void diffRequested(CodeEditor* editor);
     void fileSaved(const QString& filePath, const QByteArray& content);
@@ -81,6 +96,10 @@ private:
     bool m_updatingStreamText = false;
     int m_lastAutoScrollValue = 0;
     QString m_headerBuf, m_tailBuf;
+
+    QString m_lastAiSystemPrompt;
+    QVector<AiChatMessage> m_lastAiHistory;
+    AiEditAction m_lastAiAction = AiEditAction::CustomPrompt;
 };
 
 class LineNumberArea : public QWidget {

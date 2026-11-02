@@ -48,7 +48,8 @@ public:
 
     void updateFileUserPrompt(const QString& filePath, const QString& prompt);
     void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
-    void clearFileSummary(const QString& filePath, const QString& currentSha256 = {});
+    void clearFileSummary(const QString& filePath, const QString& sha256 = {});
+    void removeFileSummary(const QString& filePath);
     void setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256 = {}, const QString& pendingLlmModel = {});
 
     bool isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent, const QString& currentLlmModel) const;

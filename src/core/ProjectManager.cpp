@@ -219,6 +219,36 @@ void ProjectManager::clearFileSummary(const QString& filePath, const QString& cu
     emit projectContextChanged();
 }
 
+void ProjectManager::removeFileSummary(const QString& filePath) {
+    if (filePath.isEmpty()) return;
+    QString rel = toRelativePath(filePath);
+    if (!m_files.contains(rel)) return;
+
+    auto& entry = m_files[rel];
+    const bool hadSummary = entry.summaryCreated || !entry.aiSummary.isEmpty() || entry.isSummaryPending;
+
+    entry.sha256.clear();
+    entry.llmModel.clear();
+    entry.aiSummary.clear();
+    entry.summaryCreated = false;
+    entry.isSummaryPending = false;
+    entry.pendingSha256.clear();
+    entry.pendingLlmModel.clear();
+    entry.updatedAt = QDateTime::currentDateTimeUtc();
+
+    // Если у файла нет пользовательских инструкций, полностью удаляем запись из карты проекта
+    if (entry.userPrompt.trimmed().isEmpty()) {
+        m_files.remove(rel);
+    }
+
+    if (hadSummary) {
+        m_projectSummaryDirty = true;
+    }
+    saveProjectFile();
+    emit fileContextChanged(rel);
+    emit projectContextChanged();
+}
+
 void ProjectManager::setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256, const QString& pendingLlmModel) {
     auto rel = toRelativePath(filePath);
     auto& entry = m_files[rel];

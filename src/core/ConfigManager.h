@@ -22,6 +22,11 @@ enum class ProjectCustomPromptContextMode {
     BothSummaryAndSourcesMarkdown = 2
 };
 
+struct AiChatMessage {
+    QString role;    // "system", "user", "assistant"
+    QString content;
+};
+
 struct AiConnectionConfig {
     QString profileName = "Ollama (Offline)";
     AiBackendType backend = AiBackendType::Ollama;
@@ -112,6 +117,7 @@ public:
     void setPromptHistoryLimit(int limit);
     static QString computePromptHash(const QString& promptText);
 
+    void invalidateSyntaxExtensionsCache();
     QStringList extensionsFromLoadedSyntaxes() const;
     bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
     bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
@@ -160,7 +166,6 @@ public:
     QString configDirPath() const;
     QString syntaxDirPath() const { return configDirPath() + "/syntax"; }
     QString themesDirPath() const { return configDirPath() + "/themes"; }
-
 signals:
     void aiConfigChanged(const AiConnectionConfig& newConfig);
     void aiBehaviorChanged(const AiBehaviorConfig& newBehavior);
@@ -196,4 +201,7 @@ private:
     QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;
+
+    mutable QStringList m_cachedSyntaxExtensions;
+    mutable bool m_syntaxExtensionsCacheValid = false;
 };
