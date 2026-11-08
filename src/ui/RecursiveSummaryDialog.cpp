@@ -229,6 +229,8 @@ void ProjectFileSelectorWidget::rebuildTree() {
         return;
     }
 
+    m_totalFilesFound = totalFilesFound;
+
     // Включаем AutoTristate после наполнения детей, чтобы избежать лишних пересчётов при вставке
     rootItem->setFlags(rootItem->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
     m_tree->addTopLevelItem(rootItem);

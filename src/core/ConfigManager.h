@@ -51,16 +51,17 @@ struct AiConnectionConfig {
 };
 
 struct AiBehaviorConfig {
-    AutoSummaryMode autoSummaryMode = AutoSummaryMode::FilesAndProject;
+    QString responseLocale = "default";
+    AutoSummaryMode autoSummaryMode = AutoSummaryMode::None; // По умолчанию: Do not auto-create summaries
     bool includeDocumentSummaryInPrompt = true;
     bool includeProjectSummaryInPrompt = true;
-    ProjectCustomPromptContextMode projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     bool summaryUseSyntaxExtensions = true;
-    int promptHistoryLimit = 50;
-    QString responseLocale = "default";
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
     QStringList summaryIgnoredDirs;
+    int promptHistoryLimit = 50;
+    ProjectCustomPromptContextMode projectCustomPromptContextMode =
+        ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
 };
 
 struct PromptHistoryItem {

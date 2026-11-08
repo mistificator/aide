@@ -286,17 +286,37 @@ void MainWindow::setupMenus() {
 
     // 2. EDIT
     QMenu* editMenu = menuBar()->addMenu("&Edit");
-    editMenu->addAction("Undo", QKeySequence::Undo, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->undo(); });
-    editMenu->addAction("Redo", QKeySequence::Redo, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->redo(); });
+    editMenu->addAction("Undo", QKeySequence::Undo, this, [this]() {
+        if (m_tabWidget->isCurrentTabInRawEditMode())
+            if (auto* e = m_tabWidget->currentEditor()) e->undo();
+    });
+    editMenu->addAction("Redo", QKeySequence::Redo, this, [this]() {
+        if (m_tabWidget->isCurrentTabInRawEditMode())
+            if (auto* e = m_tabWidget->currentEditor()) e->redo();
+    });
     editMenu->addSeparator();
-    editMenu->addAction("Cut", QKeySequence::Cut, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->cut(); });
-    editMenu->addAction("Copy", QKeySequence::Copy, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->copy(); });
-    editMenu->addAction("Paste", QKeySequence::Paste, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->paste(); });
-    editMenu->addAction("Select All", QKeySequence::SelectAll, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->selectAll(); });
-    editMenu->addSeparator();
-    editMenu->addAction("Find / Replace...", QKeySequence::Find, this, &MainWindow::onFindReplaceDialog);
-    editMenu->addSeparator();
-    editMenu->addAction("Preferences...", this, &MainWindow::onEditorPreferences);
+    editMenu->addAction("Cut", QKeySequence::Cut, this, [this]() {
+        if (m_tabWidget->isCurrentTabInRawEditMode())
+            if (auto* e = m_tabWidget->currentEditor()) e->cut();
+    });
+    editMenu->addAction("Copy", QKeySequence::Copy, this, [this]() {
+        if (auto* fw = QApplication::focusWidget()) {
+            if (auto* te = qobject_cast<QTextEdit*>(fw)) { te->copy(); return; }
+            if (auto* pte = qobject_cast<QPlainTextEdit*>(fw)) { pte->copy(); return; }
+        }
+        if (auto* e = m_tabWidget->currentEditor()) e->copy();
+    });
+    editMenu->addAction("Paste", QKeySequence::Paste, this, [this]() {
+        if (m_tabWidget->isCurrentTabInRawEditMode())
+            if (auto* e = m_tabWidget->currentEditor()) e->paste();
+    });
+    editMenu->addAction("Select All", QKeySequence::SelectAll, this, [this]() {
+        if (auto* fw = QApplication::focusWidget()) {
+            if (auto* te = qobject_cast<QTextEdit*>(fw)) { te->selectAll(); return; }
+            if (auto* pte = qobject_cast<QPlainTextEdit*>(fw)) { pte->selectAll(); return; }
+        }
+        if (auto* e = m_tabWidget->currentEditor()) e->selectAll();
+    });
 
     // Скрываемый AI-тулбар
     m_aiToolBar = addToolBar("AI Toolbar");
@@ -322,6 +342,10 @@ void MainWindow::setupMenus() {
     viewMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
         statusBar()->showMessage("Downloading syntax & theme files...", 3000);
         m_downloader->forceDownloadAll();
+    });
+    viewMenu->addSeparator();
+    viewMenu->addAction("Toggle Markdown View Mode", QKeySequence("Ctrl+Shift+M"), this, [this]() {
+        m_tabWidget->toggleCurrentMarkdownViewMode();
     });
     viewMenu->addSeparator();
     viewMenu->addAction("Zoom In", QKeySequence::ZoomIn, this, [this]() { if (auto* e = m_tabWidget->currentEditor()) e->zoomIn(1); });
@@ -490,10 +514,12 @@ void MainWindow::setupConnections() {
         onActiveEditorChanged(ed);
         updateCentralViewState();
     });
-#if 0 // don't delete this
-    connect(m_tabWidget, &EditorTabWidget::documentOpened, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
-    connect(m_tabWidget, &EditorTabWidget::documentSaved, m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
-#endif
+
+    connect(m_tabWidget, &EditorTabWidget::documentOpened,
+            m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
+    connect(m_tabWidget, &EditorTabWidget::documentSaved,
+            m_summaryWorker, &SummaryWorker::checkAndScheduleFileSummary);
+
     connect(m_tabWidget, &EditorTabWidget::aiActionTriggered, this, &MainWindow::onEditorAiAction);
     connect(m_tabWidget, &EditorTabWidget::aiContinueTriggered, this, &MainWindow::onEditorAiContinue);
     connect(m_tabWidget, &EditorTabWidget::cancelAiTriggered, m_taskQueue, &AiTaskQueue::cancelTaskForEditor);
@@ -1066,7 +1092,14 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
         auto selectedMode = static_cast<ProjectCustomPromptContextMode>(ctxCombo->currentData().toInt());
         QStringList selectedFiles = fileSelector->selectedFilePaths();
 
-        if (selectedMode != ProjectCustomPromptContextMode::ProjectSummaryOnly && selectedFiles.isEmpty()) {
+        const bool isEmptyProject = (fileSelector->totalFilesCount() == 0) &&
+                                    (m_projectMgr->indexedFilesCount() == 0) &&
+                                    m_projectMgr->projectSummary().trimmed().isEmpty();
+
+        bool userConfirmedEmptySelection = false;
+        if (!isEmptyProject &&
+            selectedMode != ProjectCustomPromptContextMode::ProjectSummaryOnly &&
+            selectedFiles.isEmpty()) {
             auto ans = QMessageBox::question(
                 &dlg,
                 "No Project Files Selected",
@@ -1074,13 +1107,14 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                 "Do you want to continue without source files in the context?",
                 QMessageBox::Yes | QMessageBox::No);
             if (ans == QMessageBox::No) return;
+            userConfirmedEmptySelection = true;
         }
 
         int includedFiles = 0;
         QString projectContext = m_projectMgr->buildProjectCustomPromptContext(
             selectedMode, selectedFiles, openBuffers, &includedFiles);
 
-        if (projectContext.trimmed().isEmpty()) {
+        if (!isEmptyProject && !userConfirmedEmptySelection && projectContext.trimmed().isEmpty()) {
             auto ans = QMessageBox::question(
                 &dlg,
                 "Empty Project Context",
@@ -1193,6 +1227,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                     } else if (!suggestedPath.isEmpty()) {
                         ed->setSyntaxLanguage(ConfigManager::instance().languageIdForFile(suggestedPath));
                     }
+                    m_tabWidget->refreshEditorModeBar(ed);
                     updateCentralViewState();
                     raise();
                     activateWindow();
@@ -1337,7 +1372,7 @@ void MainWindow::openProjectAtPath(const QString& dirPath) {
         QString nativePath = QDir::toNativeSeparators(m_projectMgr->projectRootPath());
         m_projectPathLabel->setText(nativePath);
         m_projectPathLabel->setToolTip(nativePath);
-
+        m_tabWidget->setProjectRootPath(m_projectMgr->projectRootPath());
         m_fsModel->setRootPath(dirPath);
         m_projectTree->setRootIndex(m_fsModel->index(dirPath));
         m_inspectorDock->refreshDisplay();
@@ -1377,6 +1412,7 @@ void MainWindow::onCloseAllProjects() {
     m_taskQueue->cancelAllBackgroundTasks();
     if (!m_tabWidget->closeAllDocuments()) return;
     m_projectMgr->closeProject();
+    m_tabWidget->setProjectRootPath({});
     m_projectPathLabel->setText("-");
     m_projectPathLabel->setToolTip({});
     ConfigManager::instance().setLastProjectPath({});
@@ -1400,8 +1436,10 @@ void MainWindow::onEditorPreferences() {
     if (dlg.exec() == QDialog::Accepted) {
         for (int i = 0; i < m_tabWidget->count(); ++i) {
             if (auto* ed = m_tabWidget->editorAt(i)) {
-                if (!ed->filePath().isEmpty())
+                if (!ed->filePath().isEmpty()) {
                     ed->setSyntaxLanguage(ConfigManager::instance().languageIdForFile(ed->filePath()));
+                }
+                m_tabWidget->refreshEditorModeBar(ed);
             }
         }
     }
@@ -1432,7 +1470,6 @@ void MainWindow::populateSyntaxMenu() {
         if (cmp != 0) return cmp < 0;
         return a.langId.compare(b.langId, Qt::CaseInsensitive) < 0;
     });
-
     for (const auto& r : rules) {
         QAction* act = m_langMenu->addAction(QString("%1 (%2)").arg(r.displayName, r.langId));
         if (auto* e = m_tabWidget->currentEditor()) {
@@ -1442,6 +1479,7 @@ void MainWindow::populateSyntaxMenu() {
         connect(act, &QAction::triggered, this, [this, lang = r.langId]() {
             if (auto* e = m_tabWidget->currentEditor()) {
                 e->setSyntaxLanguage(lang);
+                m_tabWidget->refreshEditorModeBar(e);
                 m_langStatusLabel->setText("Lang: " + lang);
             }
         });
@@ -1659,6 +1697,15 @@ void MainWindow::onAiPreferences() {
         m_projectMgr->saveProjectFile();
         m_inspectorDock->refreshDisplay();
         m_projectTree->viewport()->update();
+
+        // Если пользователь включил автосоздание саммари, проверяем текущие открытые вкладки
+        if (cfgMgr.aiBehavior().autoSummaryMode != AutoSummaryMode::None) {
+            for (int i = 0; i < m_tabWidget->count(); ++i) {
+                if (auto* ed = m_tabWidget->editorAt(i); ed && !ed->filePath().isEmpty()) {
+                    m_summaryWorker->checkAndScheduleFileSummary(ed->filePath(), ed->toPlainText().toUtf8());
+                }
+            }
+        }
     }
 }
 

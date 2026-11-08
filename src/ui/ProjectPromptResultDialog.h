@@ -1,6 +1,6 @@
 // src/ui/ProjectPromptResultDialog.h
 #pragma once
-#include <QDialog>
+#include <QWidget>
 #include <QVector>
 #include <QString>
 #include <QStringList>
@@ -25,9 +25,21 @@ struct ExtractedCodeSnippet {
     QString code;
 };
 
-class ProjectPromptResultDialog : public QDialog {
+enum class MarkdownViewerMode {
+    ProjectPromptResult,     // Отдельное окно результата AI Custom Prompt / Explain Code
+    MarkdownDocumentViewer   // Встроенный расширенный просмотр внутри вкладки редактора
+};
+
+enum class MarkdownDisplaySubMode {
+    RawMarkdown = 0,
+    RenderedMarkdown = 1,
+    ExtendedCodeView = 2
+};
+
+class ProjectPromptResultDialog : public QWidget {
     Q_OBJECT
 public:
+    // Конструктор для отдельного окна результата промпта проекта / Explain Code
     explicit ProjectPromptResultDialog(const QString& promptTitle,
                                        const QString& projectRootPath,
                                        const QString& taskId,
@@ -35,8 +47,18 @@ public:
                                        const QString& initialUserPrompt,
                                        QWidget* parent = nullptr);
 
+    // Конструктор для встроенного просмотра .md-документа прямо во вкладке редактора (без отдельного окна)
+    explicit ProjectPromptResultDialog(const QString& projectRootPath,
+                                       QWidget* parent = nullptr);
+
+    MarkdownViewerMode viewerMode() const { return m_viewerMode; }
+
     QString taskId() const { return m_taskId; }
     void setTaskId(const QString& id) { m_taskId = id; }
+
+    void setDocumentContent(const QString& markdownText, const QString& projectRootPath);
+    void setDisplaySubMode(MarkdownDisplaySubMode subMode);
+    MarkdownDisplaySubMode displaySubMode() const { return m_subMode; }
 
     void beginFollowUpStream(const QString& newTaskId, const QString& displayFollowUp, bool seamlessAppend);
     void appendStreamChunk(const QString& chunk);
@@ -56,13 +78,11 @@ signals:
 
 private slots:
     void onStreamRenderTick();
-    void onToggleRawView(bool showRaw);
     void onCopyFullMarkdown();
     void onSaveFullMarkdown();
     void onOpenFullMarkdownInEditor();
     void onContinueCutOffClicked();
     void onSendFollowUpClicked();
-
     void onSnippetSelectionChanged();
     void onSnippetContextMenu(const QPoint& pos);
     void onCopySnippetCode();
@@ -74,18 +94,23 @@ private slots:
     void onSaveAllDetectedFiles();
 
 private:
+    void buildUi(const QString& promptTitle);
     void refreshProjectFilesIndex();
     QString resolveExistingProjectFile(const QString& suggestedPath) const;
     void renderMarkdownView(bool scrollToBottom = false);
     void parseCodeSnippetsFromMarkdown();
+
     static QVector<ExtractedCodeSnippet> extractSnippets(const QString& markdown);
     static QString detectFilePathFromLine(const QString& line);
     static QString detectFilePathFromCodeComment(const QString& firstCodeLine);
     static QString normalizeAndValidatePathCandidate(QString candidate, bool requireKnownOrLowerExt = false);
 
+    MarkdownViewerMode m_viewerMode = MarkdownViewerMode::ProjectPromptResult;
+    MarkdownDisplaySubMode m_subMode = MarkdownDisplaySubMode::ExtendedCodeView;
     QString m_projectRootPath;
     QStringList m_projectFiles;
     QString m_taskId;
+
     QString m_systemPrompt;
     QString m_currentTurnUserPrompt;
     QString m_currentTurnAssistantText;
@@ -98,10 +123,13 @@ private:
     QTimer m_streamRenderTimer;
     QVector<ExtractedCodeSnippet> m_snippets;
 
+    QWidget* m_topBarWidget = nullptr;
     QLabel* m_statusLabel = nullptr;
     QPushButton* m_cancelBtn = nullptr;
     QPushButton* m_continueGenBtn = nullptr;
-    QPushButton* m_toggleRawBtn = nullptr;
+    QPushButton* m_rawModeBtn = nullptr;
+    QPushButton* m_renderedModeBtn = nullptr;
+    QPushButton* m_extendedModeBtn = nullptr;
     QPushButton* m_copyMdBtn = nullptr;
     QPushButton* m_saveMdBtn = nullptr;
     QPushButton* m_openMdInTabBtn = nullptr;
@@ -109,7 +137,9 @@ private:
     QStackedWidget* m_leftStack = nullptr;
     QTextEdit* m_renderedView = nullptr;
     QPlainTextEdit* m_rawView = nullptr;
+    QWidget* m_rightPane = nullptr;
 
+    QWidget* m_followUpBox = nullptr;
     QPlainTextEdit* m_followUpEdit = nullptr;
     QPushButton* m_sendFollowUpBtn = nullptr;
 

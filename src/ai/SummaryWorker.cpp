@@ -13,6 +13,7 @@ SummaryWorker::SummaryWorker(ProjectManager* projMgr, AiTaskQueue* queue, QObjec
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &SummaryWorker::onTaskCompleted);
     connect(m_taskQueue, &AiTaskQueue::taskFailed, this, &SummaryWorker::onTaskFailed);
     connect(m_taskQueue, &AiTaskQueue::taskCancelled, this, &SummaryWorker::onTaskCancelled);
+
     connect(&ConfigManager::instance(), &ConfigManager::aiConfigChanged, this, [this](const AiConnectionConfig&) {
         updateTimerInterval();
     });
@@ -28,19 +29,14 @@ void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const Q
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
     if (!m_projectMgr || !m_projectMgr->hasOpenProject()) return;
 
-    // Проверяем, что файл действительно принадлежит папке открытого проекта
-    QString cleanRoot = QDir::cleanPath(m_projectMgr->projectRootPath());
-    QString cleanFile = QDir::cleanPath(QFileInfo(filePath).absoluteFilePath());
-    if (!cleanFile.startsWith(cleanRoot + "/", Qt::CaseInsensitive) &&
-        cleanFile.compare(cleanRoot, Qt::CaseInsensitive) != 0) {
-        return;
-    }
-
     if (ConfigManager::instance().aiBehavior().autoSummaryMode == AutoSummaryMode::None) {
         return;
     }
 
-    if (m_projectMgr->hasFileSummary(filePath)) {
+    QString cleanRoot = QDir::cleanPath(m_projectMgr->projectRootPath());
+    QString cleanFile = QDir::cleanPath(QFileInfo(filePath).absoluteFilePath());
+    if (!cleanFile.startsWith(cleanRoot + "/", Qt::CaseInsensitive) &&
+        cleanFile.compare(cleanRoot, Qt::CaseInsensitive) != 0) {
         return;
     }
 
@@ -53,10 +49,20 @@ void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const Q
         return;
     }
 
-    const auto& cfg = ConfigManager::instance().aiConfig();
-    if (m_projectMgr->isFileSummaryOutdated(filePath, content, cfg.llmIdentifier())) {
-        forceRebuildFileSummary(filePath, content);
+    const auto fc = m_projectMgr->fileContext(relPath);
+    const QString currentSha = ProjectManager::computeSha256(content);
+
+    // Если саммари было намеренно очищено пользователем (Clear) для этой версии файла — не перезаписываем
+    if (fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && fc.sha256 == currentSha) {
+        return;
     }
+
+    // Если непустое саммари уже есть и SHA-256 содержимого не изменился — пересоздавать не нужно
+    if (!fc.aiSummary.trimmed().isEmpty() && !fc.sha256.isEmpty() && fc.sha256 == currentSha) {
+        return;
+    }
+
+    forceRebuildFileSummary(filePath, content);
 }
 
 void SummaryWorker::forceRebuildFileSummary(const QString& filePath,
@@ -223,6 +229,15 @@ void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultTex
         ? (task.previousOutput + "\n" + resultText)
         : resultText;
         m_projectMgr->updateFileSummary(task.filePath, task.fileSha256, task.llmModel, finalSummary);
+
+        // Если включено автосоздание саммари файлов и проекта и других задач в очереди нет,
+        // а саммари проекта ещё пустое — сразу запускаем генерацию саммари проекта
+        if (ConfigManager::instance().aiBehavior().autoSummaryMode == AutoSummaryMode::FilesAndProject &&
+            m_projectMgr->projectSummary().trimmed().isEmpty() &&
+            m_taskQueue->lowQueueTasks().isEmpty() &&
+            !m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, "__PROJECT_SUMMARY__")) {
+            forceRebuildProjectSummary();
+        }
     } else if (task.targetType == TaskTargetType::ProjectSummary) {
         QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
         ? (task.previousOutput + "\n" + resultText)

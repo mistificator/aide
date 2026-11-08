@@ -31,6 +31,7 @@ public:
 
     QStringList selectedFilePaths() const;
     int selectedFilesCount() const;
+    int totalFilesCount() const { return m_totalFilesFound; }
     qint64 selectedFilesTotalBytes() const;
     bool isLoading() const { return m_isLoading; }
 
@@ -83,6 +84,7 @@ private:
     bool m_updatingChecks = false;
     bool m_isLoading = false;
     int m_buildGeneration = 0;
+    int m_totalFilesFound = 0;
 };
 
 class RecursiveSummaryDialog : public QDialog {

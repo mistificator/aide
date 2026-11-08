@@ -18,6 +18,7 @@
 #include <QStackedWidget>
 #include <QClipboard>
 #include <QApplication>
+#include <QScreen>
 #include <QFileDialog>
 #include <QFile>
 #include <QSaveFile>
@@ -35,57 +36,113 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
                                                      const QString& systemPrompt,
                                                      const QString& initialUserPrompt,
                                                      QWidget* parent)
-    : QDialog(parent, Qt::Window | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint),
+    : QWidget(parent, Qt::Window | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint),
+    m_viewerMode(MarkdownViewerMode::ProjectPromptResult),
+    m_subMode(MarkdownDisplaySubMode::ExtendedCodeView),
     m_projectRootPath(projectRootPath),
     m_taskId(taskId),
     m_systemPrompt(systemPrompt),
-    m_currentTurnUserPrompt(initialUserPrompt) {
+    m_currentTurnUserPrompt(initialUserPrompt),
+    m_isStreaming(true) {
     setAttribute(Qt::WA_DeleteOnClose);
     refreshProjectFilesIndex();
+    buildUi(promptTitle);
+}
 
-    QString shortPrompt = promptTitle.simplified().left(70);
-    if (promptTitle.simplified().length() > 70) shortPrompt += "...";
-    setWindowTitle("AI Project Custom Prompt Result — " + shortPrompt);
-    resize(1260, 820);
+ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& projectRootPath,
+                                                     QWidget* parent)
+    : QWidget(parent, Qt::Widget),
+    m_viewerMode(MarkdownViewerMode::MarkdownDocumentViewer),
+    m_subMode(MarkdownDisplaySubMode::ExtendedCodeView),
+    m_projectRootPath(projectRootPath),
+    m_isStreaming(false) {
+    refreshProjectFilesIndex();
+    buildUi({});
+    if (m_topBarWidget) m_topBarWidget->hide();
+    if (m_followUpBox) m_followUpBox->hide();
+}
+
+void ProjectPromptResultDialog::buildUi(const QString& promptTitle) {
+    if (m_viewerMode == MarkdownViewerMode::ProjectPromptResult) {
+        QString shortPrompt = promptTitle.simplified().left(70);
+        if (promptTitle.simplified().length() > 70) shortPrompt += "...";
+        setWindowTitle("AI Project Custom Prompt Result — " + shortPrompt);
+
+        QRect avail = QApplication::primaryScreen()
+                          ? QApplication::primaryScreen()->availableGeometry()
+                          : QRect(0, 0, 1440, 900);
+        if (parentWidget() && parentWidget()->screen()) {
+            avail = parentWidget()->screen()->availableGeometry();
+        }
+        int w = qMin(1260, qMax(800, avail.width() - 80));
+        int h = qMin(820, qMax(560, avail.height() - 80));
+        resize(w, h);
+        int x = avail.x() + (avail.width() - w) / 2;
+        int y = qMax(avail.y() + 32, avail.y() + (avail.height() - h) / 2);
+        move(x, y);
+    }
 
     auto* mainLay = new QVBoxLayout(this);
     mainLay->setContentsMargins(8, 8, 8, 8);
     mainLay->setSpacing(6);
 
-    auto* topBar = new QHBoxLayout();
-    m_statusLabel = new QLabel("AI: Generating Markdown response...", this);
+    m_topBarWidget = new QWidget(this);
+    auto* topBar = new QHBoxLayout(m_topBarWidget);
+    topBar->setContentsMargins(0, 0, 0, 0);
+    topBar->setSpacing(6);
+
+    m_statusLabel = new QLabel("AI: Generating Markdown response...", m_topBarWidget);
     m_statusLabel->setStyleSheet("color: #8be9fd; font-weight: bold;");
 
-    m_cancelBtn = new QPushButton("Cancel Generation", this);
+    m_cancelBtn = new QPushButton("Cancel Generation", m_topBarWidget);
     m_cancelBtn->setStyleSheet(
         "QPushButton { background-color: #ff5555; color: #ffffff; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }"
         "QPushButton:hover { background-color: #ff6e6e; }");
 
-    m_continueGenBtn = new QPushButton("Continue Generation", this);
+    m_continueGenBtn = new QPushButton("Continue Generation", m_topBarWidget);
     m_continueGenBtn->setToolTip("Continue generating from where the response stopped, preserving previous context");
     m_continueGenBtn->setStyleSheet(
         "QPushButton { background-color: #50fa7b; color: #191a24; border: none; border-radius: 4px; padding: 4px 10px; font-weight: bold; }"
         "QPushButton:hover { background-color: #69ff94; }");
     m_continueGenBtn->hide();
 
-    m_toggleRawBtn = new QPushButton("View Raw Markdown", this);
-    m_toggleRawBtn->setCheckable(true);
-    m_copyMdBtn = new QPushButton("Copy Full Markdown", this);
-    m_saveMdBtn = new QPushButton("Save Markdown Document (.md)...", this);
+    const QString modeBtnStyle =
+        "QPushButton { background-color: #282a36; color: #f8f8f2; border: 1px solid #44475a; "
+        "border-radius: 4px; padding: 4px 8px; font-size: 11px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #343746; }"
+        "QPushButton:checked { background-color: #bd93f9; color: #191a24; border-color: #bd93f9; }";
+
+    m_rawModeBtn = new QPushButton("View Raw Markdown", m_topBarWidget);
+    m_rawModeBtn->setCheckable(true);
+    m_rawModeBtn->setStyleSheet(modeBtnStyle);
+
+    m_renderedModeBtn = new QPushButton("View Rendered Markdown", m_topBarWidget);
+    m_renderedModeBtn->setCheckable(true);
+    m_renderedModeBtn->setStyleSheet(modeBtnStyle);
+
+    m_extendedModeBtn = new QPushButton("Extended Markdown Code View", m_topBarWidget);
+    m_extendedModeBtn->setCheckable(true);
+    m_extendedModeBtn->setChecked(true);
+    m_extendedModeBtn->setStyleSheet(modeBtnStyle);
+
+    m_copyMdBtn = new QPushButton("Copy Full Markdown", m_topBarWidget);
+    m_saveMdBtn = new QPushButton("Save Markdown (.md)...", m_topBarWidget);
     m_saveMdBtn->setStyleSheet(
         "QPushButton { background-color: #bd93f9; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 10px; }"
         "QPushButton:hover { background-color: #caa6ff; }");
-    m_openMdInTabBtn = new QPushButton("Open .md in Editor Tab", this);
+    m_openMdInTabBtn = new QPushButton("Open .md in Editor Tab", m_topBarWidget);
 
     topBar->addWidget(m_statusLabel);
     topBar->addWidget(m_cancelBtn);
     topBar->addWidget(m_continueGenBtn);
     topBar->addStretch();
-    topBar->addWidget(m_toggleRawBtn);
+    topBar->addWidget(m_rawModeBtn);
+    topBar->addWidget(m_renderedModeBtn);
+    topBar->addWidget(m_extendedModeBtn);
     topBar->addWidget(m_copyMdBtn);
     topBar->addWidget(m_openMdInTabBtn);
     topBar->addWidget(m_saveMdBtn);
-    mainLay->addLayout(topBar);
+    mainLay->addWidget(m_topBarWidget);
 
     auto* mainSplitter = new QSplitter(Qt::Horizontal, this);
     mainSplitter->setChildrenCollapsible(false);
@@ -97,7 +154,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     MarkdownRenderer::configureViewer(m_renderedView);
 
     m_rawView = new QPlainTextEdit(m_leftStack);
-    m_rawView->setReadOnly(false);
+    m_rawView->setReadOnly(m_viewerMode == MarkdownViewerMode::MarkdownDocumentViewer);
     QFont monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     monoFont.setPointSize(10);
     m_rawView->setFont(monoFont);
@@ -110,22 +167,22 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_leftStack->addWidget(m_renderedView);
     m_leftStack->addWidget(m_rawView);
 
-    // Правая панель: Извлечённые файлы и блоки кода
-    auto* rightPane = new QWidget(mainSplitter);
-    auto* rightLay = new QVBoxLayout(rightPane);
+    // Правая панель: Извлечённые файлы и фрагменты кода
+    m_rightPane = new QWidget(mainSplitter);
+    auto* rightLay = new QVBoxLayout(m_rightPane);
     rightLay->setContentsMargins(0, 0, 0, 0);
     rightLay->setSpacing(6);
 
     auto* rightHdrRow = new QHBoxLayout();
-    auto* rightTitle = new QLabel("<b>Extracted Files & Code Fragments</b>", rightPane);
-    m_saveAllFilesBtn = new QPushButton("Save All Detected Files...", rightPane);
+    auto* rightTitle = new QLabel("<b>Extracted Files & Code Fragments</b>", m_rightPane);
+    m_saveAllFilesBtn = new QPushButton("Save All Detected Files...", m_rightPane);
     m_saveAllFilesBtn->setToolTip("Save all extracted code blocks that have a detected file path");
     m_saveAllFilesBtn->setEnabled(false);
     rightHdrRow->addWidget(rightTitle, 1);
     rightHdrRow->addWidget(m_saveAllFilesBtn);
     rightLay->addLayout(rightHdrRow);
 
-    auto* rightSplit = new QSplitter(Qt::Vertical, rightPane);
+    auto* rightSplit = new QSplitter(Qt::Vertical, m_rightPane);
     rightSplit->setChildrenCollapsible(false);
 
     m_snippetTree = new QTreeWidget(rightSplit);
@@ -148,13 +205,15 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     m_snippetHeaderLabel->setWordWrap(true);
 
     m_snippetCodeEdit = new QPlainTextEdit(previewBox);
+    m_snippetCodeEdit->setReadOnly(true); // Редактирование разрешено только в режиме View Raw Markdown
     m_snippetCodeEdit->setFont(monoFont);
     m_snippetCodeEdit->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_snippetCodeEdit->setStyleSheet(edStyle);
+
     m_snippetHighlighter = new LexicalHighlighter(m_snippetCodeEdit->document());
     m_snippetHighlighter->setColorScheme(scheme);
 
-    // Ряд кнопок 1: действия с существующим файлом проекта (Replace in Editor, Diff) и открытие в новой вкладке
+    // Ряд 1: Работа с файлами проекта (Replace in Editor, Diff) и открытие в новой вкладке
     auto* snippetActionRow1 = new QHBoxLayout();
     m_replaceInEditorBtn = new QPushButton("Open && Replace in Editor (Unsaved)", previewBox);
     m_replaceInEditorBtn->setToolTip(
@@ -179,7 +238,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     snippetActionRow1->addStretch();
     snippetActionRow1->addWidget(m_openSnippetTabBtn);
 
-    // Ряд кнопок 2: копирование и сохранение файла на диск
+    // Ряд 2: Копирование и сохранение на диск
     auto* snippetActionRow2 = new QHBoxLayout();
     m_copySnippetBtn = new QPushButton("Copy Block", previewBox);
     m_copySelectedSnippetBtn = new QPushButton("Copy Selected", previewBox);
@@ -208,23 +267,24 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     rightLay->addWidget(rightSplit, 1);
 
     mainSplitter->addWidget(m_leftStack);
-    mainSplitter->addWidget(rightPane);
+    mainSplitter->addWidget(m_rightPane);
     mainSplitter->setStretchFactor(0, 3);
     mainSplitter->setStretchFactor(1, 2);
     mainSplitter->setSizes({700, 540});
+
     mainLay->addWidget(mainSplitter, 1);
 
-    auto* followUpBox = new QWidget(this);
-    auto* followUpLay = new QHBoxLayout(followUpBox);
+    m_followUpBox = new QWidget(this);
+    auto* followUpLay = new QHBoxLayout(m_followUpBox);
     followUpLay->setContentsMargins(0, 4, 0, 0);
     followUpLay->setSpacing(6);
 
-    m_followUpEdit = new QPlainTextEdit(followUpBox);
+    m_followUpEdit = new QPlainTextEdit(m_followUpBox);
     m_followUpEdit->setPlaceholderText("Continue request / ask follow-up question (previous project context and AI responses are preserved)...");
     m_followUpEdit->setMaximumHeight(64);
     m_followUpEdit->setEnabled(false);
 
-    m_sendFollowUpBtn = new QPushButton("Continue / Send\nFollow-up", followUpBox);
+    m_sendFollowUpBtn = new QPushButton("Continue / Send\nFollow-up", m_followUpBox);
     m_sendFollowUpBtn->setMinimumHeight(56);
     m_sendFollowUpBtn->setStyleSheet(
         "QPushButton { background-color: #bd93f9; color: #191a24; font-weight: bold; border-radius: 4px; padding: 6px 14px; }"
@@ -234,7 +294,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
 
     followUpLay->addWidget(m_followUpEdit, 1);
     followUpLay->addWidget(m_sendFollowUpBtn);
-    mainLay->addWidget(followUpBox);
+    mainLay->addWidget(m_followUpBox);
 
     connect(m_continueGenBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onContinueCutOffClicked);
     connect(m_sendFollowUpBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSendFollowUpClicked);
@@ -249,13 +309,21 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     connect(m_cancelBtn, &QPushButton::clicked, this, [this]() {
         if (!m_taskId.isEmpty()) emit cancelTaskRequested(m_taskId);
     });
-    connect(m_toggleRawBtn, &QPushButton::toggled, this, &ProjectPromptResultDialog::onToggleRawView);
+    connect(m_rawModeBtn, &QPushButton::clicked, this, [this]() {
+        setDisplaySubMode(MarkdownDisplaySubMode::RawMarkdown);
+    });
+    connect(m_renderedModeBtn, &QPushButton::clicked, this, [this]() {
+        setDisplaySubMode(MarkdownDisplaySubMode::RenderedMarkdown);
+    });
+    connect(m_extendedModeBtn, &QPushButton::clicked, this, [this]() {
+        setDisplaySubMode(MarkdownDisplaySubMode::ExtendedCodeView);
+    });
     connect(m_copyMdBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onCopyFullMarkdown);
     connect(m_saveMdBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onSaveFullMarkdown);
     connect(m_openMdInTabBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onOpenFullMarkdownInEditor);
 
     connect(m_rawView, &QPlainTextEdit::textChanged, this, [this]() {
-        if (m_leftStack->currentWidget() == m_rawView && !m_isStreaming) {
+        if (m_leftStack->currentWidget() == m_rawView && !m_isStreaming && !m_updatingRenderedView) {
             m_markdownText = m_rawView->toPlainText();
             parseCodeSnippetsFromMarkdown();
         }
@@ -266,6 +334,7 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
     });
     connect(m_snippetTree, &QTreeWidget::customContextMenuRequested, this, &ProjectPromptResultDialog::onSnippetContextMenu);
     connect(m_snippetCodeEdit, &QPlainTextEdit::copyAvailable, m_copySelectedSnippetBtn, &QPushButton::setEnabled);
+
     connect(m_replaceInEditorBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onReplaceSnippetInEditor);
     connect(m_diffWithProjectBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onDiffSnippetWithProjectFile);
     connect(m_copySnippetBtn, &QPushButton::clicked, this, &ProjectPromptResultDialog::onCopySnippetCode);
@@ -287,6 +356,47 @@ ProjectPromptResultDialog::ProjectPromptResultDialog(const QString& promptTitle,
             m_streamRenderTimer.start(50);
         }
     });
+}
+
+void ProjectPromptResultDialog::setDisplaySubMode(MarkdownDisplaySubMode subMode) {
+    if (m_subMode == MarkdownDisplaySubMode::RawMarkdown && subMode != MarkdownDisplaySubMode::RawMarkdown) {
+        m_markdownText = m_rawView->toPlainText();
+    }
+    m_subMode = subMode;
+
+    if (m_rawModeBtn) m_rawModeBtn->setChecked(subMode == MarkdownDisplaySubMode::RawMarkdown);
+    if (m_renderedModeBtn) m_renderedModeBtn->setChecked(subMode == MarkdownDisplaySubMode::RenderedMarkdown);
+    if (m_extendedModeBtn) m_extendedModeBtn->setChecked(subMode == MarkdownDisplaySubMode::ExtendedCodeView);
+
+    if (subMode == MarkdownDisplaySubMode::RawMarkdown) {
+        m_updatingRenderedView = true;
+        m_rawView->setReadOnly(m_isStreaming || m_viewerMode == MarkdownViewerMode::MarkdownDocumentViewer);
+        m_rawView->setPlainText(m_markdownText);
+        m_updatingRenderedView = false;
+        m_leftStack->setCurrentWidget(m_rawView);
+        if (m_rightPane) m_rightPane->hide();
+    } else if (subMode == MarkdownDisplaySubMode::RenderedMarkdown) {
+        m_leftStack->setCurrentWidget(m_renderedView);
+        if (m_rightPane) m_rightPane->hide();
+        renderMarkdownView(false);
+    } else {
+        m_leftStack->setCurrentWidget(m_renderedView);
+        if (m_rightPane) m_rightPane->show();
+        renderMarkdownView(false);
+        parseCodeSnippetsFromMarkdown();
+    }
+}
+
+void ProjectPromptResultDialog::setDocumentContent(const QString& markdownText, const QString& projectRootPath) {
+    QString cleanRoot = projectRootPath.isEmpty() ? QString() : QDir::cleanPath(projectRootPath);
+    if (m_projectRootPath != cleanRoot) {
+        m_projectRootPath = cleanRoot;
+    }
+    refreshProjectFilesIndex();
+    m_isStreaming = false;
+    m_streamRenderTimer.stop();
+    m_markdownText = markdownText;
+    setDisplaySubMode(m_subMode);
 }
 
 void ProjectPromptResultDialog::refreshProjectFilesIndex() {
@@ -326,13 +436,11 @@ QString ProjectPromptResultDialog::resolveExistingProjectFile(const QString& sug
     while (clean.startsWith('/')) clean.remove(0, 1);
     if (clean.isEmpty()) return {};
 
-    // 1. Прямая проверка относительного пути от корня проекта
     QFileInfo directFi(QDir(m_projectRootPath).filePath(clean));
     if (directFi.exists() && directFi.isFile()) {
         return directFi.absoluteFilePath();
     }
 
-    // 2. Поиск по индексу файлов проекта (регистронезависимое совпадение пути или суффикса пути / имени файла)
     QString suffixTarget = "/" + clean;
     QStringList matches;
     for (const QString& rel : m_projectFiles) {
@@ -348,13 +456,11 @@ QString ProjectPromptResultDialog::resolveExistingProjectFile(const QString& sug
         return QFileInfo(QDir(m_projectRootPath).filePath(matches.first())).absoluteFilePath();
     }
     if (matches.size() > 1) {
-        // Выбираем файл с самым коротким относительным путём (ближе к корню проекта)
         std::sort(matches.begin(), matches.end(), [](const QString& a, const QString& b) {
             return a.length() < b.length();
         });
         return QFileInfo(QDir(m_projectRootPath).filePath(matches.first())).absoluteFilePath();
     }
-
     return {};
 }
 
@@ -365,6 +471,7 @@ void ProjectPromptResultDialog::beginFollowUpStream(const QString& newTaskId,
     m_isStreaming = true;
     m_followStreamScroll = true;
     m_currentTurnAssistantText.clear();
+    m_rawView->setReadOnly(true);
 
     if (!seamlessAppend && !displayFollowUp.trimmed().isEmpty()) {
         if (!m_markdownText.endsWith('\n')) m_markdownText += "\n";
@@ -385,6 +492,7 @@ void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
     m_currentTurnAssistantText += chunk;
     m_markdownText += chunk;
     m_statusLabel->setText(QString("AI: Streaming Markdown response (%1 chars)...").arg(m_markdownText.length()));
+
     if (!m_streamRenderTimer.isActive()) {
         int delayMs = qBound(120, m_markdownText.length() / 120, 420);
         m_streamRenderTimer.start(delayMs);
@@ -394,6 +502,7 @@ void ProjectPromptResultDialog::appendStreamChunk(const QString& chunk) {
 void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText) {
     m_isStreaming = false;
     m_streamRenderTimer.stop();
+
     if (m_conversationHistory.isEmpty() && !fullMarkdownText.trimmed().isEmpty() && m_markdownText.isEmpty()) {
         m_markdownText = fullMarkdownText;
         m_currentTurnAssistantText = fullMarkdownText;
@@ -406,13 +515,14 @@ void ProjectPromptResultDialog::finalizeResponse(const QString& fullMarkdownText
         m_currentTurnAssistantText.clear();
     }
 
+    m_rawView->setReadOnly(m_viewerMode == MarkdownViewerMode::MarkdownDocumentViewer);
     m_cancelBtn->hide();
     m_continueGenBtn->show();
     m_followUpEdit->setEnabled(true);
     m_sendFollowUpBtn->setEnabled(true);
-
     renderMarkdownView(false);
     parseCodeSnippetsFromMarkdown();
+
     m_statusLabel->setStyleSheet("color: #50fa7b; font-weight: bold;");
     m_statusLabel->setText(QString("Completed: %1 chars | Extracted %2 code block(s)")
                                .arg(m_markdownText.length())
@@ -430,11 +540,11 @@ void ProjectPromptResultDialog::markFailedOrCancelled(const QString& message) {
         m_currentTurnAssistantText.clear();
     }
 
+    m_rawView->setReadOnly(m_viewerMode == MarkdownViewerMode::MarkdownDocumentViewer);
     m_cancelBtn->hide();
     m_continueGenBtn->setVisible(!m_markdownText.trimmed().isEmpty());
     m_followUpEdit->setEnabled(true);
     m_sendFollowUpBtn->setEnabled(true);
-
     m_statusLabel->setStyleSheet("color: #ff5555; font-weight: bold;");
     m_statusLabel->setText(message);
     renderMarkdownView(false);
@@ -443,7 +553,6 @@ void ProjectPromptResultDialog::markFailedOrCancelled(const QString& message) {
 
 void ProjectPromptResultDialog::renderMarkdownView(bool scrollToBottom) {
     m_updatingRenderedView = true;
-
     if (m_leftStack->currentWidget() == m_rawView) {
         QScrollBar* rawBar = m_rawView->verticalScrollBar();
         int oldRawPos = rawBar->value();
@@ -464,7 +573,6 @@ void ProjectPromptResultDialog::renderMarkdownView(bool scrollToBottom) {
         }
         m_renderedView->setUpdatesEnabled(true);
     }
-
     m_updatingRenderedView = false;
 }
 
@@ -477,19 +585,6 @@ void ProjectPromptResultDialog::onStreamRenderTick() {
     }
     renderMarkdownView(m_followStreamScroll);
     parseCodeSnippetsFromMarkdown();
-}
-
-void ProjectPromptResultDialog::onToggleRawView(bool showRaw) {
-    if (showRaw) {
-        m_toggleRawBtn->setText("View Rendered Markdown");
-        m_rawView->setPlainText(m_markdownText);
-        m_leftStack->setCurrentWidget(m_rawView);
-    } else {
-        m_toggleRawBtn->setText("View Raw Markdown");
-        m_markdownText = m_rawView->toPlainText();
-        m_renderedView->setHtml(MarkdownRenderer::toHtml(m_markdownText));
-        m_leftStack->setCurrentWidget(m_renderedView);
-    }
 }
 
 void ProjectPromptResultDialog::onCopyFullMarkdown() {
@@ -595,7 +690,6 @@ QString ProjectPromptResultDialog::normalizeAndValidatePathCandidate(QString can
             return {};
         }
     }
-
     return candidate;
 }
 
@@ -636,7 +730,6 @@ QString ProjectPromptResultDialog::detectFilePathFromLine(const QString& line) {
             return valid;
         }
     }
-
     return {};
 }
 
@@ -684,7 +777,6 @@ QString ProjectPromptResultDialog::detectFilePathFromCodeComment(const QString& 
     if (m.hasMatch()) {
         return normalizeAndValidatePathCandidate(m.captured(1), true);
     }
-
     return {};
 }
 
@@ -711,8 +803,8 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
             int backticks = 0;
             while (backticks < trimmed.length() && trimmed[backticks] == '`') ++backticks;
             fenceMarker = QString(backticks, '`');
-            QString info = trimmed.mid(backticks).trimmed();
 
+            QString info = trimmed.mid(backticks).trimmed();
             fenceLang.clear();
             fenceHintPath.clear();
 
@@ -749,7 +841,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                 snip.code = codeLines.join('\n');
 
                 QString detectedPath = fenceHintPath;
-
                 if (detectedPath.isEmpty()) {
                     static const QRegularExpression rxHr(R"(^(?:-\s*){3,}$|^(?:\*\s*){3,}$\vert{}^(?:_\s*){3,}$)");
                     static const QRegularExpression rxLabelLine(
@@ -757,7 +848,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                         QRegularExpression::CaseInsensitiveOption);
 
                     int minLine = qMax(lastFenceEndLine + 1, fenceStartLine - 25);
-
                     for (int prev = fenceStartLine - 1; prev >= minLine; --prev) {
                         QString prevLine = lines[prev].trimmed();
                         if (prevLine.isEmpty()) continue;
@@ -765,7 +855,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
 
                         bool isHeading = prevLine.startsWith('#');
                         bool isExplicitFileLabel = rxLabelLine.match(prevLine).hasMatch();
-
                         if (isHeading || isExplicitFileLabel) {
                             detectedPath = detectFilePathFromLine(prevLine);
                             break;
@@ -777,7 +866,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                             QString prevLine = lines[prev].trimmed();
                             if (prevLine.isEmpty()) continue;
                             if (prevLine.startsWith("```") || rxHr.match(prevLine).hasMatch()) break;
-
                             QString stripped = prevLine;
                             stripped.remove(QRegularExpression(R"(^[\s\*_`#\-:]+|[\s\*_`#\-:]+$)"));
                             if (!stripped.contains(' ')) {
@@ -796,6 +884,7 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
                 if (!detectedPath.isEmpty() && (snip.language == "txt" || snip.language.isEmpty())) {
                     snip.language = ConfigManager::instance().languageIdForFile(detectedPath);
                 }
+
                 snip.title = detectedPath.isEmpty()
                                  ? QString("Fragment #%1 (%2)").arg(snip.index).arg(snip.language)
                                  : detectedPath;
@@ -810,7 +899,6 @@ QVector<ExtractedCodeSnippet> ProjectPromptResultDialog::extractSnippets(const Q
             }
         }
     }
-
     return result;
 }
 
@@ -867,7 +955,6 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
             item->setText(1, s.title);
             item->setForeground(1, QColor("#f8f8f2"));
         }
-
         item->setText(2, QString("%1 (%2 L)").arg(s.language).arg(lineCount));
     }
 
@@ -889,7 +976,7 @@ void ProjectPromptResultDialog::parseCodeSnippetsFromMarkdown() {
         onSnippetSelectionChanged();
     } else {
         m_snippetCodeEdit->clear();
-        m_snippetHeaderLabel->setText("No fenced code blocks (```) found in Markdown yet.");
+        m_snippetHeaderLabel->setText("No fenced code blocks (```) found in Markdown.");
         m_replaceInEditorBtn->setEnabled(false);
         m_diffWithProjectBtn->setEnabled(false);
         m_copySnippetBtn->setEnabled(false);
@@ -925,7 +1012,7 @@ void ProjectPromptResultDialog::onSnippetSelectionChanged() {
         m_snippetHeaderLabel->setStyleSheet("color: #50fa7b; font-size: 11px; font-weight: bold;");
     } else {
         m_snippetHeaderLabel->setText(
-            QString("Fragment #%1 | Language: %2 (you can edit or select lines below before saving/copying)")
+            QString("Fragment #%1 | Language: %2 (read-only preview; select lines to copy or save)")
                 .arg(s.index)
                 .arg(s.language));
         m_snippetHeaderLabel->setStyleSheet("color: #888899; font-size: 11px; font-weight: bold;");
@@ -949,9 +1036,9 @@ void ProjectPromptResultDialog::onSnippetContextMenu(const QPoint& pos) {
     QTreeWidgetItem* item = m_snippetTree->itemAt(pos);
     if (!item) return;
     m_snippetTree->setCurrentItem(item);
-
     int row = m_snippetTree->indexOfTopLevelItem(item);
     if (row < 0 || row >= m_snippets.size()) return;
+
     const auto& s = m_snippets[row];
     bool hasExistingMatch = !s.matchedProjectFilePath.isEmpty();
 
@@ -968,20 +1055,19 @@ void ProjectPromptResultDialog::onSnippetContextMenu(const QPoint& pos) {
     menu.addAction("Open as New Editor Tab", this, &ProjectPromptResultDialog::onOpenSnippetInEditor);
     menu.addAction("Copy Code Block", this, &ProjectPromptResultDialog::onCopySnippetCode);
     menu.addAction("Save File / Fragment As...", this, &ProjectPromptResultDialog::onSaveSnippetAsFile);
-
     menu.exec(m_snippetTree->viewport()->mapToGlobal(pos));
 }
 
 void ProjectPromptResultDialog::onCopySnippetCode() {
     QApplication::clipboard()->setText(m_snippetCodeEdit->toPlainText());
-    m_statusLabel->setText("Code block copied to clipboard.");
+    if (m_statusLabel) m_statusLabel->setText("Code block copied to clipboard.");
 }
 
 void ProjectPromptResultDialog::onCopySelectedSnippetText() {
     QTextCursor c = m_snippetCodeEdit->textCursor();
     QString txt = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : m_snippetCodeEdit->toPlainText();
     QApplication::clipboard()->setText(txt);
-    m_statusLabel->setText("Selected code fragment copied to clipboard.");
+    if (m_statusLabel) m_statusLabel->setText("Selected code fragment copied to clipboard.");
 }
 
 void ProjectPromptResultDialog::onSaveSnippetAsFile() {
@@ -1030,7 +1116,7 @@ void ProjectPromptResultDialog::onSaveSnippetAsFile() {
     }
     f.write(contentToSave.toUtf8());
     if (f.commit()) {
-        m_statusLabel->setText("Saved file: " + QDir::toNativeSeparators(savePath));
+        if (m_statusLabel) m_statusLabel->setText("Saved file: " + QDir::toNativeSeparators(savePath));
         refreshProjectFilesIndex();
         parseCodeSnippetsFromMarkdown();
         emit fileSavedToDisk(savePath);
@@ -1078,7 +1164,7 @@ void ProjectPromptResultDialog::onDiffSnippetWithProjectFile() {
                          langId,
                          this,
                          "BEFORE (Existing Project File: " + relTitle + ")",
-                         "AFTER (AI Prompt Result)");
+                         "AFTER (Markdown Code Block)");
     dlg.exec();
 }
 
@@ -1092,6 +1178,7 @@ void ProjectPromptResultDialog::onSaveAllDetectedFiles() {
     int savedCount = 0;
     for (const auto& s : m_snippets) {
         if (s.suggestedFilePath.isEmpty()) continue;
+
         QString relPath = !s.matchedProjectFilePath.isEmpty()
                               ? QDir(m_projectRootPath).relativeFilePath(s.matchedProjectFilePath)
                               : s.suggestedFilePath;
@@ -1108,7 +1195,10 @@ void ProjectPromptResultDialog::onSaveAllDetectedFiles() {
             }
         }
     }
+
     refreshProjectFilesIndex();
     parseCodeSnippetsFromMarkdown();
-    m_statusLabel->setText(QString("Saved %1 file(s) into %2").arg(savedCount).arg(QDir::toNativeSeparators(targetRoot)));
+    if (m_statusLabel) {
+        m_statusLabel->setText(QString("Saved %1 file(s) into %2").arg(savedCount).arg(QDir::toNativeSeparators(targetRoot)));
+    }
 }

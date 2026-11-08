@@ -68,14 +68,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
 }
 
 AiBehaviorConfig ConfigManager::defaultAiBehavior() {
-    AiBehaviorConfig b;
-    b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
-    b.includeDocumentSummaryInPrompt = true;
-    b.includeProjectSummaryInPrompt = true;
-    b.projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
-    b.responseLocale = "default";
-    b.summaryUseSyntaxExtensions = true;
-    b.promptHistoryLimit = 50;
+    AiBehaviorConfig b {};
     b.summaryAllowedFilenames = {
         "CMakeLists.txt", "Makefile", "GNUmakefile", "Dockerfile", "meson.build", "SConstruct"
     };
@@ -392,7 +385,7 @@ void ConfigManager::loadConfig() {
         m_aiBehavior = defaultAiBehavior();
         if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
             auto beh = obj["aiBehavior"].toObject();
-            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::FilesAndProject));
+            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::None));
             m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
