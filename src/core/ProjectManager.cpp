@@ -96,7 +96,9 @@ bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
 bool ProjectManager::saveProjectFile() {
     if (m_aideFilePath.isEmpty()) return false;
     QJsonObject filesObj;
-    for (const auto& [relPath, data] : m_files.asKeyValueRange()) {
+    for (auto it = m_files.constKeyValueBegin(); it != m_files.constKeyValueEnd(); ++it) { // for old Qt6 compatibility
+        const auto& relPath = it->first;
+        const auto& data = it->second;
         filesObj[relPath] = QJsonObject{
             {"sha256", data.sha256},
             {"llm_model", data.llmModel},
@@ -302,7 +304,9 @@ QString ProjectManager::buildAggregatedFilesDigest() const {
 
 QStringList ProjectManager::indexedFilePaths() const {
     QStringList paths;
-    for (const auto& [relPath, fc] : m_files.asKeyValueRange()) {
+    for (auto it = m_files.constKeyValueBegin(); it != m_files.constKeyValueEnd(); ++it) { // for old Qt6 compatibility
+        const auto& relPath = it->first;
+        const auto& fc = it->second;
         if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) continue;
         QString absPath = m_rootPath.isEmpty() ? relPath : QDir(m_rootPath).filePath(relPath);
         QFileInfo fi(absPath);

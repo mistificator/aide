@@ -82,6 +82,33 @@ private:
     ProjectManager* m_pm;
 };
 
+class QMenuCompat : public QMenu {
+public:
+    using QMenu::addAction;
+#if QT_VERSION < QT_VERSION_CHECK(6, 3, 0)
+    template<typename Functor>
+    QAction *addAction(const QString &text, const QKeySequence &shortcut, Functor functor)
+    {
+        return QMenu::addAction(text, functor, shortcut);
+    }
+    template<typename Functor>
+    QAction *addAction(const QString &text, const QKeySequence &shortcut, const QObject *context, Functor functor)
+    {
+        return QMenu::addAction(text, context, functor, shortcut);
+    }
+    template<typename Functor>
+    QAction *addAction(const QIcon &icon, const QString &text, const QKeySequence &shortcut, Functor functor)
+    {
+        return QMenu::addAction(icon, text, functor, shortcut);
+    }
+    template<typename Functor>
+    QAction *addAction(const QIcon &icon, const QString &text, const QKeySequence &shortcut, const QObject *context, Functor functor)
+    {
+        return QMenu::addAction(icon, text, context, functor, shortcut);
+    }
+#endif
+};
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
     m_projectMgr(new ProjectManager(this)),
@@ -261,7 +288,7 @@ void MainWindow::setupMenus() {
     });
     fileMenu->addAction("Open File...", QKeySequence::Open, this, &MainWindow::onOpenFile);
     fileMenu->addAction("Open Folder / Project...", QKeySequence("Ctrl+Shift+O"), this, &MainWindow::onOpenFolder);
-    m_recentProjectsMenu = fileMenu->addMenu("Recent Projects");
+    m_recentProjectsMenu = static_cast<QMenuCompat *>(fileMenu->addMenu("Recent Projects"));
     connect(m_recentProjectsMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentProjectsMenu);
     fileMenu->addAction("Close All Projects", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::onCloseAllProjects);
     fileMenu->addSeparator();
@@ -335,9 +362,9 @@ void MainWindow::setupMenus() {
     viewMenu->addAction(m_taskQueueDock->toggleViewAction());
     viewMenu->addAction(m_debugConsoleDock->toggleViewAction());
     viewMenu->addSeparator();
-    m_themeMenu = viewMenu->addMenu("Color Scheme");
+    m_themeMenu = static_cast<QMenuCompat *>(viewMenu->addMenu("Color Scheme"));
     connect(m_themeMenu, &QMenu::aboutToShow, this, &MainWindow::populateThemeMenu);
-    m_langMenu = viewMenu->addMenu("Syntax Highlighting");
+    m_langMenu = static_cast<QMenuCompat *>(viewMenu->addMenu("Syntax Highlighting"));
     connect(m_langMenu, &QMenu::aboutToShow, this, &MainWindow::populateSyntaxMenu);
     viewMenu->addAction("Download / Update Syntax && Themes", this, [this]() {
         statusBar()->showMessage("Downloading syntax & theme files...", 3000);
@@ -479,7 +506,7 @@ void MainWindow::setupMenus() {
     aiMenu->addAction("Preferences...", this, &MainWindow::onAiPreferences);
 
     // 5. WINDOW
-    m_windowMenu = menuBar()->addMenu("&Window");
+    m_windowMenu = static_cast<QMenuCompat *>(menuBar()->addMenu("&Window"));
     connect(m_windowMenu, &QMenu::aboutToShow, this, &MainWindow::populateWindowMenu);
 
     // 6. HELP

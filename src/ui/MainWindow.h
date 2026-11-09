@@ -28,6 +28,8 @@ class PromptHistoryDock;
 class ProjectPromptResultDialog;
 struct AiTask;
 
+class QMenuCompat;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -128,10 +130,10 @@ private:
     QAction* m_actAddDocs = nullptr;
     QList<QAction*> m_otherFileAiActions;
 
-    QMenu* m_recentProjectsMenu = nullptr;
-    QMenu* m_windowMenu = nullptr;
-    QMenu* m_themeMenu = nullptr;
-    QMenu* m_langMenu = nullptr;
+    QMenuCompat* m_recentProjectsMenu = nullptr;
+    QMenuCompat* m_windowMenu = nullptr;
+    QMenuCompat* m_themeMenu = nullptr;
+    QMenuCompat* m_langMenu = nullptr;
 
     QPushButton* m_queueStatusBtn = nullptr;
     QLabel* m_langStatusLabel = nullptr;
