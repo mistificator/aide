@@ -2,7 +2,6 @@
 #include "RecursiveSummaryDialog.h"
 #include "../core/ProjectManager.h"
 #include "../core/ConfigManager.h"
-
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QTreeWidget>
@@ -51,7 +50,6 @@ ProjectFileSelectorWidget::FastFilterRules ProjectFileSelectorWidget::buildFastF
     FastFilterRules rules;
     const auto& cfgMgr = ConfigManager::instance();
     const auto beh = cfgMgr.aiBehavior();
-
     for (const QString& ext : beh.summaryAllowedExtensions) {
         QString clean = ext.trimmed().toLower();
         if (clean.startsWith("*.")) clean = clean.mid(2);
@@ -64,7 +62,6 @@ ProjectFileSelectorWidget::FastFilterRules ProjectFileSelectorWidget::buildFastF
             if (!clean.isEmpty()) rules.allowedExtensions.insert(clean);
         }
     }
-
     for (const QString& pat : beh.summaryAllowedFilenames) {
         QString p = pat.trimmed();
         if (p.isEmpty()) continue;
@@ -76,7 +73,6 @@ ProjectFileSelectorWidget::FastFilterRules ProjectFileSelectorWidget::buildFastF
             rules.exactAllowedNames.insert(p.toLower());
         }
     }
-
     for (const QString& pat : beh.summaryIgnoredDirs) {
         QString p = pat.trimmed();
         if (p.isEmpty()) continue;
@@ -101,6 +97,7 @@ ProjectFileSelectorWidget::ProjectFileSelectorWidget(ProjectManager* projMgr,
     m_preset(preset) {
     m_dirIcon = style()->standardIcon(QStyle::SP_DirIcon);
     m_fileIcon = style()->standardIcon(QStyle::SP_FileIcon);
+    m_subprojectIcon = style()->standardIcon(QStyle::SP_DirOpenIcon);
 
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(0, 0, 0, 0);
@@ -161,7 +158,6 @@ ProjectFileSelectorWidget::ProjectFileSelectorWidget(ProjectManager* projMgr,
         if (!m_updatingChecks) notifySelectionChanged();
     });
 
-    // Отложенный запуск позволяет мгновенно отрисовать окно диалога и прогресс-бар
     QTimer::singleShot(0, this, &ProjectFileSelectorWidget::rebuildTree);
 }
 
@@ -186,7 +182,6 @@ void ProjectFileSelectorWidget::rebuildTree() {
     const int myGen = ++m_buildGeneration;
     m_isLoading = true;
     m_updatingChecks = true;
-
     m_progressBar->show();
     m_progressBar->setRange(0, 0);
     m_progressBar->setFormat("Scanning project folders...");
@@ -208,8 +203,14 @@ void ProjectFileSelectorWidget::rebuildTree() {
 
     QFileInfo rootFi(m_rootDirPath);
     auto* rootItem = new QTreeWidgetItem();
-    rootItem->setText(0, rootFi.fileName().isEmpty() ? m_rootDirPath : rootFi.fileName());
-    rootItem->setIcon(0, m_dirIcon);
+    QString rootName = rootFi.fileName().isEmpty() ? m_rootDirPath : rootFi.fileName();
+    if (m_projectMgr && m_projectMgr->isSubprojectDir(m_rootDirPath)) {
+        rootName += " [.aide Subproject]";
+        rootItem->setIcon(0, m_subprojectIcon);
+    } else {
+        rootItem->setIcon(0, m_dirIcon);
+    }
+    rootItem->setText(0, rootName);
 
     QString rootRelPrefix;
     if (m_projectMgr && !m_projectMgr->projectRootPath().isEmpty()) {
@@ -230,12 +231,9 @@ void ProjectFileSelectorWidget::rebuildTree() {
     }
 
     m_totalFilesFound = totalFilesFound;
-
-    // Включаем AutoTristate после наполнения детей, чтобы избежать лишних пересчётов при вставке
     rootItem->setFlags(rootItem->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
     m_tree->addTopLevelItem(rootItem);
 
-    // Если файлов слишком много, раскрываем только верхние уровни для мгновенной вёрстки
     if (totalFilesFound <= 600) {
         m_tree->expandAll();
     } else {
@@ -279,19 +277,29 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
     bool hasAnyVisibleChildren = false;
     const bool showSkipped = m_showSkippedCheck->isChecked();
 
-    // 1. Подпапки
     const QFileInfoList subDirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
                                                     QDir::Name | QDir::IgnoreCase);
     for (const QFileInfo& subFi : subDirs) {
         const QString subName = subFi.fileName();
         if (rules.isDirIgnored(subName)) continue;
 
+        const QString absSubPath = subFi.absoluteFilePath();
+        const bool isSubproj = m_projectMgr && m_projectMgr->isSubprojectDir(absSubPath);
+
         auto* dirItem = new QTreeWidgetItem();
-        dirItem->setText(0, subName);
-        dirItem->setIcon(0, m_dirIcon);
+        QString displayName = subName;
+        if (isSubproj) {
+            displayName += " [.aide Subproject]";
+            dirItem->setIcon(0, m_subprojectIcon);
+            dirItem->setForeground(1, QColor("#bd93f9"));
+            dirItem->setText(1, "Subproject (.aide)");
+        } else {
+            dirItem->setIcon(0, m_dirIcon);
+        }
+        dirItem->setText(0, displayName);
 
         const QString childRelPrefix = relDirPrefix.isEmpty() ? subName : (relDirPrefix + "/" + subName);
-        if (populateDirectoryItem(subFi.absoluteFilePath(), childRelPrefix, dirItem,
+        if (populateDirectoryItem(absSubPath, childRelPrefix, dirItem,
                                   rules, processedDirs, totalDirs, totalFilesFound)) {
             dirItem->setFlags(dirItem->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
             parentItem->addChild(dirItem);
@@ -301,7 +309,6 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
         }
     }
 
-    // 2. Файлы
     const QFileInfoList files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot,
                                                   QDir::Name | QDir::IgnoreCase);
     for (const QFileInfo& fileFi : files) {
@@ -311,7 +318,6 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
         const QString fileName = fileFi.fileName();
         const QString absPath = fileFi.absoluteFilePath();
         const QString relPath = relDirPrefix.isEmpty() ? fileName : (relDirPrefix + "/" + fileName);
-
         const bool allowed = rules.isFileAllowed(fileName, suffix);
         const auto fc = m_projectMgr ? m_projectMgr->fileContext(relPath) : FileContextData{};
         const bool hasSummary = fc.summaryCreated || !fc.aiSummary.trimmed().isEmpty();
@@ -476,7 +482,6 @@ void ProjectFileSelectorWidget::uncheckAll() {
 // ============================================================================
 // RecursiveSummaryDialog
 // ============================================================================
-
 RecursiveSummaryDialog::RecursiveSummaryDialog(ProjectManager* projMgr,
                                                const QString& rootDirPath,
                                                QWidget* parent)
@@ -486,7 +491,6 @@ RecursiveSummaryDialog::RecursiveSummaryDialog(ProjectManager* projMgr,
     resize(760, 580);
 
     auto* mainLay = new QVBoxLayout(this);
-
     auto* infoLabel = new QLabel(
         QString("<b>Target Directory:</b> %1<br>"
                 "<span style='color:#888899;'>Files without an existing summary are pre-selected. "

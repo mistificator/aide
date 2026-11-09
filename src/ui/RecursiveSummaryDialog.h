@@ -67,6 +67,7 @@ private:
                                int& processedDirs,
                                int totalDirs,
                                int& totalFilesFound);
+
     void collectCheckedFiles(QTreeWidgetItem* item, QStringList& outPaths) const;
     void collectCheckedBytes(QTreeWidgetItem* item, qint64& outBytes) const;
     void applyCheckFilter(QTreeWidgetItem* item, int mode);
@@ -75,12 +76,12 @@ private:
     ProjectManager* m_projectMgr = nullptr;
     QString m_rootDirPath;
     FileSelectorPreset m_preset = FileSelectorPreset::MissingSummariesDefault;
-
     QProgressBar* m_progressBar = nullptr;
     QTreeWidget* m_tree = nullptr;
     QCheckBox* m_showSkippedCheck = nullptr;
     QIcon m_dirIcon;
     QIcon m_fileIcon;
+    QIcon m_subprojectIcon;
     bool m_updatingChecks = false;
     bool m_isLoading = false;
     int m_buildGeneration = 0;

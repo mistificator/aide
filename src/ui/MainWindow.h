@@ -27,7 +27,6 @@ class ThemeAndSyntaxDownloader;
 class PromptHistoryDock;
 class ProjectPromptResultDialog;
 struct AiTask;
-
 class QMenuCompat;
 
 class MainWindow : public QMainWindow {
@@ -49,9 +48,12 @@ private slots:
     void onEditorPreferences();
     void onAiPreferences();
     void onRecursiveProjectSummary(const QString& startDir = {});
-    void onRebuildProjectSummary();
+    void onRebuildProjectSummary(const QString& subprojectRel = {});
+    void onContinueProjectSummary(const QString& subprojectRel = {});
     void onProjectCustomPrompt(const QString& initialPromptText = {});
     void onProjectTreeContextMenu(const QPoint& pos);
+    void onRenameProjectFile(const QString& filePath);
+    void onDeleteProjectFile(const QString& filePath);
 
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
@@ -79,6 +81,8 @@ private:
                                   int maxTokensOverride = 0,
                                   int ctxWindowOverride = 0);
     void clearSingleFileSummary(const QString& filePath);
+    void removeSingleFileSummary(const QString& filePath);
+    void continueSingleFileSummary(const QString& filePath);
     QMap<QString, QString> collectOpenEditorBuffers() const;
     bool verifyAndAdjustContextLimits(const QString& taskTitle,
                                       const QString& systemPrompt,
@@ -89,9 +93,6 @@ private:
                                       int& inOutContextWindow);
     static int roundUpTokenStep(int needed, int maxCap);
     static QString actionKeyForEnum(AiEditAction action);
-    void removeSingleFileSummary(const QString& filePath);
-    void continueSingleFileSummary(const QString& filePath);
-    void onContinueProjectSummary();
 
     ProjectManager* m_projectMgr = nullptr;
     AiProvider* m_aiProvider = nullptr;
@@ -109,12 +110,10 @@ private:
     QComboBox* m_projectFilterCombo = nullptr;
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
-
     ContextInspectorDock* m_inspectorDock = nullptr;
     PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
-
     QMap<QString, QPointer<ProjectPromptResultDialog>> m_projectPromptWindows;
 
     QToolBar* m_aiToolBar = nullptr;
@@ -134,7 +133,6 @@ private:
     QMenuCompat* m_windowMenu = nullptr;
     QMenuCompat* m_themeMenu = nullptr;
     QMenuCompat* m_langMenu = nullptr;
-
     QPushButton* m_queueStatusBtn = nullptr;
     QLabel* m_langStatusLabel = nullptr;
 };

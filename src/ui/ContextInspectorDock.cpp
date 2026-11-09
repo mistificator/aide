@@ -3,11 +3,11 @@
 #include "MarkdownRenderer.h"
 #include "../core/ProjectManager.h"
 #include "../core/ConfigManager.h"
-
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QComboBox>
 #include <QPlainTextEdit>
 #include <QTextEdit>
 #include <QTextDocument>
@@ -15,6 +15,7 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QSizePolicy>
+#include <QDir>
 
 ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* parent)
     : QDockWidget("AI Context Inspector", parent), m_projectMgr(projMgr) {
@@ -84,15 +85,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docBot->setMinimumWidth(0);
     auto* docBotLay = new QVBoxLayout(docBot);
     docBotLay->setContentsMargins(6, 6, 6, 6);
-
     auto* docPromptLbl = new QLabel("Document Prompt / Instructions:", docBot);
     docPromptLbl->setMinimumWidth(0);
     docPromptLbl->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-
     m_filePromptEdit = new QPlainTextEdit(docBot);
     m_filePromptEdit->setMinimumWidth(0);
     m_filePromptEdit->setPlaceholderText("Enter specific AI instructions for this file...");
-
     docBotLay->addWidget(docPromptLbl);
     docBotLay->addWidget(m_filePromptEdit, 1);
 
@@ -101,7 +99,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setSizes({420, 210});
     tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Project
+    // Вкладка 2: Project (с выбором корневого проекта или вложенного подпроекта .aide)
     auto* projSplit = new QSplitter(Qt::Vertical, tabs);
     projSplit->setMinimumWidth(0);
     projSplit->setChildrenCollapsible(false);
@@ -110,6 +108,23 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projTop->setMinimumWidth(0);
     auto* projTopLay = new QVBoxLayout(projTop);
     projTopLay->setContentsMargins(6, 6, 6, 6);
+
+    auto* scopeRow = new QHBoxLayout();
+    scopeRow->setSpacing(4);
+    auto* scopeLbl = new QLabel("Target (.aide):", projTop);
+    scopeLbl->setStyleSheet("font-weight: bold;");
+    m_projectScopeCombo = new QComboBox(projTop);
+    m_projectScopeCombo->setMinimumWidth(0);
+    m_projectScopeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_projectScopeCombo->setToolTip("Select Root Project or a nested Subproject (.aide)");
+    scopeRow->addWidget(scopeLbl);
+    scopeRow->addWidget(m_projectScopeCombo, 1);
+
+    m_projectMetaLabel = new QLabel("LLM: - | Indexed Files: 0", projTop);
+    m_projectMetaLabel->setStyleSheet("color: #888899; font-size: 11px;");
+    m_projectMetaLabel->setWordWrap(true);
+    m_projectMetaLabel->setMinimumWidth(0);
+    m_projectMetaLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
     auto* projSumHdr = new QHBoxLayout();
     projSumHdr->setSpacing(4);
@@ -120,9 +135,9 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_editProjSummaryBtn = new QPushButton("Edit MD", projTop);
     m_editProjSummaryBtn->setCheckable(true);
     m_continueProjBtn = new QPushButton("Continue", projTop);
-    m_continueProjBtn->setToolTip("Continue / expand project summary preserving previous context");
+    m_continueProjBtn->setToolTip("Continue / expand summary for the selected project/subproject");
     m_rebuildProjBtn = new QPushButton("Rebuild", projTop);
-    m_rebuildProjBtn->setToolTip("Rebuild Project Architecture Summary");
+    m_rebuildProjBtn->setToolTip("Rebuild Architecture Summary for the selected project/subproject");
 
     projSumHdr->addWidget(projSumTitle, 1);
     projSumHdr->addWidget(m_editProjSummaryBtn);
@@ -132,9 +147,11 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_projectSummaryView = new QTextEdit(projTop);
     m_projectSummaryView->setMinimumWidth(0);
     m_projectSummaryView->setReadOnly(true);
-    m_projectSummaryView->setPlaceholderText("Synthesized project architecture summary...");
+    m_projectSummaryView->setPlaceholderText("Synthesized project / subproject architecture summary...");
     setupMarkdownViewerStyle(m_projectSummaryView);
 
+    projTopLay->addLayout(scopeRow);
+    projTopLay->addWidget(m_projectMetaLabel);
     projTopLay->addLayout(projSumHdr);
     projTopLay->addWidget(m_projectSummaryView, 1);
 
@@ -142,15 +159,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projBot->setMinimumWidth(0);
     auto* projBotLay = new QVBoxLayout(projBot);
     projBotLay->setContentsMargins(6, 6, 6, 6);
-
-    auto* projPromptLbl = new QLabel("Project System Prompt (Global):", projBot);
+    auto* projPromptLbl = new QLabel("Project / Subproject System Prompt:", projBot);
     projPromptLbl->setMinimumWidth(0);
     projPromptLbl->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-
     m_projectPromptEdit = new QPlainTextEdit(projBot);
     m_projectPromptEdit->setMinimumWidth(0);
-    m_projectPromptEdit->setPlaceholderText("Global project instructions (e.g. Use C++20, Qt6 style, no exceptions)...");
-
+    m_projectPromptEdit->setPlaceholderText("Instructions for the selected project or subproject (e.g. Use C++20, Qt6 style)...");
     projBotLay->addWidget(projPromptLbl);
     projBotLay->addWidget(m_projectPromptEdit, 1);
 
@@ -164,21 +178,27 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     effPage->setMinimumWidth(0);
     auto* effLay = new QVBoxLayout(effPage);
     effLay->setContentsMargins(6, 6, 6, 6);
-
     m_tokenEstimateLabel = new QLabel("Estimated size: 0 chars (~0 tokens)", effPage);
     m_tokenEstimateLabel->setMinimumWidth(0);
     m_tokenEstimateLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-
     m_effectiveContextPreview = new QTextEdit(effPage);
     m_effectiveContextPreview->setMinimumWidth(0);
     m_effectiveContextPreview->setReadOnly(true);
     setupMarkdownViewerStyle(m_effectiveContextPreview);
-
     effLay->addWidget(m_tokenEstimateLabel);
     effLay->addWidget(m_effectiveContextPreview);
     tabs->addTab(effPage, "Effective Context");
 
     setWidget(tabs);
+
+    connect(m_projectScopeCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
+        if (m_updatingUi || idx < 0) return;
+        if (m_editProjSummaryBtn->isChecked()) {
+            m_editProjSummaryBtn->setChecked(false);
+        }
+        m_selectedProjectScope = m_projectScopeCombo->itemData(idx).toString();
+        refreshDisplay();
+    });
 
     connect(m_filePromptEdit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_updatingUi || m_activeFilePath.isEmpty()) return;
@@ -188,7 +208,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     connect(m_projectPromptEdit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_updatingUi) return;
-        m_projectMgr->setProjectSystemPrompt(m_projectPromptEdit->toPlainText());
+        m_projectMgr->setProjectSystemPrompt(m_projectPromptEdit->toPlainText(), m_selectedProjectScope);
         updateEffectivePreview();
     });
 
@@ -198,11 +218,11 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         m_projectSummaryView->setReadOnly(!editMode);
         if (editMode) {
             m_editProjSummaryBtn->setText("Apply MD");
-            m_projectSummaryView->setPlainText(m_projectMgr->projectSummary());
+            m_projectSummaryView->setPlainText(m_projectMgr->projectSummary(m_selectedProjectScope));
         } else {
             m_editProjSummaryBtn->setText("Edit MD");
             QString updatedMd = m_projectSummaryView->toPlainText();
-            m_projectMgr->setProjectSummary(updatedMd);
+            m_projectMgr->setProjectSummary(updatedMd, {}, m_selectedProjectScope);
             renderMarkdownPreservingScroll(m_projectSummaryView, updatedMd);
             updateEffectivePreview();
         }
@@ -211,7 +231,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     connect(m_projectSummaryView, &QTextEdit::textChanged, this, [this]() {
         if (m_updatingUi || !m_editingProjectMarkdown) return;
-        m_projectMgr->setProjectSummary(m_projectSummaryView->toPlainText());
+        m_projectMgr->setProjectSummary(m_projectSummaryView->toPlainText(), {}, m_selectedProjectScope);
         updateEffectivePreview();
     });
 
@@ -250,14 +270,14 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     connect(m_rebuildProjBtn, &QPushButton::clicked, this, [this]() {
         if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
-        m_liveProjectMarkdown.clear();
+        m_liveProjectMarkdownByScope.remove(m_selectedProjectScope);
         m_projectSummaryView->clear();
-        emit rebuildProjectSummaryClicked();
+        emit rebuildProjectSummaryClicked(m_selectedProjectScope);
     });
 
     connect(m_continueProjBtn, &QPushButton::clicked, this, [this]() {
         if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
-        emit continueProjectSummaryClicked();
+        emit continueProjectSummaryClicked(m_selectedProjectScope);
     });
 
     connect(m_projectMgr, &ProjectManager::fileContextChanged, this, [this](const QString& relPath) {
@@ -266,13 +286,21 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         }
         refreshDisplay();
     });
+
     connect(m_projectMgr, &ProjectManager::projectContextChanged, this, [this]() {
-        m_liveProjectMarkdown.clear();
         refreshDisplay();
     });
+
+    connect(m_projectMgr, &ProjectManager::subprojectsChanged, this, [this]() {
+        rebuildProjectScopeCombo();
+        refreshDisplay();
+    });
+
     connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
         refreshDisplay();
     });
+
+    rebuildProjectScopeCombo();
 }
 
 void ContextInspectorDock::setupMarkdownViewerStyle(QTextEdit* viewer) {
@@ -298,31 +326,85 @@ void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer, con
     }
 }
 
-void ContextInspectorDock::setActiveFile(const QString& filePath) {
-    m_activeFilePath = filePath;
+void ContextInspectorDock::rebuildProjectScopeCombo() {
+    if (!m_projectScopeCombo) return;
+    const bool prevUpdating = m_updatingUi;
+    m_updatingUi = true;
+
+    m_projectScopeCombo->clear();
+    if (!m_projectMgr || !m_projectMgr->hasOpenProject()) {
+        m_projectScopeCombo->addItem("No Project Open", QString());
+        m_projectScopeCombo->setEnabled(false);
+        m_selectedProjectScope.clear();
+        m_updatingUi = prevUpdating;
+        return;
+    }
+
+    m_projectScopeCombo->setEnabled(true);
+    QString rootDirName = QDir(m_projectMgr->projectRootPath()).dirName();
+    if (rootDirName.isEmpty()) rootDirName = m_projectMgr->projectRootPath();
+    m_projectScopeCombo->addItem(QString("Root Project (%1)").arg(rootDirName), QString());
+
+    const QStringList subs = m_projectMgr->subprojectRelPaths();
+    int targetIdx = 0;
+    for (int i = 0; i < subs.size(); ++i) {
+        const QString& subRel = subs[i];
+        m_projectScopeCombo->addItem(QString("Subproject: %1").arg(subRel), subRel);
+        if (subRel == m_selectedProjectScope) {
+            targetIdx = i + 1;
+        }
+    }
+
+    if (targetIdx == 0 && !m_selectedProjectScope.isEmpty()) {
+        m_selectedProjectScope.clear();
+    }
+    m_projectScopeCombo->setCurrentIndex(targetIdx);
+    m_updatingUi = prevUpdating;
+}
+
+void ContextInspectorDock::setSelectedProjectScope(const QString& subprojectRelPath) {
+    m_selectedProjectScope = subprojectRelPath.trimmed();
+    rebuildProjectScopeCombo();
     refreshDisplay();
 }
 
-void ContextInspectorDock::resetLiveSummary(const QString& relFilePath, bool isProjectSummary) {
+QString ContextInspectorDock::selectedProjectScope() const {
+    return m_selectedProjectScope;
+}
+
+void ContextInspectorDock::setActiveFile(const QString& filePath) {
+    m_activeFilePath = filePath;
+    if (!filePath.isEmpty() && m_projectMgr && m_projectMgr->hasOpenProject()) {
+        const QString ownerSub = m_projectMgr->owningProjectRelPathForFile(filePath);
+        if (m_selectedProjectScope != ownerSub) {
+            m_selectedProjectScope = ownerSub;
+        }
+    }
+    rebuildProjectScopeCombo();
+    refreshDisplay();
+}
+
+void ContextInspectorDock::resetLiveSummary(const QString& targetRelPath, bool isProjectSummary) {
     if (isProjectSummary) {
-        m_liveProjectMarkdown.clear();
-    } else if (!relFilePath.isEmpty()) {
-        m_liveFileMarkdownByPath.remove(relFilePath);
+        m_liveProjectMarkdownByScope.remove(targetRelPath);
+    } else if (!targetRelPath.isEmpty()) {
+        m_liveFileMarkdownByPath.remove(targetRelPath);
     }
     refreshDisplay();
 }
 
-void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bool isProjectSummary, const QString& chunk) {
+void ContextInspectorDock::appendLiveSummaryChunk(const QString& targetRelPath, bool isProjectSummary, const QString& chunk) {
     m_updatingUi = true;
     if (isProjectSummary) {
-        m_liveProjectMarkdown += chunk;
-        if (!m_editingProjectMarkdown) {
-            renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
+        QString& liveProjBuf = m_liveProjectMarkdownByScope[targetRelPath];
+        liveProjBuf += chunk;
+        if (!m_editingProjectMarkdown && targetRelPath == m_selectedProjectScope) {
+            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjBuf, true);
         }
-    } else if (!relFilePath.isEmpty()) {
-        QString& liveBuf = m_liveFileMarkdownByPath[relFilePath];
+    } else if (!targetRelPath.isEmpty()) {
+        QString& liveBuf = m_liveFileMarkdownByPath[targetRelPath];
         liveBuf += chunk;
-        if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == relFilePath) {
+        if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == targetRelPath) {
             renderMarkdownPreservingScroll(m_fileSummaryView, liveBuf, true);
         }
     }
@@ -331,15 +413,37 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& relFilePath, bo
 
 void ContextInspectorDock::refreshDisplay() {
     m_updatingUi = true;
-    if (m_projectPromptEdit->toPlainText() != m_projectMgr->projectSystemPrompt())
-        m_projectPromptEdit->setPlainText(m_projectMgr->projectSystemPrompt());
+    rebuildProjectScopeCombo();
 
-    const QString projSum = m_projectMgr->projectSummary();
-    m_continueProjBtn->setEnabled(!projSum.trimmed().isEmpty());
+    const bool hasProj = (m_projectMgr && m_projectMgr->hasOpenProject());
+    m_projectPromptEdit->setEnabled(hasProj);
+    m_rebuildProjBtn->setEnabled(hasProj);
+    m_editProjSummaryBtn->setEnabled(hasProj);
+
+    const QString scopeSysPrompt = hasProj ? m_projectMgr->projectSystemPrompt(m_selectedProjectScope) : QString();
+    if (m_projectPromptEdit->toPlainText() != scopeSysPrompt) {
+        m_projectPromptEdit->setPlainText(scopeSysPrompt);
+    }
+
+    const QString projSum = hasProj ? m_projectMgr->projectSummary(m_selectedProjectScope) : QString();
+    const QString projLlm = hasProj ? m_projectMgr->projectSummaryLlm(m_selectedProjectScope) : QString();
+    const int indexedInScope = hasProj ? m_projectMgr->indexedFilesCount(m_selectedProjectScope, true) : 0;
+    const int directChildSubs = hasProj ? m_projectMgr->directChildSubprojects(m_selectedProjectScope).size() : 0;
+    const bool isDirty = hasProj && m_projectMgr->isProjectSummaryDirty(m_selectedProjectScope);
+
+    m_projectMetaLabel->setText(
+        QString("LLM: %1 | Indexed Files: %2 | Subprojects: %3%4")
+            .arg(projLlm.isEmpty() ? "-" : projLlm)
+            .arg(indexedInScope)
+            .arg(directChildSubs)
+            .arg(isDirty ? " [Outdated / Dirty]" : ""));
+
+    m_continueProjBtn->setEnabled(hasProj && !projSum.trimmed().isEmpty());
 
     if (!m_editingProjectMarkdown) {
-        if (!m_liveProjectMarkdown.isEmpty()) {
-            renderMarkdownPreservingScroll(m_projectSummaryView, m_liveProjectMarkdown, true);
+        const QString liveProjMd = m_liveProjectMarkdownByScope.value(m_selectedProjectScope);
+        if (!liveProjMd.isEmpty()) {
+            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjMd, true);
         } else {
             renderMarkdownPreservingScroll(m_projectSummaryView, projSum);
         }
@@ -366,16 +470,20 @@ void ContextInspectorDock::refreshDisplay() {
         m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, statusSuffix));
         m_fileHeaderLabel->setToolTip(fc.relativePath);
 
+        QString ownerInfo = fc.subprojectRelPath.isEmpty()
+                                ? QStringLiteral("Root")
+                                : QString("Subproject (%1)").arg(fc.subprojectRelPath);
         QString llmInfo = fc.isSummaryPending
                               ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
                               : (fc.llmModel.isEmpty() ? (isClearedEmpty ? "cleared (empty)" : (summaryAllowed ? "-" : "Skipped by settings")) : fc.llmModel);
         QString shaInfo = fc.isSummaryPending
                               ? (fc.pendingSha256.isEmpty() ? "-" : fc.pendingSha256.left(12))
                               : (fc.sha256.isEmpty() ? "-" : fc.sha256.left(12));
-        m_fileMetaLabel->setText(QString("LLM: %1 | SHA-256: %2").arg(llmInfo, shaInfo));
+        m_fileMetaLabel->setText(QString("Owner: %1 | LLM: %2 | SHA-256: %3").arg(ownerInfo, llmInfo, shaInfo));
 
-        if (m_filePromptEdit->toPlainText() != fc.userPrompt)
+        if (m_filePromptEdit->toPlainText() != fc.userPrompt) {
             m_filePromptEdit->setPlainText(fc.userPrompt);
+        }
 
         if (!fc.isSummaryPending) {
             m_liveFileMarkdownByPath.remove(fc.relativePath);
@@ -404,7 +512,7 @@ void ContextInspectorDock::refreshDisplay() {
         m_continueFileBtn->setEnabled(false);
         m_fileHeaderLabel->setText("Document: None (Unsaved or Closed)");
         m_fileHeaderLabel->setToolTip({});
-        m_fileMetaLabel->setText("LLM: - | SHA-256: -");
+        m_fileMetaLabel->setText("Owner: - | LLM: - | SHA-256: -");
         m_filePromptEdit->clear();
         m_fileSummaryView->clear();
     }

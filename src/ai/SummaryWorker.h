@@ -22,15 +22,20 @@ public slots:
                              const QString& followUpInstruction = {},
                              int maxOutputTokensOverride = 0,
                              int contextWindowOverride = 0);
+
     void forceRebuildProjectSummary(int maxOutputTokensOverride = 0,
-                                    int contextWindowOverride = 0);
+                                    int contextWindowOverride = 0,
+                                    const QString& projectDirOrRel = {});
     void continueProjectSummary(const QString& followUpInstruction = {},
                                 int maxOutputTokensOverride = 0,
-                                int contextWindowOverride = 0);
+                                int contextWindowOverride = 0,
+                                const QString& projectDirOrRel = {});
 
 signals:
-    void summaryStreamingChunk(const QString& filePath, bool isProjectSummary, const QString& chunk);
-    void summaryStreamingReset(const QString& filePath, bool isProjectSummary);
+    // Для FileSummary: targetRelPath — относительный путь к файлу от корня проекта.
+    // Для ProjectSummary: targetRelPath — относительный путь к подпроекту ("" для корневого проекта).
+    void summaryStreamingChunk(const QString& targetRelPath, bool isProjectSummary, const QString& chunk);
+    void summaryStreamingReset(const QString& targetRelPath, bool isProjectSummary);
 
 private slots:
     void onPeriodicTimerTimeout();
@@ -42,6 +47,11 @@ private slots:
 
 private:
     void updateTimerInterval();
+    void scheduleNextDirtyProjectSummaryIfIdle();
+    QString buildSystemPromptForNode(const QString& subprojectRel) const;
+
+    static QString makeProjectSummaryTaskKey(const QString& subprojectRel);
+    static QString extractSubprojectRelFromTaskKey(const QString& taskFilePath);
 
     ProjectManager* m_projectMgr = nullptr;
     AiTaskQueue* m_taskQueue = nullptr;
