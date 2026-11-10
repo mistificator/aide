@@ -23,6 +23,10 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     setMinimumWidth(220);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
+    m_refreshDebounceTimer.setSingleShot(true);
+    m_refreshDebounceTimer.setInterval(25);
+    connect(&m_refreshDebounceTimer, &QTimer::timeout, this, &ContextInspectorDock::refreshDisplay);
+
     auto* tabs = new QTabWidget(this);
     tabs->setMinimumWidth(0);
     tabs->setUsesScrollButtons(true);
@@ -99,7 +103,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setSizes({420, 210});
     tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Project (с выбором корневого проекта или вложенного подпроекта .aide)
+    // Вкладка 2: Project (с выбором корневого проекта или подпроекта .aide)
     auto* projSplit = new QSplitter(Qt::Vertical, tabs);
     projSplit->setMinimumWidth(0);
     projSplit->setChildrenCollapsible(false);
@@ -223,7 +227,8 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
             m_editProjSummaryBtn->setText("Edit MD");
             QString updatedMd = m_projectSummaryView->toPlainText();
             m_projectMgr->setProjectSummary(updatedMd, {}, m_selectedProjectScope);
-            renderMarkdownPreservingScroll(m_projectSummaryView, updatedMd);
+            m_cachedProjectSummaryMd.clear();
+            renderMarkdownPreservingScroll(m_projectSummaryView, updatedMd, m_cachedProjectSummaryMd);
             updateEffectivePreview();
         }
         m_updatingUi = false;
@@ -239,6 +244,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         if (!m_activeFilePath.isEmpty()) {
             QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
             m_liveFileMarkdownByPath.remove(rel);
+            m_cachedFileSummaryMd.clear();
             m_fileSummaryView->clear();
             emit rebuildFileSummaryClicked(m_activeFilePath);
         }
@@ -254,6 +260,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         if (!m_activeFilePath.isEmpty()) {
             QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
             m_liveFileMarkdownByPath.remove(rel);
+            m_cachedFileSummaryMd.clear();
             m_fileSummaryView->clear();
             emit clearFileSummaryClicked(m_activeFilePath);
         }
@@ -263,6 +270,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         if (!m_activeFilePath.isEmpty()) {
             QString rel = m_projectMgr->toRelativePath(m_activeFilePath);
             m_liveFileMarkdownByPath.remove(rel);
+            m_cachedFileSummaryMd.clear();
             m_fileSummaryView->clear();
             emit removeFileSummaryClicked(m_activeFilePath);
         }
@@ -271,6 +279,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     connect(m_rebuildProjBtn, &QPushButton::clicked, this, [this]() {
         if (m_editProjSummaryBtn->isChecked()) m_editProjSummaryBtn->setChecked(false);
         m_liveProjectMarkdownByScope.remove(m_selectedProjectScope);
+        m_cachedProjectSummaryMd.clear();
         m_projectSummaryView->clear();
         emit rebuildProjectSummaryClicked(m_selectedProjectScope);
     });
@@ -284,40 +293,58 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
         if (!m_projectMgr->fileContext(relPath).isSummaryPending) {
             m_liveFileMarkdownByPath.remove(relPath);
         }
-        refreshDisplay();
+        scheduleRefreshDisplay();
     });
 
     connect(m_projectMgr, &ProjectManager::projectContextChanged, this, [this]() {
-        refreshDisplay();
+        scheduleRefreshDisplay();
     });
 
     connect(m_projectMgr, &ProjectManager::subprojectsChanged, this, [this]() {
         rebuildProjectScopeCombo();
-        refreshDisplay();
+        scheduleRefreshDisplay();
     });
 
     connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
-        refreshDisplay();
+        scheduleRefreshDisplay();
     });
 
     rebuildProjectScopeCombo();
+}
+
+void ContextInspectorDock::scheduleRefreshDisplay() {
+    if (!m_refreshDebounceTimer.isActive()) {
+        m_refreshDebounceTimer.start();
+    }
 }
 
 void ContextInspectorDock::setupMarkdownViewerStyle(QTextEdit* viewer) {
     MarkdownRenderer::configureViewer(viewer);
 }
 
-void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer, const QString& markdownText, bool scrollToBottom) {
+void ContextInspectorDock::renderMarkdownPreservingScroll(QTextEdit* viewer,
+                                                          const QString& markdownText,
+                                                          QString& cachedMarkdown,
+                                                          bool scrollToBottom) {
+    if (markdownText.trimmed().isEmpty()) {
+        if (!cachedMarkdown.isEmpty() || !viewer->document()->isEmpty()) {
+            cachedMarkdown.clear();
+            viewer->clear();
+        }
+        return;
+    }
+
+    if (cachedMarkdown == markdownText) {
+        return;
+    }
+    cachedMarkdown = markdownText;
+
     QScrollBar* vbar = viewer->verticalScrollBar();
     int oldScroll = vbar->value();
     int oldMax = vbar->maximum();
     bool wasAtBottom = (oldMax == 0) || (oldScroll >= oldMax - 6);
 
-    if (markdownText.trimmed().isEmpty()) {
-        viewer->clear();
-    } else {
-        viewer->setHtml(MarkdownRenderer::toHtml(markdownText));
-    }
+    viewer->setHtml(MarkdownRenderer::toHtml(markdownText));
 
     if (scrollToBottom && wasAtBottom) {
         vbar->setValue(vbar->maximum());
@@ -387,10 +414,16 @@ void ContextInspectorDock::setActiveFile(const QString& filePath) {
 void ContextInspectorDock::resetLiveSummary(const QString& targetRelPath, bool isProjectSummary) {
     if (isProjectSummary) {
         m_liveProjectMarkdownByScope.remove(targetRelPath);
+        if (targetRelPath == m_selectedProjectScope) {
+            m_cachedProjectSummaryMd.clear();
+        }
     } else if (!targetRelPath.isEmpty()) {
         m_liveFileMarkdownByPath.remove(targetRelPath);
+        if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == targetRelPath) {
+            m_cachedFileSummaryMd.clear();
+        }
     }
-    refreshDisplay();
+    scheduleRefreshDisplay();
 }
 
 void ContextInspectorDock::appendLiveSummaryChunk(const QString& targetRelPath, bool isProjectSummary, const QString& chunk) {
@@ -399,13 +432,13 @@ void ContextInspectorDock::appendLiveSummaryChunk(const QString& targetRelPath, 
         QString& liveProjBuf = m_liveProjectMarkdownByScope[targetRelPath];
         liveProjBuf += chunk;
         if (!m_editingProjectMarkdown && targetRelPath == m_selectedProjectScope) {
-            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjBuf, true);
+            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjBuf, m_cachedProjectSummaryMd, true);
         }
     } else if (!targetRelPath.isEmpty()) {
         QString& liveBuf = m_liveFileMarkdownByPath[targetRelPath];
         liveBuf += chunk;
         if (!m_activeFilePath.isEmpty() && m_projectMgr->toRelativePath(m_activeFilePath) == targetRelPath) {
-            renderMarkdownPreservingScroll(m_fileSummaryView, liveBuf, true);
+            renderMarkdownPreservingScroll(m_fileSummaryView, liveBuf, m_cachedFileSummaryMd, true);
         }
     }
     m_updatingUi = false;
@@ -443,9 +476,9 @@ void ContextInspectorDock::refreshDisplay() {
     if (!m_editingProjectMarkdown) {
         const QString liveProjMd = m_liveProjectMarkdownByScope.value(m_selectedProjectScope);
         if (!liveProjMd.isEmpty()) {
-            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjMd, true);
+            renderMarkdownPreservingScroll(m_projectSummaryView, liveProjMd, m_cachedProjectSummaryMd, true);
         } else {
-            renderMarkdownPreservingScroll(m_projectSummaryView, projSum);
+            renderMarkdownPreservingScroll(m_projectSummaryView, projSum, m_cachedProjectSummaryMd);
         }
     }
 
@@ -489,22 +522,24 @@ void ContextInspectorDock::refreshDisplay() {
             m_liveFileMarkdownByPath.remove(fc.relativePath);
             if (!fc.aiSummary.trimmed().isEmpty()) {
                 m_fileSummaryView->setPlaceholderText("Click 'Regenerate' to build AI summary for this file...");
-                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary, m_cachedFileSummaryMd);
             } else if (isClearedEmpty) {
+                m_cachedFileSummaryMd.clear();
                 m_fileSummaryView->clear();
                 m_fileSummaryView->setPlaceholderText("Summary is created and intentionally empty (cleared). Click 'Regenerate' to rebuild or 'Remove' to reset.");
             } else if (!summaryAllowed) {
-                renderMarkdownPreservingScroll(m_fileSummaryView, skipReasonMd);
+                renderMarkdownPreservingScroll(m_fileSummaryView, skipReasonMd, m_cachedFileSummaryMd);
             } else {
+                m_cachedFileSummaryMd.clear();
                 m_fileSummaryView->clear();
                 m_fileSummaryView->setPlaceholderText("No summary yet. Click 'Regenerate' to build AI summary for this file...");
             }
         } else {
             const QString liveMd = m_liveFileMarkdownByPath.value(fc.relativePath);
             if (!liveMd.isEmpty()) {
-                renderMarkdownPreservingScroll(m_fileSummaryView, liveMd, true);
+                renderMarkdownPreservingScroll(m_fileSummaryView, liveMd, m_cachedFileSummaryMd, true);
             } else {
-                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary);
+                renderMarkdownPreservingScroll(m_fileSummaryView, fc.aiSummary, m_cachedFileSummaryMd);
             }
         }
     } else {
@@ -514,6 +549,7 @@ void ContextInspectorDock::refreshDisplay() {
         m_fileHeaderLabel->setToolTip({});
         m_fileMetaLabel->setText("Owner: - | LLM: - | SHA-256: -");
         m_filePromptEdit->clear();
+        m_cachedFileSummaryMd.clear();
         m_fileSummaryView->clear();
     }
 
@@ -523,7 +559,7 @@ void ContextInspectorDock::refreshDisplay() {
 
 void ContextInspectorDock::updateEffectivePreview() {
     QString ctx = m_projectMgr->buildEffectiveSystemContext(m_activeFilePath);
-    renderMarkdownPreservingScroll(m_effectiveContextPreview, ctx);
+    renderMarkdownPreservingScroll(m_effectiveContextPreview, ctx, m_cachedEffectiveMd);
     int chars = ctx.length(), tokens = (chars + 3) / 4;
     m_tokenEstimateLabel->setText(QString("Estimated size: %1 chars (~%2 tokens)").arg(chars).arg(tokens));
 }

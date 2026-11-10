@@ -1,131 +1,135 @@
 // src/ai/AiTaskQueue.cpp
 #include "AiTaskQueue.h"
 #include "AiProvider.h"
-#include "../core/ConfigManager.h"
 #include <QUuid>
 #include <QTimer>
+#include <QHash>
 
 AiTaskQueue::AiTaskQueue(AiProvider* provider, QObject* parent)
     : QObject(parent), m_provider(provider) {
-    connect(m_provider, &AiProvider::thinkingStateChanged, this, &AiTaskQueue::onProviderThinkingChanged);
-    connect(m_provider, &AiProvider::progressUpdated, this, &AiTaskQueue::onProviderProgressUpdated);
     connect(m_provider, &AiProvider::streamChunkReceived, this, &AiTaskQueue::onProviderChunk);
+    connect(m_provider, &AiProvider::progressUpdated, this, &AiTaskQueue::onProviderProgress);
+    connect(m_provider, &AiProvider::thinkingStateChanged, this, &AiTaskQueue::onProviderThinkingState);
+    connect(m_provider, &AiProvider::requestTimedOut, this, &AiTaskQueue::onProviderTimedOut);
     connect(m_provider, &AiProvider::requestFinished, this, &AiTaskQueue::onProviderFinished);
     connect(m_provider, &AiProvider::requestError, this, &AiTaskQueue::onProviderError);
-    connect(m_provider, &AiProvider::requestTimedOut, this, &AiTaskQueue::onProviderTimedOut);
 }
 
 int AiTaskQueue::estimateExpectedTokens(const AiTask& task) {
-    if (task.targetType == TaskTargetType::FileSummary || task.targetType == TaskTargetType::ProjectSummary) {
-        return qBound(128, task.maxOutputTokens > 0 ? task.maxOutputTokens / 2 : 512, 1024);
+    const int promptTok = (task.userPrompt.length() + 3) / 4;
+    int est = 512;
+    switch (task.targetType) {
+    case TaskTargetType::FileSummary:
+        est = qBound(192, promptTok / 4, 1024);
+        break;
+    case TaskTargetType::ProjectSummary:
+        est = qBound(384, promptTok / 3, 2048);
+        break;
+    case TaskTargetType::ExplainToDialog:
+    case TaskTargetType::ProjectCustomPrompt:
+        est = 1024;
+        break;
+    case TaskTargetType::ModifyEditorCode:
+        est = qBound(256, promptTok, 8192);
+        break;
     }
-    int inputEst = qMax(128, task.userPrompt.length() / 4);
-    int limit = task.maxOutputTokens > 0 ? task.maxOutputTokens : 65536;
-    return qBound(128, inputEst, limit);
+    if (task.maxOutputTokens > 0) {
+        est = qMin(est, task.maxOutputTokens);
+    }
+    return qMax(64, est);
 }
 
-AiTask AiTaskQueue::currentTask() const {
-    AiTask copy = m_currentTask;
-    if (m_isProcessing && m_activeTaskTimer.isValid()) {
-        copy.elapsedMs = m_activeTaskTimer.elapsed();
+void AiTaskQueue::prepareTaskDefaults(AiTask& task) const {
+    if (task.taskId.isEmpty()) {
+        task.taskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
-    return copy;
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    if (task.llmModel.isEmpty()) {
+        task.llmModel = cfg.llmIdentifier();
+    }
+    if (task.maxOutputTokens <= 0) {
+        const bool isSum = (task.targetType == TaskTargetType::FileSummary ||
+                            task.targetType == TaskTargetType::ProjectSummary);
+        task.maxOutputTokens = isSum ? cfg.maxOutputSummaryTokens : cfg.maxOutputCodeTokens;
+    }
+    if (task.contextWindow <= 0) {
+        task.contextWindow = cfg.contextWindow;
+    }
+    task.expectedTokens = estimateExpectedTokens(task);
 }
 
-qint64 AiTaskQueue::currentTaskElapsedMs() const {
-    if (m_isProcessing && m_activeTaskTimer.isValid()) {
-        return m_activeTaskTimer.elapsed();
+void AiTaskQueue::startBatchTimerIfNeeded() {
+    if (!m_batchTimer.isValid()) {
+        m_batchCompletedCount = 0;
+        m_lastBatchElapsedMs = 0;
+        m_batchTimer.start();
     }
-    return 0;
+}
+
+void AiTaskQueue::finalizeBatchTimerIfIdle() {
+    if (!m_isProcessing && m_highQueue.isEmpty() && m_lowQueue.isEmpty()) {
+        if (m_batchTimer.isValid()) {
+            m_lastBatchElapsedMs = m_batchTimer.elapsed();
+            m_batchTimer.invalidate();
+        }
+    }
 }
 
 qint64 AiTaskQueue::totalBatchElapsedMs() const {
-    return m_completedBatchElapsedMs + currentTaskElapsedMs();
+    if (m_batchTimer.isValid()) {
+        return m_batchTimer.elapsed();
+    }
+    return m_lastBatchElapsedMs;
 }
 
 int AiTaskQueue::batchTotalCount() const {
-    return m_batchCompletedTasks + (m_isProcessing ? 1 : 0) + m_highQueue.size() + m_lowQueue.size();
-}
-
-void AiTaskQueue::recordFinishedTaskTiming() {
-    if (m_activeTaskTimer.isValid()) {
-        m_completedBatchElapsedMs += m_activeTaskTimer.elapsed();
-    }
-    ++m_batchCompletedTasks;
+    int active = m_isProcessing ? 1 : 0;
+    return m_batchCompletedCount + active + m_highQueue.size() + m_lowQueue.size();
 }
 
 void AiTaskQueue::emitStatus() {
-    int activeHigh = (m_isProcessing && m_currentTask.priority == TaskPriority::High_UserAction) ? 1 : 0;
-    int activeLow  = (m_isProcessing && m_currentTask.priority == TaskPriority::Low_BackgroundSummary) ? 1 : 0;
-    emit queueStatusChanged(m_highQueue.size() + activeHigh,
-                            m_lowQueue.size() + activeLow,
-                            m_isProcessing);
+    emit queueStatusChanged(m_highQueue.size(), m_lowQueue.size(), m_isProcessing);
     emit queueChanged();
 }
 
-bool AiTaskQueue::hasPendingOrActiveTask(TaskTargetType targetType,
-                                         const QString& filePath,
-                                         const QString& fileSha256,
-                                         const QString& llmModel) const {
-    auto matches = [&](const AiTask& t) {
-        if (t.targetType != targetType || t.filePath != filePath) return false;
-        if (!fileSha256.isEmpty() && t.fileSha256 != fileSha256) return false;
-        if (!llmModel.isEmpty() && t.llmModel != llmModel) return false;
+bool AiTaskQueue::hasPendingOrActiveTask(TaskTargetType targetType, const QString& filePath) const {
+    if (m_isProcessing && m_currentTask.targetType == targetType &&
+        m_currentTask.filePath.compare(filePath, Qt::CaseInsensitive) == 0) {
         return true;
-    };
-    if (m_isProcessing && matches(m_currentTask)) return true;
+    }
+    for (const auto& t : m_highQueue) {
+        if (t.targetType == targetType && t.filePath.compare(filePath, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
     for (const auto& t : m_lowQueue) {
-        if (matches(t)) return true;
+        if (t.targetType == targetType && t.filePath.compare(filePath, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
     }
     return false;
 }
 
 QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
-    if (isIdle()) {
-        m_completedBatchElapsedMs = 0;
-        m_batchCompletedTasks = 0;
-    }
-
     AiTask task = inputTask;
-    task.isThinking = false;
-    task.generatedTokens = 0;
-    task.thinkingTokens = 0;
-    task.elapsedMs = 0;
-    task.tokensPerSec = 0.0;
-
-    if (task.taskId.isEmpty()) task.taskId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    if (task.llmModel.isEmpty()) task.llmModel = ConfigManager::instance().aiConfig().llmIdentifier();
-    if (task.maxOutputTokens <= 0) {
-        const auto& cfg = ConfigManager::instance().aiConfig();
-        bool isSummary = (task.targetType == TaskTargetType::FileSummary || task.targetType == TaskTargetType::ProjectSummary);
-        task.maxOutputTokens = isSummary ? cfg.maxOutputSummaryTokens : cfg.maxOutputCodeTokens;
-    }
-    if (task.contextWindow <= 0) {
-        task.contextWindow = ConfigManager::instance().aiConfig().contextWindow;
-    }
-    task.expectedTokens = estimateExpectedTokens(task);
+    prepareTaskDefaults(task);
+    startBatchTimerIfNeeded();
 
     if (task.priority == TaskPriority::High_UserAction) {
-        if (task.targetEditor)
+        if (task.targetEditor) {
             task.targetEditor->setAiBusy(true, (m_isProcessing || !m_highQueue.isEmpty()) ? "Queued..." : "Generating...");
+        }
         m_highQueue.enqueue(task);
     } else {
-        if (m_isProcessing &&
-            m_currentTask.priority == TaskPriority::Low_BackgroundSummary &&
-            m_currentTask.targetType == task.targetType &&
-            m_currentTask.filePath == task.filePath &&
-            m_currentTask.fileSha256 == task.fileSha256 &&
-            m_currentTask.llmModel == task.llmModel) {
-            return m_currentTask.taskId;
-        }
         for (auto& existing : m_lowQueue) {
-            if (existing.targetType == task.targetType && existing.filePath == task.filePath) {
+            if (existing.targetType == task.targetType &&
+                existing.filePath.compare(task.filePath, Qt::CaseInsensitive) == 0) {
                 existing.fileSha256 = task.fileSha256;
                 existing.llmModel = task.llmModel;
-                existing.systemPrompt = task.systemPrompt;
-                existing.userPrompt = task.userPrompt;
                 existing.maxOutputTokens = task.maxOutputTokens;
                 existing.contextWindow = task.contextWindow;
+                existing.systemPrompt = task.systemPrompt;
+                existing.userPrompt = task.userPrompt;
                 existing.expectedTokens = task.expectedTokens;
                 emitStatus();
                 return existing.taskId;
@@ -135,267 +139,335 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
     }
 
     emitStatus();
-    if (!m_isProcessing) QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+    if (!m_isProcessing) {
+        QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+    }
     return task.taskId;
 }
 
-void AiTaskQueue::cancelFileSummaryTask(const QString& relFilePath) {
-    if (relFilePath.isEmpty()) return;
-    for (int i = m_lowQueue.size() - 1; i >= 0; --i) {
-        if (m_lowQueue[i].targetType == TaskTargetType::FileSummary && m_lowQueue[i].filePath == relFilePath) {
-            AiTask cancelled = m_lowQueue.takeAt(i);
-            emit taskCancelled(cancelled);
+void AiTaskQueue::enqueueTasksBatch(const QVector<AiTask>& inputTasks) {
+    if (inputTasks.isEmpty()) return;
+    startBatchTimerIfNeeded();
+
+    // Строим хеш-индекс существующих фоновых задач для дедупликации за O(1)
+    QHash<QString, int> lowQueueIndexByKey;
+    lowQueueIndexByKey.reserve(m_lowQueue.size() + inputTasks.size());
+    for (int i = 0; i < m_lowQueue.size(); ++i) {
+        const QString key = QString::number(static_cast<int>(m_lowQueue[i].targetType))
+        + QLatin1Char(':') + m_lowQueue[i].filePath.toLower();
+        lowQueueIndexByKey.insert(key, i);
+    }
+
+    for (const AiTask& rawTask : inputTasks) {
+        AiTask task = rawTask;
+        prepareTaskDefaults(task);
+
+        if (task.priority == TaskPriority::High_UserAction) {
+            if (task.targetEditor) {
+                task.targetEditor->setAiBusy(true, "Queued...");
+            }
+            m_highQueue.enqueue(std::move(task));
+        } else {
+            const QString key = QString::number(static_cast<int>(task.targetType))
+            + QLatin1Char(':') + task.filePath.toLower();
+            auto it = lowQueueIndexByKey.find(key);
+            if (it != lowQueueIndexByKey.end()) {
+                AiTask& existing = m_lowQueue[it.value()];
+                existing.fileSha256 = task.fileSha256;
+                existing.llmModel = task.llmModel;
+                existing.maxOutputTokens = task.maxOutputTokens;
+                existing.contextWindow = task.contextWindow;
+                existing.systemPrompt = task.systemPrompt;
+                existing.userPrompt = task.userPrompt;
+                existing.expectedTokens = task.expectedTokens;
+            } else {
+                const int newIdx = m_lowQueue.size();
+                m_lowQueue.enqueue(std::move(task));
+                lowQueueIndexByKey.insert(key, newIdx);
+            }
         }
     }
-    if (m_isProcessing && m_currentTask.targetType == TaskTargetType::FileSummary && m_currentTask.filePath == relFilePath) {
-        AiTask cancelled = m_currentTask;
-        m_provider->abortActiveRequest();
-        recordFinishedTaskTiming();
-        m_isProcessing = false;
-        emit taskCancelled(cancelled);
-        emitStatus();
+
+    emitStatus();
+    if (!m_isProcessing) {
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
-    } else {
-        emitStatus();
     }
 }
 
 void AiTaskQueue::cancelTaskForEditor(CodeEditor* editor) {
     if (!editor) return;
+    QVector<AiTask> cancelledList;
     for (int i = m_highQueue.size() - 1; i >= 0; --i) {
         if (m_highQueue[i].targetEditor == editor) {
-            AiTask removed = m_highQueue.takeAt(i);
-            emit taskCancelled(removed);
+            cancelledList.append(m_highQueue.takeAt(i));
         }
     }
+    for (const auto& t : cancelledList) {
+        emit taskCancelled(t);
+    }
+
     if (m_isProcessing && m_currentTask.targetEditor == editor) {
         AiTask cancelled = m_currentTask;
         m_provider->abortActiveRequest();
         editor->cancelAndRollbackAiEdit();
-        recordFinishedTaskTiming();
         m_isProcessing = false;
         emit taskCancelled(cancelled);
+        finalizeBatchTimerIfIdle();
         emitStatus();
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
     } else {
         editor->setAiBusy(false);
+        finalizeBatchTimerIfIdle();
         emitStatus();
     }
 }
 
 void AiTaskQueue::cancelTaskById(const QString& taskId) {
     if (taskId.isEmpty()) return;
-    for (int i = 0; i < m_highQueue.size(); ++i) {
-        if (m_highQueue[i].taskId == taskId) {
-            AiTask cancelled = m_highQueue.takeAt(i);
-            if (cancelled.targetEditor) cancelled.targetEditor->setAiBusy(false);
-            emit taskCancelled(cancelled);
-            emitStatus();
-            return;
-        }
-    }
-    for (int i = 0; i < m_lowQueue.size(); ++i) {
-        if (m_lowQueue[i].taskId == taskId) {
-            AiTask cancelled = m_lowQueue.takeAt(i);
-            emit taskCancelled(cancelled);
-            emitStatus();
-            return;
-        }
-    }
+
     if (m_isProcessing && m_currentTask.taskId == taskId) {
         AiTask cancelled = m_currentTask;
         m_provider->abortActiveRequest();
-        recordFinishedTaskTiming();
-        m_isProcessing = false;
         if (cancelled.targetEditor) {
-            if (cancelled.targetType == TaskTargetType::ModifyEditorCode)
+            if (cancelled.targetType == TaskTargetType::ModifyEditorCode) {
                 cancelled.targetEditor->cancelAndRollbackAiEdit();
-            else
+            } else {
                 cancelled.targetEditor->setAiBusy(false);
+            }
         }
+        m_isProcessing = false;
         emit taskCancelled(cancelled);
+        finalizeBatchTimerIfIdle();
         emitStatus();
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+        return;
     }
+
+    for (int i = 0; i < m_highQueue.size(); ++i) {
+        if (m_highQueue[i].taskId == taskId) {
+            AiTask t = m_highQueue.takeAt(i);
+            if (t.targetEditor) t.targetEditor->setAiBusy(false);
+            emit taskCancelled(t);
+            finalizeBatchTimerIfIdle();
+            emitStatus();
+            return;
+        }
+    }
+
+    for (int i = 0; i < m_lowQueue.size(); ++i) {
+        if (m_lowQueue[i].taskId == taskId) {
+            AiTask t = m_lowQueue.takeAt(i);
+            emit taskCancelled(t);
+            finalizeBatchTimerIfIdle();
+            emitStatus();
+            return;
+        }
+    }
+}
+
+void AiTaskQueue::cancelFileSummaryTask(const QString& relFilePath) {
+    if (relFilePath.isEmpty()) return;
+
+    for (int i = m_lowQueue.size() - 1; i >= 0; --i) {
+        if (m_lowQueue[i].targetType == TaskTargetType::FileSummary &&
+            m_lowQueue[i].filePath.compare(relFilePath, Qt::CaseInsensitive) == 0) {
+            AiTask t = m_lowQueue.takeAt(i);
+            emit taskCancelled(t);
+        }
+    }
+
+    if (m_isProcessing &&
+        m_currentTask.targetType == TaskTargetType::FileSummary &&
+        m_currentTask.filePath.compare(relFilePath, Qt::CaseInsensitive) == 0) {
+        AiTask cancelled = m_currentTask;
+        m_provider->abortActiveRequest();
+        m_isProcessing = false;
+        emit taskCancelled(cancelled);
+        finalizeBatchTimerIfIdle();
+        emitStatus();
+        QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+        return;
+    }
+
+    finalizeBatchTimerIfIdle();
+    emitStatus();
 }
 
 void AiTaskQueue::cancelAllBackgroundTasks() {
-    while (!m_lowQueue.isEmpty()) {
-        AiTask cancelled = m_lowQueue.dequeue();
-        emit taskCancelled(cancelled);
+    QQueue<AiTask> takenLow;
+    takenLow.swap(m_lowQueue);
+    for (const AiTask& t : takenLow) {
+        emit taskCancelled(t);
     }
+
     if (m_isProcessing && m_currentTask.priority == TaskPriority::Low_BackgroundSummary) {
         AiTask cancelled = m_currentTask;
         m_provider->abortActiveRequest();
-        recordFinishedTaskTiming();
         m_isProcessing = false;
         emit taskCancelled(cancelled);
+        finalizeBatchTimerIfIdle();
         emitStatus();
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
-    } else {
-        emitStatus();
+        return;
     }
+
+    finalizeBatchTimerIfIdle();
+    emitStatus();
 }
 
 void AiTaskQueue::cancelAllTasks() {
-    while (!m_highQueue.isEmpty()) {
-        AiTask cancelled = m_highQueue.dequeue();
-        if (cancelled.targetEditor) cancelled.targetEditor->setAiBusy(false);
-        emit taskCancelled(cancelled);
+    QQueue<AiTask> takenHigh;
+    QQueue<AiTask> takenLow;
+    takenHigh.swap(m_highQueue);
+    takenLow.swap(m_lowQueue);
+
+    for (const AiTask& t : takenHigh) {
+        if (t.targetEditor) t.targetEditor->setAiBusy(false);
+        emit taskCancelled(t);
     }
-    while (!m_lowQueue.isEmpty()) {
-        AiTask cancelled = m_lowQueue.dequeue();
-        emit taskCancelled(cancelled);
+    for (const AiTask& t : takenLow) {
+        emit taskCancelled(t);
     }
+
     if (m_isProcessing) {
         AiTask cancelled = m_currentTask;
         m_provider->abortActiveRequest();
-        recordFinishedTaskTiming();
-        m_isProcessing = false;
         if (cancelled.targetEditor) {
-            if (cancelled.targetType == TaskTargetType::ModifyEditorCode)
+            if (cancelled.targetType == TaskTargetType::ModifyEditorCode) {
                 cancelled.targetEditor->cancelAndRollbackAiEdit();
-            else
+            } else {
                 cancelled.targetEditor->setAiBusy(false);
+            }
         }
+        m_isProcessing = false;
         emit taskCancelled(cancelled);
     }
-    emitStatus();
-}
 
-void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
-    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    AiTask timedOutTask = m_currentTask;
-    recordFinishedTaskTiming();
-    m_isProcessing = false;
-    if (timedOutTask.targetEditor) {
-        if (timedOutTask.targetType == TaskTargetType::ModifyEditorCode)
-            timedOutTask.targetEditor->cancelAndRollbackAiEdit();
-        else
-            timedOutTask.targetEditor->setAiBusy(false);
-    }
-    emit taskFailed(timedOutTask, "Request timed out (automatically cancelled and rolled back).");
+    finalizeBatchTimerIfIdle();
     emitStatus();
-    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
 }
 
 void AiTaskQueue::processNext() {
     if (m_isProcessing) return;
-    while (!m_highQueue.isEmpty() &&
-           m_highQueue.head().priority == TaskPriority::High_UserAction &&
-           m_highQueue.head().targetType != TaskTargetType::ProjectCustomPrompt &&
-           !m_highQueue.head().targetEditor) {
-        m_highQueue.dequeue();
-    }
-    if (!m_highQueue.isEmpty()) m_currentTask = m_highQueue.dequeue();
-    else if (!m_lowQueue.isEmpty()) m_currentTask = m_lowQueue.dequeue();
-    else { emitStatus(); return; }
 
+    while (!m_highQueue.isEmpty()) {
+        const AiTask& head = m_highQueue.head();
+        const bool needsEditor = (head.targetType == TaskTargetType::ModifyEditorCode ||
+                                  head.targetType == TaskTargetType::ExplainToDialog);
+        if (needsEditor && !head.targetEditor) {
+            m_highQueue.dequeue();
+            continue;
+        }
+        break;
+    }
+
+    if (!m_highQueue.isEmpty()) {
+        m_currentTask = m_highQueue.dequeue();
+    } else if (!m_lowQueue.isEmpty()) {
+        m_currentTask = m_lowQueue.dequeue();
+    } else {
+        finalizeBatchTimerIfIdle();
+        emitStatus();
+        return;
+    }
+
+    m_isProcessing = true;
     m_currentTask.isThinking = false;
     m_currentTask.generatedTokens = 0;
     m_currentTask.thinkingTokens = 0;
     m_currentTask.elapsedMs = 0;
     m_currentTask.tokensPerSec = 0.0;
-    m_activeTaskTimer.start();
-
-    m_isProcessing = true;
     emitStatus();
 
     if (m_currentTask.targetEditor) {
-        m_currentTask.targetEditor->setAiBusy(true, m_currentTask.isContinuation ? "Continuing..." : "Generating...");
+        m_currentTask.targetEditor->setAiBusy(true, "Generating...");
         if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode) {
-            if (m_currentTask.appendToPreviousOutput) {
-                m_currentTask.targetEditor->beginAiStreamContinueEdit();
-            } else {
-                m_currentTask.targetEditor->beginAiStreamEdit();
-            }
+            m_currentTask.targetEditor->beginAiStreamEdit();
         }
     }
 
-    AiConnectionConfig reqCfg = ConfigManager::instance().aiConfig();
-    if (m_currentTask.contextWindow > 0) {
-        reqCfg.contextWindow = m_currentTask.contextWindow;
-    }
-    int maxTokens = m_currentTask.maxOutputTokens > 0
-                        ? m_currentTask.maxOutputTokens
-                        : ((m_currentTask.targetType == TaskTargetType::FileSummary ||
-                            m_currentTask.targetType == TaskTargetType::ProjectSummary)
-                               ? reqCfg.maxOutputSummaryTokens
-                               : reqCfg.maxOutputCodeTokens);
-
     emit taskStarted(m_currentTask);
+
+    AiConnectionConfig cfg = ConfigManager::instance().aiConfig();
+    if (m_currentTask.contextWindow > 0) {
+        cfg.contextWindow = m_currentTask.contextWindow;
+    }
+
     m_provider->sendRequest(m_currentTask.taskId,
                             m_currentTask.systemPrompt,
                             m_currentTask.userPrompt,
                             m_currentTask.stream,
-                            reqCfg,
-                            maxTokens,
+                            cfg,
+                            m_currentTask.maxOutputTokens,
                             m_currentTask.conversationHistory);
-}
-
-void AiTaskQueue::onProviderThinkingChanged(const QString& taskId, bool isThinking) {
-    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    if (m_currentTask.isThinking == isThinking) return;
-    m_currentTask.isThinking = isThinking;
-    if (m_currentTask.targetEditor) {
-        m_currentTask.targetEditor->setAiBusy(true, isThinking ? "Thinking..." : "Generating...");
-    }
-    emitStatus();
-}
-
-void AiTaskQueue::onProviderProgressUpdated(const QString& taskId,
-                                            int generatedTokens,
-                                            int thinkingTokens,
-                                            qint64 elapsedMs,
-                                            double tokensPerSec) {
-    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    m_currentTask.generatedTokens = generatedTokens;
-    m_currentTask.thinkingTokens = thinkingTokens;
-    m_currentTask.elapsedMs = elapsedMs;
-    m_currentTask.tokensPerSec = tokensPerSec;
-    emit taskProgressChanged(m_currentTask);
 }
 
 void AiTaskQueue::onProviderChunk(const QString& taskId, const QString& chunk) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode && m_currentTask.targetEditor)
+    if (m_currentTask.targetType == TaskTargetType::ModifyEditorCode && m_currentTask.targetEditor) {
         m_currentTask.targetEditor->appendAiStreamChunk(chunk);
-
+    }
     emit taskStreamChunk(m_currentTask, chunk);
+}
+
+void AiTaskQueue::onProviderProgress(const QString& taskId,
+                                     int outputChunks,
+                                     int thinkingChunks,
+                                     qint64 elapsedMs,
+                                     double tokPerSec) {
+    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
+    m_currentTask.generatedTokens = outputChunks;
+    m_currentTask.thinkingTokens = thinkingChunks;
+    m_currentTask.elapsedMs = elapsedMs;
+    m_currentTask.tokensPerSec = tokPerSec;
+    emit taskProgressChanged(m_currentTask);
+}
+
+void AiTaskQueue::onProviderThinkingState(const QString& taskId, bool isThinking) {
+    if (!m_isProcessing || m_currentTask.taskId != taskId) return;
+    m_currentTask.isThinking = isThinking;
+    emit taskProgressChanged(m_currentTask);
+}
+
+void AiTaskQueue::onProviderTimedOut(const QString& taskId) {
+    onProviderError(taskId, QStringLiteral("Request timed out."));
 }
 
 void AiTaskQueue::onProviderFinished(const QString& taskId, const QString& fullText) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    recordFinishedTaskTiming();
     AiTask finished = m_currentTask;
     m_isProcessing = false;
+    ++m_batchCompletedCount;
 
     if (finished.targetEditor) {
-        if (finished.targetType == TaskTargetType::ModifyEditorCode)
+        if (finished.targetType == TaskTargetType::ModifyEditorCode) {
             finished.targetEditor->finishAiStreamEdit();
-        else
+        } else {
             finished.targetEditor->setAiBusy(false);
+        }
     }
 
     emit taskCompleted(finished, fullText.trimmed());
+    finalizeBatchTimerIfIdle();
     emitStatus();
-    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+    processNext();
 }
 
 void AiTaskQueue::onProviderError(const QString& taskId, const QString& error) {
     if (!m_isProcessing || m_currentTask.taskId != taskId) return;
-    recordFinishedTaskTiming();
     AiTask failed = m_currentTask;
     m_isProcessing = false;
 
     if (failed.targetEditor) {
-        if (failed.targetType == TaskTargetType::ModifyEditorCode)
+        if (failed.targetType == TaskTargetType::ModifyEditorCode) {
             failed.targetEditor->cancelAndRollbackAiEdit();
-        else
+        } else {
             failed.targetEditor->setAiBusy(false);
+        }
     }
 
     emit taskFailed(failed, error);
+    finalizeBatchTimerIfIdle();
     emitStatus();
-    QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+    processNext();
 }

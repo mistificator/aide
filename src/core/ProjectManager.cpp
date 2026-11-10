@@ -1,30 +1,111 @@
 // src/core/ProjectManager.cpp
 #include "ProjectManager.h"
 #include <QDir>
-#include <QFileInfo>
 #include <QFile>
 #include <QSaveFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QCryptographicHash>
-#include <QSet>
+#include <QFileSystemWatcher>
+#include <QRegularExpression>
 #include <algorithm>
 
-ProjectManager::ProjectManager(QObject* parent)
-    : QObject(parent) {
-    m_reconcileTimer.setSingleShot(true);
-    m_reconcileTimer.setInterval(250);
+namespace {
+struct FastIgnoreMatcher {
+    QSet<QString> exactDirs;
+    QVector<QRegularExpression> wildcardDirs;
+    QSet<QString> allowedExtensions;
+    QSet<QString> exactAllowedNames;
+    QVector<QRegularExpression> wildcardAllowedNames;
 
-    connect(&m_reconcileTimer, &QTimer::timeout, this, &ProjectManager::reconcileProjectStructure);
-    connect(&m_fsWatcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString&) {
-        if (!m_reconciling && hasOpenProject()) {
-            m_reconcileTimer.start();
+    static FastIgnoreMatcher fromConfig() {
+        FastIgnoreMatcher m;
+        const auto& cfg = ConfigManager::instance();
+        const auto beh = cfg.aiBehavior();
+
+        for (const QString& pat : beh.summaryIgnoredDirs) {
+            QString p = pat.trimmed();
+            if (p.isEmpty()) continue;
+            if (p.contains('*') || p.contains('?')) {
+                m.wildcardDirs.append(QRegularExpression(
+                    QRegularExpression::wildcardToRegularExpression(p),
+                    QRegularExpression::CaseInsensitiveOption));
+            } else {
+                m.exactDirs.insert(p.toLower());
+            }
+        }
+        // Гарантируем пропуск стандартных тяжёлых служебных каталогов
+        m.exactDirs.insert(".git");
+        m.exactDirs.insert(".hg");
+        m.exactDirs.insert(".svn");
+        m.exactDirs.insert("node_modules");
+        m.exactDirs.insert("__pycache__");
+
+        for (const QString& ext : beh.summaryAllowedExtensions) {
+            QString clean = ext.trimmed().toLower();
+            if (clean.startsWith("*.")) clean = clean.mid(2);
+            else if (clean.startsWith('.')) clean = clean.mid(1);
+            if (!clean.isEmpty()) m.allowedExtensions.insert(clean);
+        }
+        if (beh.summaryUseSyntaxExtensions) {
+            for (const QString& ext : cfg.extensionsFromLoadedSyntaxes()) {
+                QString clean = ext.trimmed().toLower();
+                if (!clean.isEmpty()) m.allowedExtensions.insert(clean);
+            }
+        }
+        for (const QString& pat : beh.summaryAllowedFilenames) {
+            QString p = pat.trimmed();
+            if (p.isEmpty()) continue;
+            if (p.contains('*') || p.contains('?')) {
+                m.wildcardAllowedNames.append(QRegularExpression(
+                    QRegularExpression::wildcardToRegularExpression(p),
+                    QRegularExpression::CaseInsensitiveOption));
+            } else {
+                m.exactAllowedNames.insert(p.toLower());
+            }
+        }
+        return m;
+    }
+
+    bool isDirIgnored(const QString& dirName) const {
+        if (dirName.isEmpty()) return true;
+        const QString lower = dirName.toLower();
+        if (exactDirs.contains(lower)) return true;
+        for (const auto& rx : wildcardDirs) {
+            if (rx.match(dirName).hasMatch()) return true;
+        }
+        return false;
+    }
+
+    bool isFileAllowed(const QString& fileName, const QString& suffix) const {
+        const QString lower = fileName.toLower();
+        if (exactAllowedNames.contains(lower)) return true;
+        for (const auto& rx : wildcardAllowedNames) {
+            if (rx.match(fileName).hasMatch()) return true;
+        }
+        if (!suffix.isEmpty() && allowedExtensions.contains(suffix.toLower())) {
+            return true;
+        }
+        return false;
+    }
+};
+} // namespace
+
+ProjectManager::ProjectManager(QObject* parent)
+    : QObject(parent),
+    m_fsWatcher(new QFileSystemWatcher(this)) {
+    m_watchDebounceTimer.setSingleShot(true);
+    m_watchDebounceTimer.setInterval(650);
+    connect(&m_watchDebounceTimer, &QTimer::timeout, this, [this]() {
+        if (hasOpenProject() && !m_reconciling && m_batchDepth == 0) {
+            reconcileProjectStructure(nullptr, false);
         }
     });
-    connect(&m_fsWatcher, &QFileSystemWatcher::fileChanged, this, [this](const QString& path) {
-        if (!m_reconciling && hasOpenProject() && !QFileInfo::exists(path)) {
-            m_reconcileTimer.start();
+    connect(m_fsWatcher, &QFileSystemWatcher::directoryChanged, this, [this](const QString&) {
+        if (hasOpenProject() && !m_reconciling && m_batchDepth == 0) {
+            m_watchDebounceTimer.start();
         }
     });
 }
@@ -33,102 +114,156 @@ QString ProjectManager::computeSha256(const QByteArray& data) {
     return QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
 }
 
-QString ProjectManager::defaultAideFilePathForDir(const QString& dirPath) {
-    QDir dir(dirPath);
-    const QStringList aideFiles = dir.entryList({"*.aide"}, QDir::Files, QDir::Name);
-    if (!aideFiles.isEmpty()) {
-        return dir.filePath(aideFiles.first());
-    }
-    const QString dirName = dir.dirName().trimmed();
-    return dir.filePath(dirName.isEmpty() ? QStringLiteral("project.aide") : (dirName + QStringLiteral(".aide")));
+void ProjectManager::beginBatchUpdate() {
+    ++m_batchDepth;
 }
 
-QString ProjectManager::toRelativePath(const QString& path) const {
-    if (path.isEmpty()) return {};
-    if (m_rootNode.rootPath.isEmpty()) {
-        QString cleaned = QDir::cleanPath(path);
-        cleaned.replace('\\', '/');
-        return cleaned;
+void ProjectManager::endBatchUpdate() {
+    if (m_batchDepth <= 0) return;
+    --m_batchDepth;
+    if (m_batchDepth == 0) {
+        if (!m_lastBatchChangedFileRel.isEmpty()) {
+            QString rel = m_lastBatchChangedFileRel;
+            m_lastBatchChangedFileRel.clear();
+            emit fileContextChanged(rel);
+        }
+        if (m_batchProjectDirty) {
+            m_batchProjectDirty = false;
+            emit projectContextChanged();
+        }
     }
-    QFileInfo fi(path);
+}
+
+QString ProjectManager::defaultAideFilePathForDir(const QString& absDirPath) {
+    QDir dir(absDirPath);
+    QString folderName = dir.dirName().trimmed();
+    if (folderName.isEmpty()) folderName = QStringLiteral("project");
+    return dir.filePath(folderName + QStringLiteral(".aide"));
+}
+
+QString ProjectManager::findExistingAideFileInDir(const QString& absDirPath) {
+    QDir dir(absDirPath);
+    if (!dir.exists()) return {};
+    const QStringList aideFiles = dir.entryList({QStringLiteral("*.aide")}, QDir::Files, QDir::Name);
+    if (aideFiles.isEmpty()) return {};
+    const QString preferred = dir.dirName() + QStringLiteral(".aide");
+    for (const QString& f : aideFiles) {
+        if (f.compare(preferred, Qt::CaseInsensitive) == 0) {
+            return dir.filePath(f);
+        }
+    }
+    return dir.filePath(aideFiles.first());
+}
+
+QString ProjectManager::projectFilePath() const {
+    if (m_rootPath.isEmpty()) return {};
+    if (m_nodes.contains(QString())) {
+        return m_nodes.value(QString()).aideFilePath;
+    }
+    return defaultAideFilePathForDir(m_rootPath);
+}
+
+QString ProjectManager::toRelativePath(const QString& filePathOrRel) const {
+    QString input = filePathOrRel.trimmed();
+    if (input.isEmpty() || m_rootPath.isEmpty()) return {};
+
+    input.replace('\\', '/');
+    while (input.startsWith("./")) input.remove(0, 2);
+    if (input == ".") return {};
+
+    QFileInfo fi(input);
     QString rel;
-    if (fi.isRelative()) {
-        rel = QDir::cleanPath(path);
+    if (fi.isAbsolute()) {
+        QString cleanAbs = QDir::cleanPath(input);
+        cleanAbs.replace('\\', '/');
+        QString cleanRoot = QDir::cleanPath(m_rootPath);
+        cleanRoot.replace('\\', '/');
+        if (cleanAbs.compare(cleanRoot, Qt::CaseInsensitive) == 0) {
+            return {};
+        }
+        if (cleanAbs.startsWith(cleanRoot + '/', Qt::CaseInsensitive)) {
+            rel = cleanAbs.mid(cleanRoot.length() + 1);
+        } else {
+            rel = QDir(m_rootPath).relativeFilePath(cleanAbs);
+            rel.replace('\\', '/');
+        }
     } else {
-        rel = QDir(m_rootNode.rootPath).relativeFilePath(QDir::cleanPath(fi.absoluteFilePath()));
+        rel = QDir::cleanPath(input);
+        rel.replace('\\', '/');
     }
-    rel.replace('\\', '/');
+
     while (rel.startsWith("./")) rel.remove(0, 2);
     if (rel == ".") rel.clear();
     return rel;
 }
 
-QString ProjectManager::toAbsolutePath(const QString& relOrAbsPath) const {
-    if (relOrAbsPath.isEmpty()) return {};
-    QFileInfo fi(relOrAbsPath);
-    if (fi.isAbsolute() || m_rootNode.rootPath.isEmpty()) {
-        return QDir::cleanPath(fi.absoluteFilePath());
-    }
-    return QDir::cleanPath(QDir(m_rootNode.rootPath).filePath(relOrAbsPath));
+QString ProjectManager::toAbsolutePath(const QString& relPath) const {
+    if (m_rootPath.isEmpty()) return relPath;
+    QString clean = relPath.trimmed();
+    if (clean.isEmpty()) return m_rootPath;
+    if (QFileInfo(clean).isAbsolute()) return QDir::cleanPath(clean);
+    return QDir::cleanPath(QDir(m_rootPath).filePath(clean));
 }
 
-QString ProjectManager::normalizeNodeKey(const QString& projectDirOrRel) const {
-    if (projectDirOrRel.trimmed().isEmpty() || !hasOpenProject()) {
-        return {};
-    }
-    QString cleanInput = QDir::cleanPath(projectDirOrRel.trimmed());
-    cleanInput.replace('\\', '/');
-    if (cleanInput == "." || cleanInput.compare(m_rootNode.rootPath, Qt::CaseInsensitive) == 0) {
-        return {};
-    }
-    QFileInfo fi(projectDirOrRel);
-    QString rel = fi.isAbsolute()
-                      ? QDir(m_rootNode.rootPath).relativeFilePath(QDir::cleanPath(fi.absoluteFilePath()))
-                      : cleanInput;
-    rel.replace('\\', '/');
-    while (rel.startsWith("./")) rel.remove(0, 2);
-    while (rel.endsWith('/')) rel.chop(1);
+QString ProjectManager::normalizeScopeRel(const QString& scopeOrPath) const {
+    QString trimmed = scopeOrPath.trimmed();
+    if (trimmed.isEmpty() || trimmed == ".") return {};
+    QString rel = toRelativePath(trimmed);
     if (rel == "." || rel.startsWith("..")) return {};
+    if (m_nodes.contains(rel)) return rel;
+
+    // Если передан путь к файлу .aide или вложенной папке, ищем соответствующий узел
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        if (it.key().compare(rel, Qt::CaseInsensitive) == 0) {
+            return it.key();
+        }
+    }
     return rel;
 }
 
-ProjectManager::ProjectNode* ProjectManager::nodeForKey(const QString& nodeKey) {
-    if (nodeKey.isEmpty()) return &m_rootNode;
-    auto it = m_subprojects.find(nodeKey);
-    return (it != m_subprojects.end()) ? &it.value() : nullptr;
+QString ProjectManager::projectDirPathForRel(const QString& subprojectRel) const {
+    if (m_rootPath.isEmpty()) return {};
+    QString trimmed = subprojectRel.trimmed();
+    if (trimmed.isEmpty() || trimmed == ".") return m_rootPath;
+    if (QFileInfo(trimmed).isAbsolute()) {
+        return QDir::cleanPath(trimmed);
+    }
+    return QDir::cleanPath(QDir(m_rootPath).filePath(trimmed));
 }
 
-const ProjectManager::ProjectNode* ProjectManager::nodeForKey(const QString& nodeKey) const {
-    if (nodeKey.isEmpty()) return &m_rootNode;
-    auto it = m_subprojects.constFind(nodeKey);
-    return (it != m_subprojects.constEnd()) ? &it.value() : nullptr;
-}
-
-QString ProjectManager::findOwningNodeKeyForAbsPath(const QString& absPath) const {
-    if (!hasOpenProject() || absPath.isEmpty()) return {};
-    QString relToRoot = toRelativePath(absPath);
-    if (relToRoot.isEmpty() || relToRoot.startsWith("..")) return {};
-
-    QString bestKey;
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-        const QString& subKey = it.key();
-        if (relToRoot.compare(subKey, Qt::CaseInsensitive) == 0 ||
-            relToRoot.startsWith(subKey + "/", Qt::CaseInsensitive)) {
-            if (subKey.length() > bestKey.length()) {
-                bestKey = subKey;
-            }
+bool ProjectManager::isSubprojectDir(const QString& dirPathOrRel) const {
+    if (!hasOpenProject()) return false;
+    QString rel = toRelativePath(dirPathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return false;
+    if (m_nodes.contains(rel)) return true;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        if (!it.key().isEmpty() && it.key().compare(rel, Qt::CaseInsensitive) == 0) {
+            return true;
         }
     }
-    return bestKey;
+    return false;
 }
 
-QString ProjectManager::findParentNodeKey(const QString& childNodeKey) const {
-    if (childNodeKey.isEmpty()) return {};
+QStringList ProjectManager::subprojectRelPaths() const {
+    QStringList out;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        if (!it.key().isEmpty()) {
+            out.append(it.key());
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const QString& a, const QString& b) {
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+QString ProjectManager::parentSubprojectRel(const QString& subRel) const {
+    if (subRel.isEmpty()) return {};
     QString bestParent;
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
         const QString& candidate = it.key();
-        if (candidate.length() < childNodeKey.length() &&
-            childNodeKey.startsWith(candidate + "/", Qt::CaseInsensitive)) {
+        if (candidate.isEmpty() || candidate.length() >= subRel.length()) continue;
+        if (subRel.startsWith(candidate + '/', Qt::CaseInsensitive)) {
             if (candidate.length() > bestParent.length()) {
                 bestParent = candidate;
             }
@@ -137,622 +272,459 @@ QString ProjectManager::findParentNodeKey(const QString& childNodeKey) const {
     return bestParent;
 }
 
-void ProjectManager::markNodeAndAncestorsDirty(const QString& nodeKey) {
-    QString cur = nodeKey;
-    while (true) {
-        if (auto* n = nodeForKey(cur)) {
-            n->projectSummaryDirty = true;
+QStringList ProjectManager::directChildSubprojects(const QString& parentSubRel) const {
+    const QString normParent = normalizeScopeRel(parentSubRel);
+    QStringList out;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        const QString& sub = it.key();
+        if (sub.isEmpty()) continue;
+        if (parentSubprojectRel(sub).compare(normParent, Qt::CaseInsensitive) == 0) {
+            out.append(sub);
         }
-        if (cur.isEmpty()) break;
-        cur = findParentNodeKey(cur);
+    }
+    std::sort(out.begin(), out.end(), [](const QString& a, const QString& b) {
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+QStringList ProjectManager::dirtyProjectRelPathsBottomUp() const {
+    QStringList dirtyList;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        const ProjectNodeData& node = it.value();
+        const bool hasIndexedContent = indexedFilesCount(node.subprojectRel, true) > 0;
+        if (!hasIndexedContent) continue;
+        if (node.summaryDirty || node.summary.trimmed().isEmpty()) {
+            dirtyList.append(node.subprojectRel);
+        }
+    }
+    // Сортируем от самых глубоких вложенных подпроектов к корневому проекту ("")
+    std::sort(dirtyList.begin(), dirtyList.end(), [](const QString& a, const QString& b) {
+        int depthA = a.isEmpty() ? 0 : (a.count('/') + 1);
+        int depthB = b.isEmpty() ? 0 : (b.count('/') + 1);
+        if (depthA != depthB) return depthA > depthB;
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+    return dirtyList;
+}
+
+QString ProjectManager::owningProjectRelPathForFile(const QString& filePathOrRel) const {
+    if (!hasOpenProject()) return {};
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return {};
+
+    QString bestSub;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        const QString& sub = it.key();
+        if (sub.isEmpty()) continue;
+        if (rel.compare(sub, Qt::CaseInsensitive) == 0 ||
+            rel.startsWith(sub + '/', Qt::CaseInsensitive)) {
+            if (sub.length() > bestSub.length()) {
+                bestSub = sub;
+            }
+        }
+    }
+    return bestSub;
+}
+
+void ProjectManager::reassignAllFilesToNearestOwners() {
+    for (auto it = m_files.begin(); it != m_files.end(); ++it) {
+        it.value().subprojectRelPath = owningProjectRelPathForFile(it.key());
     }
 }
 
-bool ProjectManager::isSkippedSystemDir(const QString& dirName) const {
-    if (dirName.isEmpty() || dirName == "." || dirName == "..") return true;
-    if (dirName.compare(".git", Qt::CaseInsensitive) == 0 ||
-        dirName.compare(".aide", Qt::CaseInsensitive) == 0) {
-        return true;
-    }
-    return ConfigManager::instance().isDirectoryIgnoredForSummary(dirName);
-}
+bool ProjectManager::loadNodeFromDisk(const QString& subRel,
+                                      const QString& aidePath,
+                                      QMap<QString, FileContextData>& outLoadedFiles) {
+    ProjectNodeData node;
+    node.subprojectRel = subRel;
+    node.aideFilePath = aidePath;
+    QDir nodeDir(projectDirPathForRel(subRel));
+    node.projectName = nodeDir.dirName().isEmpty() ? QStringLiteral("project") : nodeDir.dirName();
+    node.updatedAt = QDateTime::currentDateTimeUtc();
 
-bool ProjectManager::loadNodeFromDisk(const QString& aideFilePath, ProjectNode& outNode) {
-    QFile f(aideFilePath);
-    if (!f.open(QIODevice::ReadOnly)) return false;
+    QFile f(aidePath);
+    if (f.exists() && f.open(QIODevice::ReadOnly)) {
+        const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+        node.projectName = root["project_name"].toString(node.projectName);
+        node.systemPrompt = root["project_system_prompt"].toString();
+        node.summary = root["project_summary"].toString();
+        node.summaryLlm = root["project_summary_llm"].toString();
+        node.summaryDirty = root["project_summary_dirty"].toBool(false);
+        node.updatedAt = QDateTime::fromString(root["updated_at"].toString(), Qt::ISODate);
+        if (!node.updatedAt.isValid()) node.updatedAt = QDateTime::currentDateTimeUtc();
 
-    QFileInfo fi(aideFilePath);
-    outNode.aideFilePath = QDir::cleanPath(fi.absoluteFilePath());
-    outNode.rootPath = QDir::cleanPath(fi.absolutePath());
+        const QJsonObject filesObj = root["files"].toObject();
+        for (auto it = filesObj.begin(); it != filesObj.end(); ++it) {
+            QString rawKey = it.key().trimmed();
+            rawKey.replace('\\', '/');
+            while (rawKey.startsWith("./")) rawKey.remove(0, 2);
+            if (rawKey.isEmpty()) continue;
 
-    const auto root = QJsonDocument::fromJson(f.readAll()).object();
-    outNode.projectSystemPrompt = root["project_system_prompt"].toString();
-    outNode.projectSummary = root["project_summary"].toString();
-    outNode.projectSummaryLlm = root["project_summary_llm"].toString();
-    outNode.projectSummaryDirty = root["project_summary_dirty"].toBool(false);
+            // Ключ внутри подпроекта может быть записан относительно папки подпроекта или от корня
+            QString rootRel;
+            if (!subRel.isEmpty() &&
+                !rawKey.startsWith(subRel + '/', Qt::CaseInsensitive) &&
+                QFileInfo::exists(nodeDir.filePath(rawKey))) {
+                rootRel = subRel + '/' + rawKey;
+            } else if (!subRel.isEmpty() && !rawKey.startsWith(subRel + '/', Qt::CaseInsensitive)) {
+                rootRel = subRel + '/' + rawKey;
+            } else {
+                rootRel = rawKey;
+            }
+            rootRel = QDir::cleanPath(rootRel);
+            rootRel.replace('\\', '/');
 
-    if (root.contains("ignored_dirs") && root["ignored_dirs"].isArray()) {
-        outNode.ignoredDirs.clear();
-        for (const auto& v : root["ignored_dirs"].toArray()) {
-            const QString d = v.toString().trimmed();
-            if (!d.isEmpty()) outNode.ignoredDirs.append(d);
+            const QJsonObject fo = it.value().toObject();
+            FileContextData fc;
+            fc.relativePath = rootRel;
+            fc.subprojectRelPath = subRel;
+            fc.sha256 = fo["sha256"].toString();
+            fc.llmModel = fo["llm_model"].toString();
+            fc.userPrompt = fo["user_prompt"].toString();
+            fc.aiSummary = fo["ai_summary"].toString();
+            fc.summaryCreated = fo["summary_created"].toBool(!fc.aiSummary.trimmed().isEmpty());
+            fc.updatedAt = QDateTime::fromString(fo["updated_at"].toString(), Qt::ISODate);
+            if (!fc.updatedAt.isValid()) fc.updatedAt = node.updatedAt;
+
+            if (outLoadedFiles.contains(rootRel)) {
+                const FileContextData& prev = outLoadedFiles.value(rootRel);
+                const bool prevHasSum = !prev.aiSummary.trimmed().isEmpty();
+                const bool newHasSum = !fc.aiSummary.trimmed().isEmpty();
+                if ((newHasSum && !prevHasSum) || (newHasSum == prevHasSum && fc.updatedAt >= prev.updatedAt)) {
+                    outLoadedFiles.insert(rootRel, fc);
+                }
+            } else {
+                outLoadedFiles.insert(rootRel, fc);
+            }
         }
     }
 
-    outNode.files.clear();
-    const auto filesObj = root["files"].toObject();
-    for (auto it = filesObj.begin(); it != filesObj.end(); ++it) {
-        QString localKey = QDir::cleanPath(it.key());
-        localKey.replace('\\', '/');
-        while (localKey.startsWith("./")) localKey.remove(0, 2);
-        if (localKey.isEmpty() || localKey == ".") continue;
-
-        const auto fo = it.value().toObject();
-        FileContextData fc;
-        fc.localRelativePath = localKey;
-        fc.subprojectRelPath = outNode.relPathFromRoot;
-        fc.relativePath = outNode.relPathFromRoot.isEmpty()
-                              ? localKey
-                              : (outNode.relPathFromRoot + "/" + localKey);
-        fc.sha256 = fo["sha256"].toString();
-        fc.llmModel = fo["llm_model"].toString();
-        fc.userPrompt = fo["user_prompt"].toString();
-        fc.aiSummary = fo["ai_summary"].toString();
-        fc.summaryCreated = fo.contains("summary_created")
-                                ? fo["summary_created"].toBool()
-                                : !fc.aiSummary.trimmed().isEmpty();
-        fc.updatedAt = QDateTime::fromString(fo["updated_at"].toString(), Qt::ISODate);
-        fc.isSummaryPending = false;
-
-        outNode.files.insert(localKey, fc);
-    }
+    m_nodes.insert(subRel, node);
     return true;
 }
 
-bool ProjectManager::saveNodeToDisk(const ProjectNode& node) {
-    if (node.aideFilePath.isEmpty() || node.rootPath.isEmpty()) return false;
+bool ProjectManager::saveNodeToDisk(const ProjectNodeData& node) const {
+    if (node.aideFilePath.isEmpty()) return false;
+    QFileInfo fi(node.aideFilePath);
+    if (!fi.dir().exists()) return false;
+
+    QJsonObject root;
+    root["project_name"] = node.projectName;
+    root["project_system_prompt"] = node.systemPrompt;
+    root["project_summary"] = node.summary;
+    root["project_summary_llm"] = node.summaryLlm;
+    root["project_summary_dirty"] = node.summaryDirty;
+    root["updated_at"] = node.updatedAt.toUTC().toString(Qt::ISODate);
 
     QJsonObject filesObj;
-    for (auto it = node.files.constBegin(); it != node.files.constEnd(); ++it) {
-        const QString& localPath = it.key();
-        const FileContextData& data = it.value();
-        if (!data.summaryCreated &&
-            data.aiSummary.trimmed().isEmpty() &&
-            data.userPrompt.trimmed().isEmpty()) {
+    const QString prefix = node.subprojectRel.isEmpty() ? QString() : (node.subprojectRel + '/');
+    for (auto it = m_files.constBegin(); it != m_files.constEnd(); ++it) {
+        const FileContextData& fc = it.value();
+        if (fc.subprojectRelPath.compare(node.subprojectRel, Qt::CaseInsensitive) != 0) {
             continue;
         }
-        filesObj[localPath] = QJsonObject{
-            {"sha256", data.sha256},
-            {"llm_model", data.llmModel},
-            {"user_prompt", data.userPrompt},
-            {"ai_summary", data.aiSummary},
-            {"summary_created", data.summaryCreated},
-            {"updated_at", data.updatedAt.isValid()
-                               ? data.updatedAt.toString(Qt::ISODate)
-                               : QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}
-        };
+        // Не сохраняем совершенно пустые записи без саммари и без пользовательского промпта
+        if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && fc.userPrompt.trimmed().isEmpty()) {
+            continue;
+        }
+        QString localKey = fc.relativePath;
+        if (!prefix.isEmpty() && localKey.startsWith(prefix, Qt::CaseInsensitive)) {
+            localKey = localKey.mid(prefix.length());
+        }
+        QJsonObject fo;
+        fo["sha256"] = fc.sha256;
+        fo["llm_model"] = fc.llmModel;
+        fo["user_prompt"] = fc.userPrompt;
+        fo["ai_summary"] = fc.aiSummary;
+        fo["summary_created"] = fc.summaryCreated;
+        fo["updated_at"] = fc.updatedAt.toUTC().toString(Qt::ISODate);
+        filesObj[localKey] = fo;
     }
+    root["files"] = filesObj;
 
-    QJsonArray ignoredArr;
-    for (const QString& d : node.ignoredDirs) ignoredArr.append(d);
-
-    QJsonObject root{
-        {"project_name", QDir(node.rootPath).dirName()},
-        {"ignored_dirs", ignoredArr},
-        {"project_system_prompt", node.projectSystemPrompt},
-        {"project_summary", node.projectSummary},
-        {"project_summary_llm", node.projectSummaryLlm},
-        {"project_summary_dirty", node.projectSummaryDirty},
-        {"updated_at", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-        {"files", filesObj}
-    };
-
-    QSaveFile f(node.aideFilePath);
-    if (!f.open(QIODevice::WriteOnly)) return false;
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    return f.commit();
-}
-
-bool ProjectManager::openProjectFolder(const QString& folderPath) {
-    QDir dir(folderPath);
-    if (!dir.exists()) return false;
-
-    m_reconciling = true;
-    m_reconcileTimer.stop();
-
-    m_subprojects.clear();
-    m_rootNode = ProjectNode{};
-    m_rootNode.rootPath = QDir::cleanPath(dir.absolutePath());
-    m_rootNode.aideFilePath = defaultAideFilePathForDir(m_rootNode.rootPath);
-    m_rootNode.relPathFromRoot.clear();
-
-    if (QFile::exists(m_rootNode.aideFilePath)) {
-        loadNodeFromDisk(m_rootNode.aideFilePath, m_rootNode);
-    } else {
-        saveNodeToDisk(m_rootNode);
-    }
-
-    m_reconciling = false;
-    reconcileProjectStructure();
-
-    emit projectLoaded(m_rootNode.rootPath);
-    emit subprojectsChanged();
-    emit projectContextChanged();
-    return true;
-}
-
-bool ProjectManager::loadProjectFile(const QString& aideFilePath) {
-    QFileInfo fi(aideFilePath);
-    if (!fi.exists() || !fi.isFile()) return false;
-    return openProjectFolder(fi.absolutePath());
+    QSaveFile sf(node.aideFilePath);
+    if (!sf.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+    sf.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return sf.commit();
 }
 
 bool ProjectManager::saveProjectFile() {
     if (!hasOpenProject()) return false;
     m_reconciling = true;
-    bool ok = saveNodeToDisk(m_rootNode);
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
+    bool allOk = true;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
         if (!saveNodeToDisk(it.value())) {
-            ok = false;
+            allOk = false;
         }
     }
     m_reconciling = false;
-    return ok;
+    return allOk;
+}
+
+void ProjectManager::rebuildWatcherPaths() {
+    const QStringList oldDirs = m_fsWatcher->directories();
+    if (!oldDirs.isEmpty()) {
+        m_fsWatcher->removePaths(oldDirs);
+    }
+    if (!hasOpenProject()) return;
+
+    // Отслеживаем только корень проекта и папки подпроектов (.aide) (не более 60 путей),
+    // чтобы не создавать сотни системных потоков ReadDirectoryChangesW на проектах с 20 000 файлов
+    QStringList dirsToWatch;
+    dirsToWatch.append(m_rootPath);
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        if (dirsToWatch.size() >= 60) break;
+        QString absDir = projectDirPathForRel(it.key());
+        if (!absDir.isEmpty() && QDir(absDir).exists() && !dirsToWatch.contains(absDir)) {
+            dirsToWatch.append(absDir);
+        }
+    }
+    if (!dirsToWatch.isEmpty()) {
+        m_fsWatcher->addPaths(dirsToWatch);
+    }
+}
+
+bool ProjectManager::openProjectFolder(const QString& folderPath, const ProgressCallback& progressCb) {
+    QDir dir(folderPath);
+    if (!dir.exists()) return false;
+
+    const QString cleanRoot = QDir::cleanPath(dir.absolutePath());
+    const QString prevRoot = m_rootPath;
+    const auto prevNodes = m_nodes;
+    const auto prevFiles = m_files;
+
+    m_reconciling = true;
+    m_rootPath = cleanRoot;
+    m_nodes.clear();
+    m_files.clear();
+
+    const FastIgnoreMatcher matcher = FastIgnoreMatcher::fromConfig();
+    QMap<QString, QString> discoveredAideByRel;
+
+    QString rootAide = findExistingAideFileInDir(cleanRoot);
+    if (rootAide.isEmpty()) {
+        rootAide = defaultAideFilePathForDir(cleanRoot);
+    }
+    discoveredAideByRel.insert(QString(), rootAide);
+
+    int processedDirs = 0;
+    int foundFilesCount = 0;
+    bool cancelled = false;
+
+    // Быстрый обход дерева каталогов с пропуском игнорируемых папок и поддержкой отмены
+    auto scanSubprojects = [&](auto& self, const QString& absDirPath, const QString& relPrefix) -> void {
+        if (cancelled) return;
+        ++processedDirs;
+
+        if (progressCb && (processedDirs == 1 || (processedDirs % 16) == 0)) {
+            if (!progressCb(processedDirs, foundFilesCount, relPrefix.isEmpty() ? cleanRoot : relPrefix)) {
+                cancelled = true;
+                return;
+            }
+        }
+
+        QDir d(absDirPath);
+        const QFileInfoList entries = d.entryInfoList(
+            QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
+            QDir::NoSort);
+
+        QString foundAideInDir;
+        QFileInfoList subDirs;
+        subDirs.reserve(entries.size());
+
+        for (const QFileInfo& fi : entries) {
+            if (fi.isDir()) {
+                if (fi.isSymLink()) continue;
+                if (!matcher.isDirIgnored(fi.fileName())) {
+                    subDirs.append(fi);
+                }
+            } else {
+                const QString suffix = fi.suffix();
+                if (suffix.compare(QStringLiteral("aide"), Qt::CaseInsensitive) == 0) {
+                    if (foundAideInDir.isEmpty()) {
+                        foundAideInDir = fi.absoluteFilePath();
+                    }
+                } else {
+                    ++foundFilesCount;
+                }
+            }
+        }
+
+        if (!relPrefix.isEmpty() && !foundAideInDir.isEmpty()) {
+            discoveredAideByRel.insert(relPrefix, foundAideInDir);
+        }
+
+        for (const QFileInfo& subFi : subDirs) {
+            if (cancelled) return;
+            const QString childRel = relPrefix.isEmpty()
+                                         ? subFi.fileName()
+                                         : (relPrefix + '/' + subFi.fileName());
+            self(self, subFi.absoluteFilePath(), childRel);
+        }
+    };
+
+    scanSubprojects(scanSubprojects, cleanRoot, QString());
+
+    if (cancelled) {
+        m_rootPath = prevRoot;
+        m_nodes = prevNodes;
+        m_files = prevFiles;
+        m_reconciling = false;
+        return false;
+    }
+
+    QMap<QString, FileContextData> loadedFiles;
+    for (auto it = discoveredAideByRel.constBegin(); it != discoveredAideByRel.constEnd(); ++it) {
+        loadNodeFromDisk(it.key(), it.value(), loadedFiles);
+    }
+
+    // Проверяем существование только тех файлов, которые реально записаны в .aide
+    for (auto it = loadedFiles.begin(); it != loadedFiles.end(); ++it) {
+        const QString absFile = toAbsolutePath(it.key());
+        if (QFileInfo::exists(absFile)) {
+            m_files.insert(it.key(), it.value());
+        } else {
+            // Если проиндексированный файл был удалён вне редактора, помечаем родительский узел dirty
+            const QString owner = owningProjectRelPathForFile(it.key());
+            if (m_nodes.contains(owner)) {
+                m_nodes[owner].summaryDirty = true;
+            }
+        }
+    }
+
+    reassignAllFilesToNearestOwners();
+    saveProjectFile();
+    rebuildWatcherPaths();
+    m_reconciling = false;
+
+    emit projectLoaded(m_rootPath);
+    emit subprojectsChanged();
+    emit projectContextChanged();
+    return true;
+}
+
+void ProjectManager::reconcileProjectStructure(const ProgressCallback& progressCb, bool fullDiskScan) {
+    if (!hasOpenProject() || m_reconciling) return;
+    m_reconciling = true;
+
+    const FastIgnoreMatcher matcher = FastIgnoreMatcher::fromConfig();
+
+    // 1. Проверяем актуальность уже известных подпроектов (.aide)
+    bool subsModified = false;
+    for (auto it = m_nodes.begin(); it != m_nodes.end();) {
+        if (!it.key().isEmpty() && !QFileInfo::exists(it.value().aideFilePath)) {
+            it = m_nodes.erase(it);
+            subsModified = true;
+        } else {
+            ++it;
+        }
+    }
+
+    if (fullDiskScan) {
+        int processedDirs = 0;
+        int foundFiles = 0;
+        auto scanDirs = [&](auto& self, const QString& absDir, const QString& relPrefix) -> void {
+            ++processedDirs;
+            if (progressCb && (processedDirs % 20) == 0) {
+                if (!progressCb(processedDirs, foundFiles, relPrefix)) return;
+            }
+            if (!relPrefix.isEmpty()) {
+                const QString aide = findExistingAideFileInDir(absDir);
+                if (!aide.isEmpty() && !m_nodes.contains(relPrefix)) {
+                    loadNodeFromDisk(relPrefix, aide, m_files);
+                    subsModified = true;
+                }
+            }
+            QDir d(absDir);
+            const QFileInfoList subDirs = d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::NoSort);
+            for (const QFileInfo& sfi : subDirs) {
+                if (sfi.isSymLink() || matcher.isDirIgnored(sfi.fileName())) continue;
+                const QString childRel = relPrefix.isEmpty() ? sfi.fileName() : (relPrefix + '/' + sfi.fileName());
+                self(self, sfi.absoluteFilePath(), childRel);
+            }
+        };
+        scanDirs(scanDirs, m_rootPath, QString());
+    }
+
+    // 2. Проверяем существование проиндексированных файлов из m_files (быстро, O(число записей в .aide))
+    QStringList removedRels;
+    for (auto it = m_files.begin(); it != m_files.end();) {
+        const QString absPath = toAbsolutePath(it.key());
+        if (!QFileInfo::exists(absPath)) {
+            removedRels.append(it.key());
+            const QString owner = it.value().subprojectRelPath;
+            if (m_nodes.contains(owner)) {
+                m_nodes[owner].summaryDirty = true;
+            }
+            it = m_files.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (subsModified) {
+        reassignAllFilesToNearestOwners();
+        rebuildWatcherPaths();
+    }
+
+    if (subsModified || !removedRels.isEmpty()) {
+        saveProjectFile();
+    }
+
+    m_reconciling = false;
+
+    for (const QString& rel : removedRels) {
+        emit fileRemovedFromProject(rel, toAbsolutePath(rel));
+    }
+    if (subsModified) {
+        emit subprojectsChanged();
+    }
+    if (subsModified || !removedRels.isEmpty()) {
+        emit projectContextChanged();
+    }
 }
 
 void ProjectManager::closeProject() {
-    m_reconcileTimer.stop();
-    if (hasOpenProject()) {
-        saveProjectFile();
-    }
-    if (!m_fsWatcher.directories().isEmpty()) {
-        m_fsWatcher.removePaths(m_fsWatcher.directories());
-    }
-    if (!m_fsWatcher.files().isEmpty()) {
-        m_fsWatcher.removePaths(m_fsWatcher.files());
-    }
-    m_rootNode = ProjectNode{};
-    m_subprojects.clear();
+    if (!hasOpenProject()) return;
+    saveProjectFile();
+    const QStringList watched = m_fsWatcher->directories();
+    if (!watched.isEmpty()) m_fsWatcher->removePaths(watched);
+    m_rootPath.clear();
+    m_nodes.clear();
+    m_files.clear();
     emit projectClosed();
     emit subprojectsChanged();
     emit projectContextChanged();
 }
 
-void ProjectManager::rebuildFileWatchers() {
-    if (!m_fsWatcher.directories().isEmpty()) {
-        m_fsWatcher.removePaths(m_fsWatcher.directories());
-    }
-    if (!m_fsWatcher.files().isEmpty()) {
-        m_fsWatcher.removePaths(m_fsWatcher.files());
-    }
-    if (!hasOpenProject()) return;
-
-    QStringList dirsToWatch;
-    auto collectDirs = [&](auto& self, const QString& currentDir) -> void {
-        dirsToWatch.append(currentDir);
-        QDir dir(currentDir);
-        const QFileInfoList subDirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
-                                                        QDir::NoSort);
-        for (const QFileInfo& subFi : subDirs) {
-            if (isSkippedSystemDir(subFi.fileName())) continue;
-            self(self, subFi.absoluteFilePath());
-        }
-    };
-    collectDirs(collectDirs, m_rootNode.rootPath);
-
-    if (!dirsToWatch.isEmpty()) {
-        m_fsWatcher.addPaths(dirsToWatch);
-    }
-}
-
-void ProjectManager::reconcileProjectStructure() {
-    if (!hasOpenProject() || m_reconciling) return;
-    m_reconciling = true;
-
-    QSet<QString> dirtyNodesToSave;
-    bool subprojectsListChanged = false;
-
-    // 1. Рекурсивно обходим структуру папок: находим все вложенные .aide файлы и существующие на диске файлы
-    QMap<QString, QString> discoveredSubprojectAideFiles; // key: relPathFromRoot -> aideFilePath
-    QSet<QString> existingDiskFilesAbs;                   // канонические/абсолютные пути существующих файлов
-
-    auto scanTree = [&](auto& self, const QString& currentDirPath) -> void {
-        QDir dir(currentDirPath);
-        if (!dir.exists()) return;
-
-        const QString cleanDir = QDir::cleanPath(dir.absolutePath());
-        if (cleanDir.compare(m_rootNode.rootPath, Qt::CaseInsensitive) != 0) {
-            const QStringList aideList = dir.entryList({"*.aide"}, QDir::Files, QDir::Name);
-            if (!aideList.isEmpty()) {
-                const QString subRel = toRelativePath(cleanDir);
-                if (!subRel.isEmpty() && !subRel.startsWith("..")) {
-                    discoveredSubprojectAideFiles.insert(subRel, QDir::cleanPath(dir.filePath(aideList.first())));
-                }
-            }
-        }
-
-        const QFileInfoList files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden, QDir::NoSort);
-        for (const QFileInfo& fFi : files) {
-            if (fFi.suffix().compare("aide", Qt::CaseInsensitive) == 0) continue;
-            existingDiskFilesAbs.insert(QDir::cleanPath(fFi.absoluteFilePath()));
-        }
-
-        const QFileInfoList subDirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::NoSort);
-        for (const QFileInfo& subFi : subDirs) {
-            if (isSkippedSystemDir(subFi.fileName())) continue;
-            self(self, subFi.absoluteFilePath());
-        }
-    };
-    scanTree(scanTree, m_rootNode.rootPath);
-
-    // 2. Обрабатываем удалённые подпроекты (если .aide файл подпроекта был удалён с диска,
-    //    переносим его саммари на уровень выше перед удалением узла из памяти)
-    const QStringList previousSubKeys = m_subprojects.keys();
-    for (const QString& oldSubKey : previousSubKeys) {
-        if (!discoveredSubprojectAideFiles.contains(oldSubKey)) {
-            ProjectNode removedNode = m_subprojects.take(oldSubKey);
-            subprojectsListChanged = true;
-
-            const QString parentKey = findParentNodeKey(oldSubKey);
-            ProjectNode* parentNode = nodeForKey(parentKey);
-            if (parentNode) {
-                for (auto it = removedNode.files.constBegin(); it != removedNode.files.constEnd(); ++it) {
-                    const QString absFile = QDir::cleanPath(QDir(removedNode.rootPath).filePath(it.key()));
-                    QString newLocalRel = QDir(parentNode->rootPath).relativeFilePath(absFile);
-                    newLocalRel.replace('\\', '/');
-                    if (newLocalRel.isEmpty() || newLocalRel.startsWith("..")) continue;
-
-                    FileContextData movedFc = it.value();
-                    movedFc.localRelativePath = newLocalRel;
-                    movedFc.subprojectRelPath = parentNode->relPathFromRoot;
-                    movedFc.relativePath = toRelativePath(absFile);
-
-                    if (!parentNode->files.contains(newLocalRel) ||
-                        (parentNode->files[newLocalRel].aiSummary.trimmed().isEmpty() && !movedFc.aiSummary.trimmed().isEmpty())) {
-                        parentNode->files.insert(newLocalRel, movedFc);
-                    }
-                }
-                parentNode->projectSummaryDirty = true;
-                dirtyNodesToSave.insert(parentKey);
-            }
-        }
-    }
-
-    // 3. Подгружаем новые вложенные подпроекты (.aide)
-    for (auto it = discoveredSubprojectAideFiles.constBegin(); it != discoveredSubprojectAideFiles.constEnd(); ++it) {
-        const QString& subRel = it.key();
-        const QString& aidePath = it.value();
-        if (!m_subprojects.contains(subRel)) {
-            ProjectNode subNode;
-            subNode.relPathFromRoot = subRel;
-            subNode.rootPath = QFileInfo(aidePath).absolutePath();
-            subNode.aideFilePath = aidePath;
-            if (loadNodeFromDisk(aidePath, subNode)) {
-                m_subprojects.insert(subRel, subNode);
-                subprojectsListChanged = true;
-            }
-        }
-    }
-
-    // 4. Миграция саммари между уровнями подпроектов:
-    //    Каждый файл должен храниться в самом глубоком родительском .aide (ближайшем подпроекте)
-    struct CollectedFileEntry {
-        QString sourceNodeKey;
-        QString sourceLocalRel;
-        QString absPath;
-        FileContextData data;
-    };
-    QVector<CollectedFileEntry> allEntries;
-
-    auto collectFromNode = [&](const QString& nodeKey, const ProjectNode& node) {
-        for (auto it = node.files.constBegin(); it != node.files.constEnd(); ++it) {
-            const QString absP = QDir::cleanPath(QDir(node.rootPath).filePath(it.key()));
-            allEntries.append({nodeKey, it.key(), absP, it.value()});
-        }
-    };
-    collectFromNode(QString(), m_rootNode);
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-        collectFromNode(it.key(), it.value());
-    }
-
-    auto shouldReplaceEntry = [](const FileContextData& existing, const FileContextData& incoming, const QString& absPath) -> bool {
-        const bool existingHasSum = existing.summaryCreated || !existing.aiSummary.trimmed().isEmpty();
-        const bool incomingHasSum = incoming.summaryCreated || !incoming.aiSummary.trimmed().isEmpty();
-        if (!existingHasSum && incomingHasSum) return true;
-        if (existingHasSum && !incomingHasSum) return false;
-
-        QFile f(absPath);
-        if (f.open(QIODevice::ReadOnly)) {
-            const QString diskSha = computeSha256(f.readAll());
-            const bool existingMatchesDisk = (!existing.sha256.isEmpty() && existing.sha256 == diskSha);
-            const bool incomingMatchesDisk = (!incoming.sha256.isEmpty() && incoming.sha256 == diskSha);
-            if (!existingMatchesDisk && incomingMatchesDisk) return true;
-            if (existingMatchesDisk && !incomingMatchesDisk) return false;
-        }
-        return incoming.updatedAt > existing.updatedAt;
-    };
-
-    for (const CollectedFileEntry& item : allEntries) {
-        const QString targetNodeKey = findOwningNodeKeyForAbsPath(item.absPath);
-        if (targetNodeKey == item.sourceNodeKey) continue;
-
-        ProjectNode* srcNode = nodeForKey(item.sourceNodeKey);
-        ProjectNode* dstNode = nodeForKey(targetNodeKey);
-        if (!srcNode || !dstNode) continue;
-
-        QString dstLocalRel = QDir(dstNode->rootPath).relativeFilePath(item.absPath);
-        dstLocalRel.replace('\\', '/');
-        while (dstLocalRel.startsWith("./")) dstLocalRel.remove(0, 2);
-
-        if (dstLocalRel.isEmpty() || dstLocalRel.startsWith("..")) continue;
-
-        FileContextData migrated = item.data;
-        migrated.localRelativePath = dstLocalRel;
-        migrated.subprojectRelPath = targetNodeKey;
-        migrated.relativePath = toRelativePath(item.absPath);
-
-        if (!dstNode->files.contains(dstLocalRel) ||
-            shouldReplaceEntry(dstNode->files.value(dstLocalRel), migrated, item.absPath)) {
-            dstNode->files.insert(dstLocalRel, migrated);
-        }
-        srcNode->files.remove(item.sourceLocalRel);
-
-        srcNode->projectSummaryDirty = true;
-        dstNode->projectSummaryDirty = true;
-        dirtyNodesToSave.insert(item.sourceNodeKey);
-        dirtyNodesToSave.insert(targetNodeKey);
-    }
-
-    // 5. Проверка удалённых и переименованных/перемещённых файлов
-    struct OrphanFileEntry {
-        QString sourceNodeKey;
-        QString absPath;
-        QString rootRelPath;
-        QString fileName;
-        FileContextData data;
-    };
-    QVector<OrphanFileEntry> orphans;
-
-    auto extractOrphansFromNode = [&](const QString& nodeKey, ProjectNode& node) {
-        const QStringList localKeys = node.files.keys();
-        for (const QString& localKey : localKeys) {
-            const QString absP = QDir::cleanPath(QDir(node.rootPath).filePath(localKey));
-            if (!existingDiskFilesAbs.contains(absP) && !QFileInfo::exists(absP)) {
-                FileContextData taken = node.files.take(localKey);
-                orphans.append({
-                    nodeKey,
-                    absP,
-                    toRelativePath(absP),
-                    QFileInfo(absP).fileName(),
-                    taken
-                });
-                node.projectSummaryDirty = true;
-                dirtyNodesToSave.insert(nodeKey);
-            } else {
-                // Нормализуем пути в существующей записи
-                FileContextData& fc = node.files[localKey];
-                fc.localRelativePath = localKey;
-                fc.subprojectRelPath = nodeKey;
-                fc.relativePath = toRelativePath(absP);
-            }
-        }
-    };
-
-    extractOrphansFromNode(QString(), m_rootNode);
-    for (auto it = m_subprojects.begin(); it != m_subprojects.end(); ++it) {
-        extractOrphansFromNode(it.key(), it.value());
-    }
-
-    QVector<QPair<QString, QString>> removedFilesToNotify; // (rootRelPath, absPath)
-    QVector<std::tuple<QString, QString, QString>> renamedFilesToNotify; // (oldRootRel, newRootRel, newAbs)
-
-    if (!orphans.isEmpty()) {
-        // Ищем неиндексированные файлы на диске, чтобы определить переименование/перемещение по SHA-256
-        QMap<QString, QStringList> unindexedDiskFilesBySha;
-        for (const QString& diskAbs : existingDiskFilesAbs) {
-            const QString ownerKey = findOwningNodeKeyForAbsPath(diskAbs);
-            const ProjectNode* ownerNode = nodeForKey(ownerKey);
-            if (!ownerNode) continue;
-
-            QString localRel = QDir(ownerNode->rootPath).relativeFilePath(diskAbs);
-            localRel.replace('\\', '/');
-            if (ownerNode->files.contains(localRel)) {
-                const auto& existingFc = ownerNode->files[localRel];
-                if (existingFc.summaryCreated || !existingFc.aiSummary.trimmed().isEmpty()) {
-                    continue;
-                }
-            }
-
-            QFileInfo fi(diskAbs);
-            if (fi.size() <= 0 || fi.size() > 10 * 1024 * 1024) continue;
-
-            QFile f(diskAbs);
-            if (f.open(QIODevice::ReadOnly)) {
-                const QString sha = computeSha256(f.readAll());
-                if (!sha.isEmpty()) {
-                    unindexedDiskFilesBySha[sha].append(diskAbs);
-                }
-            }
-        }
-
-        for (const OrphanFileEntry& orphan : orphans) {
-            QString matchedNewAbs;
-            if (!orphan.data.sha256.isEmpty() && unindexedDiskFilesBySha.contains(orphan.data.sha256)) {
-                QStringList& candidates = unindexedDiskFilesBySha[orphan.data.sha256];
-                if (!candidates.isEmpty()) {
-                    // При совпадении хэшей отдаём приоритет файлу с тем же именем (перемещение в другую папку)
-                    int bestIdx = 0;
-                    for (int i = 0; i < candidates.size(); ++i) {
-                        if (QFileInfo(candidates[i]).fileName().compare(orphan.fileName, Qt::CaseInsensitive) == 0) {
-                            bestIdx = i;
-                            break;
-                        }
-                    }
-                    matchedNewAbs = candidates.takeAt(bestIdx);
-                }
-            }
-
-            if (!matchedNewAbs.isEmpty()) {
-                // Файл был переименован или перемещён — переносим его саммари и промпт на новое место
-                const QString newOwnerKey = findOwningNodeKeyForAbsPath(matchedNewAbs);
-                if (ProjectNode* newOwnerNode = nodeForKey(newOwnerKey)) {
-                    QString newLocalRel = QDir(newOwnerNode->rootPath).relativeFilePath(matchedNewAbs);
-                    newLocalRel.replace('\\', '/');
-
-                    FileContextData transferred = orphan.data;
-                    transferred.localRelativePath = newLocalRel;
-                    transferred.subprojectRelPath = newOwnerKey;
-                    transferred.relativePath = toRelativePath(matchedNewAbs);
-                    transferred.isSummaryPending = false;
-
-                    newOwnerNode->files.insert(newLocalRel, transferred);
-                    markNodeAndAncestorsDirty(newOwnerKey);
-                    dirtyNodesToSave.insert(newOwnerKey);
-
-                    renamedFilesToNotify.append({orphan.rootRelPath, transferred.relativePath, matchedNewAbs});
-                }
-            } else {
-                // Файл был удалён — его саммари удалено из проекта
-                markNodeAndAncestorsDirty(orphan.sourceNodeKey);
-                removedFilesToNotify.append({orphan.rootRelPath, orphan.absPath});
-            }
-        }
-    }
-
-    // Протягиваем флаг projectSummaryDirty вверх от грязных подпроектов к родительским проектам
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-        if (it.value().projectSummaryDirty) {
-            markNodeAndAncestorsDirty(it.key());
-        }
-    }
-
-    // Сохраняем все изменённые .aide файлы
-    for (const QString& key : dirtyNodesToSave) {
-        if (const ProjectNode* n = nodeForKey(key)) {
-            saveNodeToDisk(*n);
-        }
-    }
-    if (dirtyNodesToSave.contains(QString()) || m_rootNode.projectSummaryDirty) {
-        saveNodeToDisk(m_rootNode);
-    }
-
-    rebuildFileWatchers();
-    m_reconciling = false;
-
-    for (const auto& [oldRel, newRel, newAbs] : renamedFilesToNotify) {
-        emit fileRenamedInProject(oldRel, newRel, newAbs);
-        emit fileContextChanged(newRel);
-    }
-    for (const auto& [remRel, remAbs] : removedFilesToNotify) {
-        emit fileRemovedFromProject(remRel, remAbs);
-        emit fileContextChanged(remRel);
-    }
-    if (subprojectsListChanged) {
-        emit subprojectsChanged();
-    }
-    if (!dirtyNodesToSave.isEmpty() || subprojectsListChanged) {
-        emit projectContextChanged();
-    }
-}
-
-bool ProjectManager::isSubprojectDir(const QString& dirPath) const {
-    if (!hasOpenProject() || dirPath.isEmpty()) return false;
-    const QString key = normalizeNodeKey(dirPath);
-    if (key.isEmpty()) return false;
-    return m_subprojects.contains(key);
-}
-
-QStringList ProjectManager::subprojectRelPaths() const {
-    QStringList keys = m_subprojects.keys();
-    std::sort(keys.begin(), keys.end(), [](const QString& a, const QString& b) {
-        return a.compare(b, Qt::CaseInsensitive) < 0;
-    });
-    return keys;
-}
-
-QStringList ProjectManager::directChildSubprojects(const QString& parentProjectDirOrRel) const {
-    const QString parentKey = normalizeNodeKey(parentProjectDirOrRel);
-    QStringList directChildren;
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-        if (findParentNodeKey(it.key()) == parentKey) {
-            directChildren.append(it.key());
-        }
-    }
-    std::sort(directChildren.begin(), directChildren.end(), [](const QString& a, const QString& b) {
-        return a.compare(b, Qt::CaseInsensitive) < 0;
-    });
-    return directChildren;
-}
-
-QStringList ProjectManager::dirtyProjectRelPathsBottomUp() const {
-    if (!hasOpenProject()) return {};
-    QStringList dirtyList;
-    for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-        if (it.value().projectSummaryDirty) {
-            dirtyList.append(it.key());
-        }
-    }
-    // Сортируем от самых глубоких вложенных подпроектов к верхним уровням
-    std::sort(dirtyList.begin(), dirtyList.end(), [](const QString& a, const QString& b) {
-        const int depthA = a.count('/');
-        const int depthB = b.count('/');
-        if (depthA != depthB) return depthA > depthB;
-        return a.length() > b.length();
-    });
-    if (m_rootNode.projectSummaryDirty) {
-        dirtyList.append(QStringLiteral(""));
-    }
-    return dirtyList;
-}
-
-QString ProjectManager::owningProjectRelPathForFile(const QString& filePath) const {
-    if (!hasOpenProject() || filePath.isEmpty()) return {};
-    return findOwningNodeKeyForAbsPath(toAbsolutePath(filePath));
-}
-
-QString ProjectManager::owningProjectDirPathForFile(const QString& filePath) const {
-    if (!hasOpenProject()) return {};
-    const QString key = owningProjectRelPathForFile(filePath);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->rootPath : m_rootNode.rootPath;
-}
-
-QString ProjectManager::projectDirPathForRel(const QString& projectDirOrRel) const {
-    if (!hasOpenProject()) return {};
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->rootPath : m_rootNode.rootPath;
-}
-
 bool ProjectManager::createSubproject(const QString& dirPath) {
-    if (!hasOpenProject() || dirPath.isEmpty()) return false;
-    QFileInfo fi(dirPath);
-    if (!fi.exists() || !fi.isDir()) return false;
+    if (!hasOpenProject()) return false;
+    const QString absDir = projectDirPathForRel(dirPath);
+    if (absDir.isEmpty() || !QDir(absDir).exists()) return false;
+    const QString subRel = toRelativePath(absDir);
+    if (subRel.isEmpty() || subRel.startsWith("..")) return false;
+    if (m_nodes.contains(subRel)) return true;
 
-    const QString subKey = normalizeNodeKey(fi.absoluteFilePath());
-    if (subKey.isEmpty() || m_subprojects.contains(subKey)) return false;
+    ProjectNodeData node;
+    node.subprojectRel = subRel;
+    node.aideFilePath = findExistingAideFileInDir(absDir);
+    if (node.aideFilePath.isEmpty()) {
+        node.aideFilePath = defaultAideFilePathForDir(absDir);
+    }
+    node.projectName = QDir(absDir).dirName();
+    node.summaryDirty = true;
+    node.updatedAt = QDateTime::currentDateTimeUtc();
+    m_nodes.insert(subRel, node);
 
-    m_reconciling = true;
-    ProjectNode newNode;
-    newNode.rootPath = QDir::cleanPath(fi.absoluteFilePath());
-    newNode.aideFilePath = defaultAideFilePathForDir(newNode.rootPath);
-    newNode.relPathFromRoot = subKey;
-    newNode.projectSummaryDirty = true;
-
-    if (QFile::exists(newNode.aideFilePath)) {
-        loadNodeFromDisk(newNode.aideFilePath, newNode);
-    } else if (!saveNodeToDisk(newNode)) {
-        m_reconciling = false;
-        return false;
+    const QString parentRel = parentSubprojectRel(subRel);
+    if (m_nodes.contains(parentRel)) {
+        m_nodes[parentRel].summaryDirty = true;
     }
 
-    m_subprojects.insert(subKey, newNode);
-    markNodeAndAncestorsDirty(subKey);
-    m_reconciling = false;
-
-    // reconcileProjectStructure() автоматически перенесёт саммари файлов этой папки из родительского .aide в новый подпроект
-    reconcileProjectStructure();
+    reassignAllFilesToNearestOwners();
     saveProjectFile();
+    rebuildWatcherPaths();
 
     emit subprojectsChanged();
     emit projectContextChanged();
@@ -760,491 +732,478 @@ bool ProjectManager::createSubproject(const QString& dirPath) {
 }
 
 bool ProjectManager::removeSubproject(const QString& dirPath) {
-    if (!hasOpenProject() || dirPath.isEmpty()) return false;
-    const QString subKey = normalizeNodeKey(dirPath);
-    if (subKey.isEmpty() || !m_subprojects.contains(subKey)) return false;
+    if (!hasOpenProject()) return false;
+    const QString subRel = normalizeScopeRel(dirPath);
+    if (subRel.isEmpty() || !m_nodes.contains(subRel)) return false;
 
-    m_reconciling = true;
-    ProjectNode removedNode = m_subprojects.take(subKey);
-    const QString parentKey = findParentNodeKey(subKey);
-    ProjectNode* parentNode = nodeForKey(parentKey);
+    const QString aidePath = m_nodes.value(subRel).aideFilePath;
+    const QString parentRel = parentSubprojectRel(subRel);
 
-    // Переносим все саммари файлов из удаляемого подпроекта в родительский проект (.aide)
-    if (parentNode) {
-        for (auto it = removedNode.files.constBegin(); it != removedNode.files.constEnd(); ++it) {
-            const QString absFile = QDir::cleanPath(QDir(removedNode.rootPath).filePath(it.key()));
-            QString newLocalRel = QDir(parentNode->rootPath).relativeFilePath(absFile);
-            newLocalRel.replace('\\', '/');
-            if (newLocalRel.isEmpty() || newLocalRel.startsWith("..")) continue;
-
-            FileContextData movedFc = it.value();
-            movedFc.localRelativePath = newLocalRel;
-            movedFc.subprojectRelPath = parentNode->relPathFromRoot;
-            movedFc.relativePath = toRelativePath(absFile);
-
-            parentNode->files.insert(newLocalRel, movedFc);
-        }
-        markNodeAndAncestorsDirty(parentKey);
-        saveNodeToDisk(*parentNode);
+    m_nodes.remove(subRel);
+    if (!aidePath.isEmpty() && QFile::exists(aidePath)) {
+        QFile::remove(aidePath);
     }
 
-    // Удаляем ТОЛЬКО .aide файлы в папке подпроекта, саму папку и файлы исходников не трогаем
-    QDir subDir(removedNode.rootPath);
-    for (const QString& aideFile : subDir.entryList({"*.aide"}, QDir::Files)) {
-        QFile::remove(subDir.filePath(aideFile));
+    if (m_nodes.contains(parentRel)) {
+        m_nodes[parentRel].summaryDirty = true;
     }
 
+    reassignAllFilesToNearestOwners();
     saveProjectFile();
-    m_reconciling = false;
+    rebuildWatcherPaths();
 
     emit subprojectsChanged();
     emit projectContextChanged();
     return true;
 }
 
-bool ProjectManager::renameProjectFile(const QString& oldFilePath, const QString& newFilePath) {
-    if (oldFilePath.isEmpty() || newFilePath.isEmpty()) return false;
-    const QString oldAbs = toAbsolutePath(oldFilePath);
-    const QString newAbs = toAbsolutePath(newFilePath);
-    if (oldAbs == newAbs) return true;
-
-    m_reconciling = true;
-    const QString oldOwnerKey = findOwningNodeKeyForAbsPath(oldAbs);
-    ProjectNode* oldOwner = nodeForKey(oldOwnerKey);
-    FileContextData savedData;
-    bool hadContext = false;
-
-    if (oldOwner) {
-        QString oldLocalRel = QDir(oldOwner->rootPath).relativeFilePath(oldAbs);
-        oldLocalRel.replace('\\', '/');
-        if (oldOwner->files.contains(oldLocalRel)) {
-            savedData = oldOwner->files.value(oldLocalRel);
-            hadContext = true;
-        }
-    }
-
-    if (!QFile::rename(oldAbs, newAbs)) {
-        m_reconciling = false;
-        return false;
-    }
-
-    if (oldOwner && hadContext) {
-        QString oldLocalRel = QDir(oldOwner->rootPath).relativeFilePath(oldAbs);
-        oldLocalRel.replace('\\', '/');
-        oldOwner->files.remove(oldLocalRel);
-        markNodeAndAncestorsDirty(oldOwnerKey);
-        saveNodeToDisk(*oldOwner);
-    }
-
-    const QString newOwnerKey = findOwningNodeKeyForAbsPath(newAbs);
-    ProjectNode* newOwner = nodeForKey(newOwnerKey);
-    if (newOwner && hadContext) {
-        QString newLocalRel = QDir(newOwner->rootPath).relativeFilePath(newAbs);
-        newLocalRel.replace('\\', '/');
-
-        savedData.localRelativePath = newLocalRel;
-        savedData.subprojectRelPath = newOwnerKey;
-        savedData.relativePath = toRelativePath(newAbs);
-        newOwner->files.insert(newLocalRel, savedData);
-        markNodeAndAncestorsDirty(newOwnerKey);
-        saveNodeToDisk(*newOwner);
-    }
-
-    m_reconciling = false;
-
-    const QString oldRootRel = toRelativePath(oldAbs);
-    const QString newRootRel = toRelativePath(newAbs);
-    emit fileRenamedInProject(oldRootRel, newRootRel, newAbs);
-    emit fileContextChanged(newRootRel);
-    emit projectContextChanged();
-    return true;
+QString ProjectManager::projectSystemPrompt(const QString& subprojectRel) const {
+    const QString norm = normalizeScopeRel(subprojectRel);
+    return m_nodes.value(norm).systemPrompt;
 }
 
-bool ProjectManager::deleteProjectFile(const QString& filePath) {
-    if (filePath.isEmpty()) return false;
-    const QString absPath = toAbsolutePath(filePath);
-    const QString rootRel = toRelativePath(absPath);
-
-    m_reconciling = true;
-    if (QFileInfo::exists(absPath) && !QFile::remove(absPath)) {
-        m_reconciling = false;
-        return false;
-    }
-
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    if (ProjectNode* owner = nodeForKey(ownerKey)) {
-        QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-        localRel.replace('\\', '/');
-        if (owner->files.remove(localRel) > 0) {
-            markNodeAndAncestorsDirty(ownerKey);
-            saveNodeToDisk(*owner);
-        }
-    }
-    saveNodeToDisk(m_rootNode);
-    m_reconciling = false;
-
-    emit fileRemovedFromProject(rootRel, absPath);
-    emit fileContextChanged(rootRel);
-    emit projectContextChanged();
-    return true;
-}
-
-QString ProjectManager::projectSystemPrompt(const QString& projectDirOrRel) const {
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->projectSystemPrompt : QString();
-}
-
-void ProjectManager::setProjectSystemPrompt(const QString& prompt, const QString& projectDirOrRel) {
+void ProjectManager::setProjectSystemPrompt(const QString& prompt, const QString& subprojectRel) {
     if (!hasOpenProject()) return;
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    ProjectNode* n = nodeForKey(key);
-    if (!n || n->projectSystemPrompt == prompt) return;
-    n->projectSystemPrompt = prompt;
-    m_reconciling = true;
-    saveNodeToDisk(*n);
-    m_reconciling = false;
+    const QString norm = normalizeScopeRel(subprojectRel);
+    if (!m_nodes.contains(norm)) return;
+    if (m_nodes[norm].systemPrompt == prompt) return;
+    m_nodes[norm].systemPrompt = prompt;
+    m_nodes[norm].updatedAt = QDateTime::currentDateTimeUtc();
     emit projectContextChanged();
 }
 
-QString ProjectManager::projectSummary(const QString& projectDirOrRel) const {
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->projectSummary : QString();
+QString ProjectManager::projectSummary(const QString& subprojectRel) const {
+    const QString norm = normalizeScopeRel(subprojectRel);
+    return m_nodes.value(norm).summary;
 }
 
-QString ProjectManager::projectSummaryLlm(const QString& projectDirOrRel) const {
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->projectSummaryLlm : QString();
+QString ProjectManager::projectSummaryLlm(const QString& subprojectRel) const {
+    const QString norm = normalizeScopeRel(subprojectRel);
+    return m_nodes.value(norm).summaryLlm;
 }
 
-void ProjectManager::setProjectSummary(const QString& summary,
-                                       const QString& llmModel,
-                                       const QString& projectDirOrRel) {
+void ProjectManager::setProjectSummary(const QString& summary, const QString& llmModel, const QString& subprojectRel) {
     if (!hasOpenProject()) return;
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    ProjectNode* n = nodeForKey(key);
-    if (!n) return;
+    const QString norm = normalizeScopeRel(subprojectRel);
+    if (!m_nodes.contains(norm)) return;
 
-    n->projectSummary = summary;
+    ProjectNodeData& node = m_nodes[norm];
+    node.summary = summary;
     if (!llmModel.isEmpty()) {
-        n->projectSummaryLlm = llmModel;
+        node.summaryLlm = llmModel;
     }
-    n->projectSummaryDirty = false;
+    node.summaryDirty = false;
+    node.updatedAt = QDateTime::currentDateTimeUtc();
 
-    // Обновление саммари вложенного подпроекта делает неактуальным саммари родительского проекта
-    if (!key.isEmpty()) {
-        const QString parentKey = findParentNodeKey(key);
-        markNodeAndAncestorsDirty(parentKey);
-    }
-
-    m_reconciling = true;
-    saveProjectFile();
-    m_reconciling = false;
-    emit projectContextChanged();
-}
-
-bool ProjectManager::isProjectSummaryDirty(const QString& projectDirOrRel) const {
-    if (!hasOpenProject()) return false;
-    if (projectDirOrRel.trimmed().isEmpty()) {
-        if (m_rootNode.projectSummaryDirty) return true;
-        for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-            if (it.value().projectSummaryDirty) return true;
-        }
-        return false;
-    }
-    const QString key = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* n = nodeForKey(key);
-    return n ? n->projectSummaryDirty : false;
-}
-
-FileContextData ProjectManager::fileContext(const QString& absoluteOrRelPath) const {
-    const QString absPath = toAbsolutePath(absoluteOrRelPath);
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    const ProjectNode* owner = nodeForKey(ownerKey);
-
-    if (owner && !owner->rootPath.isEmpty()) {
-        QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-        localRel.replace('\\', '/');
-        while (localRel.startsWith("./")) localRel.remove(0, 2);
-
-        if (owner->files.contains(localRel)) {
-            FileContextData fc = owner->files.value(localRel);
-            fc.relativePath = rootRel;
-            fc.localRelativePath = localRel;
-            fc.subprojectRelPath = ownerKey;
-            return fc;
-        }
-        FileContextData emptyFc;
-        emptyFc.relativePath = rootRel;
-        emptyFc.localRelativePath = localRel;
-        emptyFc.subprojectRelPath = ownerKey;
-        return emptyFc;
-    }
-
-    FileContextData fallback;
-    fallback.relativePath = rootRel;
-    fallback.localRelativePath = rootRel;
-    return fallback;
-}
-
-void ProjectManager::updateFileUserPrompt(const QString& filePath, const QString& prompt) {
-    if (!hasOpenProject() || filePath.isEmpty()) return;
-    const QString absPath = toAbsolutePath(filePath);
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    ProjectNode* owner = nodeForKey(ownerKey);
-    if (!owner) return;
-
-    QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-    localRel.replace('\\', '/');
-
-    auto& entry = owner->files[localRel];
-    entry.relativePath = rootRel;
-    entry.localRelativePath = localRel;
-    entry.subprojectRelPath = ownerKey;
-    if (entry.userPrompt == prompt) return;
-    entry.userPrompt = prompt;
-
-    m_reconciling = true;
-    saveNodeToDisk(*owner);
-    m_reconciling = false;
-    emit fileContextChanged(rootRel);
-}
-
-void ProjectManager::updateFileSummary(const QString& filePath,
-                                       const QString& sha256,
-                                       const QString& llmModel,
-                                       const QString& summary) {
-    if (!hasOpenProject() || filePath.isEmpty()) return;
-    const QString absPath = toAbsolutePath(filePath);
-    // Если файл был удалён пока считалось его саммари — не записываем мёртвую запись в .aide
-    if (!QFileInfo::exists(absPath)) {
-        removeFileSummary(filePath);
-        return;
-    }
-
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    ProjectNode* owner = nodeForKey(ownerKey);
-    if (!owner) return;
-
-    QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-    localRel.replace('\\', '/');
-
-    auto& entry = owner->files[localRel];
-    entry.relativePath = rootRel;
-    entry.localRelativePath = localRel;
-    entry.subprojectRelPath = ownerKey;
-    entry.sha256 = sha256;
-    entry.llmModel = llmModel;
-    entry.aiSummary = summary;
-    entry.summaryCreated = true;
-    entry.updatedAt = QDateTime::currentDateTimeUtc();
-    entry.isSummaryPending = false;
-    entry.pendingSha256.clear();
-    entry.pendingLlmModel.clear();
-
-    markNodeAndAncestorsDirty(ownerKey);
-
-    m_reconciling = true;
-    saveProjectFile();
-    m_reconciling = false;
-
-    emit fileContextChanged(rootRel);
-    emit projectContextChanged();
-}
-
-void ProjectManager::clearFileSummary(const QString& filePath, const QString& sha256) {
-    if (!hasOpenProject() || filePath.isEmpty()) return;
-    const QString absPath = toAbsolutePath(filePath);
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    ProjectNode* owner = nodeForKey(ownerKey);
-    if (!owner) return;
-
-    QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-    localRel.replace('\\', '/');
-
-    auto& entry = owner->files[localRel];
-    entry.relativePath = rootRel;
-    entry.localRelativePath = localRel;
-    entry.subprojectRelPath = ownerKey;
-    if (!sha256.isEmpty()) entry.sha256 = sha256;
-    entry.aiSummary.clear();
-    entry.llmModel.clear();
-    entry.summaryCreated = true;
-    entry.updatedAt = QDateTime::currentDateTimeUtc();
-    entry.isSummaryPending = false;
-    entry.pendingSha256.clear();
-    entry.pendingLlmModel.clear();
-
-    markNodeAndAncestorsDirty(ownerKey);
-
-    m_reconciling = true;
-    saveProjectFile();
-    m_reconciling = false;
-
-    emit fileContextChanged(rootRel);
-    emit projectContextChanged();
-}
-
-void ProjectManager::removeFileSummary(const QString& filePath) {
-    if (!hasOpenProject() || filePath.isEmpty()) return;
-    const QString absPath = toAbsolutePath(filePath);
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    ProjectNode* owner = nodeForKey(ownerKey);
-    if (!owner) return;
-
-    QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-    localRel.replace('\\', '/');
-    if (!owner->files.contains(localRel)) return;
-
-    auto& entry = owner->files[localRel];
-    if (entry.userPrompt.trimmed().isEmpty()) {
-        owner->files.remove(localRel);
-    } else {
-        entry.sha256.clear();
-        entry.llmModel.clear();
-        entry.aiSummary.clear();
-        entry.summaryCreated = false;
-        entry.isSummaryPending = false;
-        entry.pendingSha256.clear();
-        entry.pendingLlmModel.clear();
-    }
-
-    markNodeAndAncestorsDirty(ownerKey);
-
-    m_reconciling = true;
-    saveProjectFile();
-    m_reconciling = false;
-
-    emit fileContextChanged(rootRel);
-    emit projectContextChanged();
-}
-
-void ProjectManager::setFileSummaryPending(const QString& filePath,
-                                           bool pending,
-                                           const QString& pendingSha256,
-                                           const QString& pendingLlmModel) {
-    if (!hasOpenProject() || filePath.isEmpty()) return;
-    const QString absPath = toAbsolutePath(filePath);
-    const QString rootRel = toRelativePath(absPath);
-    const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-    ProjectNode* owner = nodeForKey(ownerKey);
-    if (!owner) return;
-
-    QString localRel = QDir(owner->rootPath).relativeFilePath(absPath);
-    localRel.replace('\\', '/');
-
-    if (!pending && !owner->files.contains(localRel)) {
-        return;
-    }
-
-    auto& entry = owner->files[localRel];
-    entry.relativePath = rootRel;
-    entry.localRelativePath = localRel;
-    entry.subprojectRelPath = ownerKey;
-    entry.isSummaryPending = pending;
-    if (pending) {
-        entry.pendingSha256 = pendingSha256;
-        entry.pendingLlmModel = pendingLlmModel;
-    } else {
-        entry.pendingSha256.clear();
-        entry.pendingLlmModel.clear();
-        if (!entry.summaryCreated && entry.aiSummary.trimmed().isEmpty() && entry.userPrompt.trimmed().isEmpty()) {
-            owner->files.remove(localRel);
+    // Обновление саммари вложенного подпроекта делает родительские уровни устаревшими (dirty)
+    if (!norm.isEmpty()) {
+        QString curParent = parentSubprojectRel(norm);
+        while (true) {
+            if (m_nodes.contains(curParent)) {
+                m_nodes[curParent].summaryDirty = true;
+            }
+            if (curParent.isEmpty()) break;
+            curParent = parentSubprojectRel(curParent);
         }
     }
-    emit fileContextChanged(rootRel);
+
+    saveProjectFile();
+    emit projectContextChanged();
 }
 
-bool ProjectManager::isFileSummaryOutdated(const QString& filePath,
-                                           const QByteArray& currentContent,
+bool ProjectManager::isProjectSummaryDirty(const QString& subprojectRel) const {
+    const QString norm = normalizeScopeRel(subprojectRel);
+    return m_nodes.value(norm).summaryDirty;
+}
+
+void ProjectManager::markProjectSummaryDirty(const QString& subprojectRel, bool cascadeToParents) {
+    if (!hasOpenProject()) return;
+    QString cur = normalizeScopeRel(subprojectRel);
+    while (true) {
+        if (m_nodes.contains(cur)) {
+            m_nodes[cur].summaryDirty = true;
+        }
+        if (!cascadeToParents || cur.isEmpty()) break;
+        cur = parentSubprojectRel(cur);
+    }
+}
+
+int ProjectManager::indexedFilesCount(const QString& subprojectRel, bool includeNestedSubprojects) const {
+    if (!hasOpenProject()) return 0;
+    const QString norm = normalizeScopeRel(subprojectRel);
+    const QString prefix = norm.isEmpty() ? QString() : (norm + '/');
+    int count = 0;
+    for (auto it = m_files.constBegin(); it != m_files.constEnd(); ++it) {
+        const FileContextData& fc = it.value();
+        if (!fc.summaryCreated && fc.aiSummary.trimmed().isEmpty()) continue;
+        if (includeNestedSubprojects) {
+            if (norm.isEmpty() ||
+                fc.subprojectRelPath.compare(norm, Qt::CaseInsensitive) == 0 ||
+                fc.relativePath.startsWith(prefix, Qt::CaseInsensitive)) {
+                ++count;
+            }
+        } else {
+            if (fc.subprojectRelPath.compare(norm, Qt::CaseInsensitive) == 0) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+QStringList ProjectManager::unindexedAllowedFilePaths(const QString& subprojectRel, bool includeNestedSubprojects) const {
+    QStringList missingAbsPaths;
+    if (!hasOpenProject()) return missingAbsPaths;
+
+    const QString norm = normalizeScopeRel(subprojectRel);
+    const QString startAbsDir = projectDirPathForRel(norm);
+    if (startAbsDir.isEmpty() || !QDir(startAbsDir).exists()) return missingAbsPaths;
+
+    const FastIgnoreMatcher matcher = FastIgnoreMatcher::fromConfig();
+
+    auto scanDir = [&](auto& self, const QString& absDir, const QString& relDir) -> void {
+        QDir d(absDir);
+        const QFileInfoList subDirs = d.entryInfoList(
+            QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
+            QDir::Name | QDir::IgnoreCase);
+
+        for (const QFileInfo& sfi : subDirs) {
+            if (sfi.isSymLink() || matcher.isDirIgnored(sfi.fileName())) continue;
+            const QString childRel = relDir.isEmpty() ? sfi.fileName() : (relDir + '/' + sfi.fileName());
+            if (!includeNestedSubprojects && m_nodes.contains(childRel)) {
+                continue; // Не заходим в дочерний подпроект, если нужен только текущий уровень
+            }
+            self(self, sfi.absoluteFilePath(), childRel);
+        }
+
+        const QFileInfoList files = d.entryInfoList(
+            QDir::Files | QDir::NoDotAndDotDot,
+            QDir::Name | QDir::IgnoreCase);
+
+        for (const QFileInfo& ffi : files) {
+            const QString suffix = ffi.suffix();
+            if (suffix.compare(QStringLiteral("aide"), Qt::CaseInsensitive) == 0) continue;
+            const QString fileName = ffi.fileName();
+            if (!matcher.isFileAllowed(fileName, suffix)) continue;
+
+            const QString fileRel = relDir.isEmpty() ? fileName : (relDir + '/' + fileName);
+            const FileContextData fc = m_files.value(fileRel);
+            const bool hasSummary = fc.summaryCreated || !fc.aiSummary.trimmed().isEmpty();
+            if (!hasSummary && !fc.isSummaryPending) {
+                missingAbsPaths.append(ffi.absoluteFilePath());
+            }
+        }
+    };
+
+    scanDir(scanDir, startAbsDir, norm);
+    return missingAbsPaths;
+}
+
+FileContextData ProjectManager::fileContext(const QString& filePathOrRel) const {
+    if (!hasOpenProject()) return {};
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty()) return {};
+    if (m_files.contains(rel)) {
+        return m_files.value(rel);
+    }
+    FileContextData empty;
+    empty.relativePath = rel;
+    empty.subprojectRelPath = owningProjectRelPathForFile(rel);
+    return empty;
+}
+
+bool ProjectManager::isFileSummaryOutdated(const QString& filePathOrRel,
+                                           const QByteArray& content,
                                            const QString& currentLlm) const {
-    const FileContextData fc = fileContext(filePath);
-    const QString curSha = computeSha256(currentContent);
-    if (fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && fc.sha256 == curSha) {
+    if (!hasOpenProject()) return false;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty()) return false;
+    const FileContextData fc = fileContext(rel);
+    const QString sha = computeSha256(content);
+    if (fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && fc.sha256 == sha) {
         return false;
     }
-    if (fc.aiSummary.trimmed().isEmpty()) return true;
-    if (fc.sha256 != curSha) return true;
-    if (!currentLlm.isEmpty() && !fc.llmModel.isEmpty() && fc.llmModel != currentLlm) return true;
+    if (fc.aiSummary.trimmed().isEmpty() || fc.sha256 != sha) {
+        return true;
+    }
+    if (!currentLlm.isEmpty() && !fc.llmModel.isEmpty() && fc.llmModel != currentLlm) {
+        return true;
+    }
     return false;
 }
 
-int ProjectManager::indexedFilesCount(const QString& projectDirOrRel, bool recursive) const {
-    if (!hasOpenProject()) return 0;
-    const QString targetKey = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* targetNode = nodeForKey(targetKey);
-    if (!targetNode) return 0;
+void ProjectManager::updateFileUserPrompt(const QString& filePathOrRel, const QString& prompt) {
+    if (!hasOpenProject()) return;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return;
 
-    auto countInNode = [](const ProjectNode& n) {
-        int c = 0;
-        for (auto it = n.files.constBegin(); it != n.files.constEnd(); ++it) {
-            if (it.value().summaryCreated || !it.value().aiSummary.trimmed().isEmpty()) {
-                ++c;
-            }
+    FileContextData& fc = m_files[rel];
+    fc.relativePath = rel;
+    fc.subprojectRelPath = owningProjectRelPathForFile(rel);
+    if (fc.userPrompt == prompt) return;
+    fc.userPrompt = prompt;
+    fc.updatedAt = QDateTime::currentDateTimeUtc();
+}
+
+void ProjectManager::setFileSummaryPending(const QString& filePathOrRel,
+                                           bool pending,
+                                           const QString& pendingSha256,
+                                           const QString& pendingLlm) {
+    if (!hasOpenProject()) return;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return;
+
+    FileContextData& fc = m_files[rel];
+    fc.relativePath = rel;
+    if (fc.subprojectRelPath.isEmpty()) {
+        fc.subprojectRelPath = owningProjectRelPathForFile(rel);
+    }
+    fc.isSummaryPending = pending;
+    fc.pendingSha256 = pending ? pendingSha256 : QString();
+    fc.pendingLlmModel = pending ? pendingLlm : QString();
+
+    if (m_batchDepth > 0) {
+        m_lastBatchChangedFileRel = rel;
+    } else {
+        emit fileContextChanged(rel);
+    }
+}
+
+void ProjectManager::updateFileSummary(const QString& filePathOrRel,
+                                       const QString& sha256,
+                                       const QString& llmModel,
+                                       const QString& summary) {
+    if (!hasOpenProject()) return;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return;
+
+    const QString ownerSub = owningProjectRelPathForFile(rel);
+    FileContextData& fc = m_files[rel];
+    fc.relativePath = rel;
+    fc.subprojectRelPath = ownerSub;
+    fc.sha256 = sha256;
+    fc.llmModel = llmModel;
+    fc.aiSummary = summary;
+    fc.summaryCreated = true;
+    fc.isSummaryPending = false;
+    fc.pendingSha256.clear();
+    fc.pendingLlmModel.clear();
+    fc.updatedAt = QDateTime::currentDateTimeUtc();
+
+    markProjectSummaryDirty(ownerSub, true);
+
+    if (m_nodes.contains(ownerSub)) {
+        saveNodeToDisk(m_nodes[ownerSub]);
+    }
+
+    if (m_batchDepth > 0) {
+        m_lastBatchChangedFileRel = rel;
+        m_batchProjectDirty = true;
+    } else {
+        emit fileContextChanged(rel);
+        emit projectContextChanged();
+    }
+}
+
+void ProjectManager::clearFileSummary(const QString& filePathOrRel, const QString& sha256) {
+    if (!hasOpenProject()) return;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || rel.startsWith("..")) return;
+
+    const QString ownerSub = owningProjectRelPathForFile(rel);
+    FileContextData& fc = m_files[rel];
+    fc.relativePath = rel;
+    fc.subprojectRelPath = ownerSub;
+    if (!sha256.isEmpty()) fc.sha256 = sha256;
+    fc.llmModel.clear();
+    fc.aiSummary.clear();
+    fc.summaryCreated = true;
+    fc.isSummaryPending = false;
+    fc.pendingSha256.clear();
+    fc.pendingLlmModel.clear();
+    fc.updatedAt = QDateTime::currentDateTimeUtc();
+
+    markProjectSummaryDirty(ownerSub, true);
+    if (m_nodes.contains(ownerSub)) saveNodeToDisk(m_nodes[ownerSub]);
+
+    emit fileContextChanged(rel);
+    emit projectContextChanged();
+}
+
+void ProjectManager::removeFileSummary(const QString& filePathOrRel) {
+    if (!hasOpenProject()) return;
+    const QString rel = toRelativePath(filePathOrRel);
+    if (rel.isEmpty() || !m_files.contains(rel)) return;
+
+    const QString ownerSub = owningProjectRelPathForFile(rel);
+    FileContextData& fc = m_files[rel];
+    fc.sha256.clear();
+    fc.llmModel.clear();
+    fc.aiSummary.clear();
+    fc.summaryCreated = false;
+    fc.isSummaryPending = false;
+    fc.pendingSha256.clear();
+    fc.pendingLlmModel.clear();
+
+    if (fc.userPrompt.trimmed().isEmpty()) {
+        m_files.remove(rel);
+    }
+
+    markProjectSummaryDirty(ownerSub, true);
+    if (m_nodes.contains(ownerSub)) saveNodeToDisk(m_nodes[ownerSub]);
+
+    emit fileContextChanged(rel);
+    emit projectContextChanged();
+}
+
+bool ProjectManager::renameProjectFile(const QString& oldAbsPath, const QString& newAbsPath) {
+    if (!hasOpenProject()) return false;
+    m_reconciling = true;
+    if (!QFile::rename(oldAbsPath, newAbsPath)) {
+        m_reconciling = false;
+        return false;
+    }
+
+    const QString oldRel = toRelativePath(oldAbsPath);
+    const QString newRel = toRelativePath(newAbsPath);
+    const QString oldOwner = owningProjectRelPathForFile(oldRel);
+    const QString newOwner = owningProjectRelPathForFile(newRel);
+
+    if (m_files.contains(oldRel)) {
+        FileContextData fc = m_files.take(oldRel);
+        if (!newRel.isEmpty() && !newRel.startsWith("..")) {
+            fc.relativePath = newRel;
+            fc.subprojectRelPath = newOwner;
+            fc.updatedAt = QDateTime::currentDateTimeUtc();
+            m_files.insert(newRel, fc);
         }
-        return c;
-    };
+    }
 
-    int total = countInNode(*targetNode);
-    if (recursive) {
-        for (auto it = m_subprojects.constBegin(); it != m_subprojects.constEnd(); ++it) {
-            const QString& subKey = it.key();
-            if (targetKey.isEmpty() || subKey.startsWith(targetKey + "/", Qt::CaseInsensitive)) {
-                total += countInNode(it.value());
+    markProjectSummaryDirty(oldOwner, true);
+    if (newOwner != oldOwner) {
+        markProjectSummaryDirty(newOwner, true);
+    }
+    saveProjectFile();
+    m_reconciling = false;
+
+    emit fileRenamedInProject(oldRel, newRel, newAbsPath);
+    emit fileContextChanged(newRel);
+    emit projectContextChanged();
+    return true;
+}
+
+bool ProjectManager::deleteProjectFile(const QString& absPath) {
+    if (!hasOpenProject()) return false;
+    const QString rel = toRelativePath(absPath);
+    const QString owner = owningProjectRelPathForFile(rel);
+
+    m_reconciling = true;
+    if (!QFile::remove(absPath)) {
+        m_reconciling = false;
+        return false;
+    }
+
+    m_files.remove(rel);
+    markProjectSummaryDirty(owner, true);
+    if (m_nodes.contains(owner)) saveNodeToDisk(m_nodes[owner]);
+    m_reconciling = false;
+
+    emit fileRemovedFromProject(rel, absPath);
+    emit projectContextChanged();
+    return true;
+}
+
+QString ProjectManager::buildAggregatedFilesDigest(const QString& subprojectRel) const {
+    if (!hasOpenProject()) return {};
+    const QString normScope = normalizeScopeRel(subprojectRel);
+
+    QStringList sections;
+
+    // 1. Включаем саммари прямых дочерних подпроектов (.aide).
+    // Если у дочернего подпроекта ещё не синтезировано собственное саммари,
+    // автоматически включаем саммари проиндексированных файлов внутри него, чтобы ничего не терялось.
+    const QStringList childSubs = directChildSubprojects(normScope);
+    QStringList childSubBlocks;
+    for (const QString& childRel : childSubs) {
+        const QString childSum = projectSummary(childRel).trimmed();
+        if (!childSum.isEmpty()) {
+            childSubBlocks << QString("### Subproject: %1\n%2").arg(childRel, childSum);
+        } else {
+            const QString fallbackChildDigest = buildAggregatedFilesDigest(childRel).trimmed();
+            if (!fallbackChildDigest.isEmpty()) {
+                childSubBlocks << QString("### Subproject: %1 (File Summaries)\n%2")
+                .arg(childRel, fallbackChildDigest);
             }
         }
     }
-    return total;
+    if (!childSubBlocks.isEmpty()) {
+        sections << "## Nested Subprojects (.aide) Summaries\n\n" + childSubBlocks.join("\n\n");
+    }
+
+    // 2. Включаем саммари всех проиндексированных файлов, принадлежащих непосредственно этому узлу
+    // (включая файлы во всех вложенных подпапках, не являющихся отдельными .aide подпроектами)
+    QStringList fileKeys;
+    for (auto it = m_files.constBegin(); it != m_files.constEnd(); ++it) {
+        const FileContextData& fc = it.value();
+        if (fc.aiSummary.trimmed().isEmpty()) continue;
+        const QString owner = owningProjectRelPathForFile(fc.relativePath);
+        if (owner.compare(normScope, Qt::CaseInsensitive) == 0) {
+            fileKeys.append(it.key());
+        }
+    }
+    std::sort(fileKeys.begin(), fileKeys.end(), [](const QString& a, const QString& b) {
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+
+    QStringList fileBlocks;
+    fileBlocks.reserve(fileKeys.size());
+    for (const QString& key : fileKeys) {
+        const FileContextData& fc = m_files.value(key);
+        fileBlocks << QString("### File: %1\n%2").arg(fc.relativePath, fc.aiSummary.trimmed());
+    }
+    if (!fileBlocks.isEmpty()) {
+        const QString hdr = normScope.isEmpty()
+        ? QStringLiteral("## Root Project Indexed Files (%1)").arg(fileBlocks.size())
+        : QStringLiteral("## Subproject '%1' Indexed Files (%2)").arg(normScope).arg(fileBlocks.size());
+        sections << hdr + "\n\n" + fileBlocks.join("\n\n");
+    }
+
+    return sections.join("\n\n---\n\n");
 }
 
 QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) const {
+    if (!hasOpenProject()) return {};
     const auto beh = ConfigManager::instance().aiBehavior();
     QStringList sections;
 
-    // 1. Инструкции и саммари корневого проекта
-    if (!m_rootNode.projectSystemPrompt.trimmed().isEmpty()) {
-        sections << "=== PROJECT SYSTEM INSTRUCTIONS ===\n" + m_rootNode.projectSystemPrompt.trimmed();
+    const QString rootSys = projectSystemPrompt().trimmed();
+    if (!rootSys.isEmpty()) {
+        sections << "=== PROJECT SYSTEM INSTRUCTIONS ===\n" + rootSys;
     }
-    if (beh.includeProjectSummaryInPrompt && !m_rootNode.projectSummary.trimmed().isEmpty()) {
-        sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + m_rootNode.projectSummary.trimmed();
+
+    const QString ownerSub = filePath.isEmpty() ? QString() : owningProjectRelPathForFile(filePath);
+    if (!ownerSub.isEmpty()) {
+        const QString subSys = projectSystemPrompt(ownerSub).trimmed();
+        if (!subSys.isEmpty() && subSys != rootSys) {
+            sections << QString("=== SUBPROJECT (%1) INSTRUCTIONS ===\n%2").arg(ownerSub, subSys);
+        }
+    }
+
+    if (beh.includeProjectSummaryInPrompt) {
+        const QString rootSum = projectSummary().trimmed();
+        if (!rootSum.isEmpty()) {
+            sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + rootSum;
+        }
+        if (!ownerSub.isEmpty()) {
+            const QString subSum = projectSummary(ownerSub).trimmed();
+            if (!subSum.isEmpty()) {
+                sections << QString("=== SUBPROJECT (%1) ARCHITECTURE SUMMARY ===\n%2").arg(ownerSub, subSum);
+            }
+        }
     }
 
     if (!filePath.isEmpty()) {
-        const QString absPath = toAbsolutePath(filePath);
-        const QString ownerKey = findOwningNodeKeyForAbsPath(absPath);
-
-        // 2. Если файл находится во вложенном подпроекте (или цепочке подпроектов) —
-        //    добавляем инструкции и саммари каждого вложенного подпроекта сверху вниз
-        if (!ownerKey.isEmpty()) {
-            QStringList chainKeys;
-            QString cur = ownerKey;
-            while (!cur.isEmpty()) {
-                chainKeys.prepend(cur);
-                cur = findParentNodeKey(cur);
-            }
-            for (const QString& subKey : chainKeys) {
-                if (const ProjectNode* subNode = nodeForKey(subKey)) {
-                    if (!subNode->projectSystemPrompt.trimmed().isEmpty()) {
-                        sections << QString("=== SUBPROJECT INSTRUCTIONS (%1) ===\n%2")
-                        .arg(subKey, subNode->projectSystemPrompt.trimmed());
-                    }
-                    if (beh.includeProjectSummaryInPrompt && !subNode->projectSummary.trimmed().isEmpty()) {
-                        sections << QString("=== SUBPROJECT ARCHITECTURE SUMMARY (%1) ===\n%2")
-                        .arg(subKey, subNode->projectSummary.trimmed());
-                    }
-                }
-            }
-        }
-
-        // 3. Инструкции и саммари самого документа
-        const FileContextData fc = fileContext(absPath);
+        const FileContextData fc = fileContext(filePath);
         if (!fc.userPrompt.trimmed().isEmpty()) {
             sections << QString("=== DOCUMENT INSTRUCTIONS (%1) ===\n%2")
             .arg(fc.relativePath, fc.userPrompt.trimmed());
@@ -1258,57 +1217,6 @@ QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) con
     return sections.join("\n\n");
 }
 
-QString ProjectManager::buildAggregatedFilesDigest(const QString& projectDirOrRel) const {
-    if (!hasOpenProject()) return {};
-    const QString targetKey = normalizeNodeKey(projectDirOrRel);
-    const ProjectNode* targetNode = nodeForKey(targetKey);
-    if (!targetNode) return {};
-
-    QStringList digest;
-
-    // 1. Саммари файлов, принадлежащих непосредственно этому уровню проекта/подпроекта
-    QStringList localKeys = targetNode->files.keys();
-    std::sort(localKeys.begin(), localKeys.end(), [](const QString& a, const QString& b) {
-        return a.compare(b, Qt::CaseInsensitive) < 0;
-    });
-
-    for (const QString& localKey : localKeys) {
-        const FileContextData& fc = targetNode->files.value(localKey);
-        if (fc.aiSummary.trimmed().isEmpty()) continue;
-
-        const QString absPath = QDir::cleanPath(QDir(targetNode->rootPath).filePath(localKey));
-        if (!QFileInfo::exists(absPath)) continue;
-
-        digest << QString("## File: %1\n%2").arg(localKey, fc.aiSummary.trimmed());
-    }
-
-    // 2. Саммари прямых дочерних подпроектов являются составной частью саммари вышестоящего проекта
-    const QStringList childSubs = directChildSubprojects(targetKey);
-    for (const QString& childSubKey : childSubs) {
-        const ProjectNode* childNode = nodeForKey(childSubKey);
-        if (!childNode) continue;
-
-        QString relSubName = targetKey.isEmpty()
-                                 ? childSubKey
-                                 : childSubKey.mid(targetKey.length() + 1);
-
-        if (!childNode->projectSummary.trimmed().isEmpty()) {
-            digest << QString("## Subproject: %1\n%2")
-            .arg(relSubName, childNode->projectSummary.trimmed());
-        } else {
-            // Если у подпроекта ещё не синтезировано собственное общее саммари,
-            // рекурсивно подтягиваем дайджест его файлов/подпроектов
-            const QString fallbackChildDigest = buildAggregatedFilesDigest(childSubKey);
-            if (!fallbackChildDigest.trimmed().isEmpty()) {
-                digest << QString("## Subproject: %1 (Components Digest)\n%2")
-                .arg(relSubName, fallbackChildDigest.trimmed());
-            }
-        }
-    }
-
-    return digest.join("\n\n");
-}
-
 QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
                                                         const QStringList& selectedFiles,
                                                         const QMap<QString, QString>& openBuffers,
@@ -1317,64 +1225,56 @@ QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptConte
     if (!hasOpenProject()) return {};
 
     QStringList sections;
-    const bool includeSummary = (mode == ProjectCustomPromptContextMode::ProjectSummaryOnly ||
-                                 mode == ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown);
-    const bool includeSources = (mode == ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly ||
-                                 mode == ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown);
+    const bool includeSummary = (mode != ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly);
+    const bool includeFiles   = (mode != ProjectCustomPromptContextMode::ProjectSummaryOnly);
 
     if (includeSummary) {
-        if (!m_rootNode.projectSummary.trimmed().isEmpty()) {
-            sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + m_rootNode.projectSummary.trimmed();
+        const QString rootSum = projectSummary().trimmed();
+        if (!rootSum.isEmpty()) {
+            sections << "## Global Project Architecture Summary\n\n" + rootSum;
         }
-        // Также включаем саммари вложенных подпроектов
-        for (const QString& subKey : subprojectRelPaths()) {
-            const ProjectNode* subNode = nodeForKey(subKey);
-            if (subNode && !subNode->projectSummary.trimmed().isEmpty()) {
-                sections << QString("=== SUBPROJECT ARCHITECTURE SUMMARY (%1) ===\n%2")
-                .arg(subKey, subNode->projectSummary.trimmed());
-            }
-        }
-        if (sections.isEmpty()) {
-            const QString fallbackDigest = buildAggregatedFilesDigest();
-            if (!fallbackDigest.trimmed().isEmpty()) {
-                sections << "=== PROJECT FILE & SUBPROJECT SUMMARIES ===\n" + fallbackDigest;
+        for (const QString& subRel : subprojectRelPaths()) {
+            const QString subSum = projectSummary(subRel).trimmed();
+            if (!subSum.isEmpty()) {
+                sections << QString("## Subproject Architecture Summary: %1\n\n%2").arg(subRel, subSum);
             }
         }
     }
 
-    if (includeSources && !selectedFiles.isEmpty()) {
+    if (includeFiles && !selectedFiles.isEmpty()) {
         QStringList fileBlocks;
-        int count = 0;
-        for (const QString& rawPath : selectedFiles) {
-            const QString absPath = toAbsolutePath(rawPath);
+        int included = 0;
+        for (const QString& path : selectedFiles) {
+            const QString absPath = QFileInfo(path).isAbsolute()
+            ? QDir::cleanPath(path)
+            : toAbsolutePath(path);
+            const QString relPath = toRelativePath(absPath);
             QString content;
             if (openBuffers.contains(absPath)) {
                 content = openBuffers.value(absPath);
             } else {
                 QFile f(absPath);
-                if (!f.open(QIODevice::ReadOnly)) continue;
-                content = QString::fromUtf8(f.readAll());
+                if (f.open(QIODevice::ReadOnly)) {
+                    content = QString::fromUtf8(f.readAll());
+                }
             }
-            const QString relPath = toRelativePath(absPath);
-            const QString langId = ConfigManager::instance().languageIdForFile(absPath);
-            const FileContextData fc = fileContext(absPath);
-
-            QString fileSection = QString("### File: `%1`").arg(relPath);
-            if (!fc.subprojectRelPath.isEmpty()) {
-                fileSection += QString(" *(Subproject: `%1`)*").arg(fc.subprojectRelPath);
-            }
+            const FileContextData fc = fileContext(relPath);
+            QString block = QString("### File: `%1`\n").arg(relPath);
             if (!fc.aiSummary.trimmed().isEmpty()) {
-                fileSection += QString("\n**Summary:**\n%1").arg(fc.aiSummary.trimmed());
+                block += QString("**AI Summary:**\n%1\n\n").arg(fc.aiSummary.trimmed());
             }
-            fileSection += QString("\n```%1\n%2\n```").arg(langId, content);
-            fileBlocks << fileSection;
-            ++count;
+            if (!content.isEmpty()) {
+                const QString lang = ConfigManager::instance().languageIdForFile(absPath);
+                block += QString("```%1\n%2\n```").arg(lang, content);
+            }
+            fileBlocks.append(block);
+            ++included;
         }
-        if (outIncludedFiles) *outIncludedFiles = count;
+        if (outIncludedFiles) *outIncludedFiles = included;
         if (!fileBlocks.isEmpty()) {
-            sections << "=== PROJECT SOURCE FILES ===\n\n" + fileBlocks.join("\n\n");
+            sections << "## Selected Project Files Context\n\n" + fileBlocks.join("\n\n");
         }
     }
 
-    return sections.join("\n\n");
+    return sections.join("\n\n---\n\n");
 }

@@ -2,9 +2,16 @@
 #pragma once
 #include <QObject>
 #include <QTimer>
+#include <QMap>
+#include <QPair>
 #include "AiTaskQueue.h"
 
 class ProjectManager;
+
+struct BatchFileSummaryItem {
+    QString filePath;
+    QByteArray content;
+};
 
 class SummaryWorker : public QObject {
     Q_OBJECT
@@ -17,6 +24,9 @@ public slots:
                                  const QByteArray& content,
                                  int maxOutputTokensOverride = 0,
                                  int contextWindowOverride = 0);
+    int scheduleFileSummariesBatch(const QVector<BatchFileSummaryItem>& items,
+                                   int maxOutputTokensOverride = 0,
+                                   int contextWindowOverride = 0);
     void continueFileSummary(const QString& filePath,
                              const QByteArray& content,
                              const QString& followUpInstruction = {},
@@ -32,8 +42,6 @@ public slots:
                                 const QString& projectDirOrRel = {});
 
 signals:
-    // Для FileSummary: targetRelPath — относительный путь к файлу от корня проекта.
-    // Для ProjectSummary: targetRelPath — относительный путь к подпроекту ("" для корневого проекта).
     void summaryStreamingChunk(const QString& targetRelPath, bool isProjectSummary, const QString& chunk);
     void summaryStreamingReset(const QString& targetRelPath, bool isProjectSummary);
 
@@ -46,8 +54,15 @@ private slots:
     void onTaskCancelled(const AiTask& task);
 
 private:
+    struct DeferredScopeLimits {
+        int maxOutputTokens = 0;
+        int contextWindow = 0;
+    };
+
     void updateTimerInterval();
     void scheduleNextDirtyProjectSummaryIfIdle();
+    void enqueueProjectSummaryNow(const QString& subRel, int maxOutputTokensOverride, int contextWindowOverride);
+    bool hasPendingFileSummariesForScope(const QString& subRel) const;
     QString buildSystemPromptForNode(const QString& subprojectRel) const;
 
     static QString makeProjectSummaryTaskKey(const QString& subprojectRel);
@@ -56,4 +71,5 @@ private:
     ProjectManager* m_projectMgr = nullptr;
     AiTaskQueue* m_taskQueue = nullptr;
     QTimer m_projectRebuildTimer;
+    QMap<QString, DeferredScopeLimits> m_deferredProjectScopes;
 };

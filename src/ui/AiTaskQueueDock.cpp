@@ -9,6 +9,10 @@
 #include <QPushButton>
 #include <QProgressBar>
 
+namespace {
+constexpr int kMaxDisplayedQueuedRows = 250;
+} // namespace
+
 AiTaskQueueDock::AiTaskQueueDock(AiTaskQueue* taskQueue, QWidget* parent)
     : QDockWidget("AI Task Queue", parent), m_taskQueue(taskQueue) {
     auto* container = new QWidget(this);
@@ -48,14 +52,21 @@ AiTaskQueueDock::AiTaskQueueDock(AiTaskQueue* taskQueue, QWidget* parent)
 
     m_table = new QTableWidget(0, 7, container);
     m_table->setHorizontalHeaderLabels({"Status", "Progress / Speed", "Elapsed", "Type", "Target / File", "Model / Max Tokens", "Action"});
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_table->verticalHeader()->setVisible(false);
+    m_table->verticalHeader()->setDefaultSectionSize(24);
+    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    m_table->setColumnWidth(0, 130);
     m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
     m_table->setColumnWidth(1, 210);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    m_table->setColumnWidth(2, 75);
+    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Interactive);
+    m_table->setColumnWidth(3, 145);
     m_table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Interactive);
+    m_table->setColumnWidth(5, 170);
+    m_table->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Fixed);
+    m_table->setColumnWidth(6, 80);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -67,22 +78,45 @@ AiTaskQueueDock::AiTaskQueueDock(AiTaskQueue* taskQueue, QWidget* parent)
     m_liveTickTimer.setInterval(200);
     connect(&m_liveTickTimer, &QTimer::timeout, this, &AiTaskQueueDock::updateLiveMetrics);
 
+    m_refreshDebounceTimer.setSingleShot(true);
+    m_refreshDebounceTimer.setInterval(15);
+    connect(&m_refreshDebounceTimer, &QTimer::timeout, this, &AiTaskQueueDock::refreshQueueView);
+
     connect(m_cancelSelectedBtn, &QPushButton::clicked, this, [this]() {
         int row = m_table->currentRow();
         if (row < 0) return;
         if (auto* item = m_table->item(row, 0)) {
             QString taskId = item->data(Qt::UserRole).toString();
-            m_taskQueue->cancelTaskById(taskId);
+            if (!taskId.isEmpty()) {
+                m_taskQueue->cancelTaskById(taskId);
+            }
         }
     });
+
+    connect(m_table, &QTableWidget::cellClicked, this, [this](int row, int col) {
+        if (col != 6 || row < 0) return;
+        if (auto* item = m_table->item(row, 0)) {
+            const QString taskId = item->data(Qt::UserRole).toString();
+            if (!taskId.isEmpty()) {
+                m_taskQueue->cancelTaskById(taskId);
+            }
+        }
+    });
+
     connect(m_cancelBgBtn, &QPushButton::clicked, m_taskQueue, &AiTaskQueue::cancelAllBackgroundTasks);
     connect(m_cancelAllBtn, &QPushButton::clicked, m_taskQueue, &AiTaskQueue::cancelAllTasks);
-    connect(m_taskQueue, &AiTaskQueue::queueChanged, this, &AiTaskQueueDock::refreshQueueView);
+    connect(m_taskQueue, &AiTaskQueue::queueChanged, this, &AiTaskQueueDock::scheduleRefreshQueueView);
     connect(m_taskQueue, &AiTaskQueue::taskProgressChanged, this, [this](const AiTask&) {
         updateLiveMetrics();
     });
 
     refreshQueueView();
+}
+
+void AiTaskQueueDock::scheduleRefreshQueueView() {
+    if (!m_refreshDebounceTimer.isActive()) {
+        m_refreshDebounceTimer.start();
+    }
 }
 
 QString AiTaskQueueDock::formatDurationMs(qint64 ms) {
@@ -109,20 +143,17 @@ QString AiTaskQueueDock::targetTypeToString(const AiTask& task) {
 
 void AiTaskQueueDock::updateActiveRowWidgets(const AiTask& cur) {
     if (m_table->rowCount() == 0) return;
-
     if (auto* statusItem = m_table->item(0, 0)) {
         statusItem->setText(cur.isThinking ? "Thinking" : "Running...");
         statusItem->setForeground(cur.isThinking ? QColor("#8be9fd") : QColor("#50fa7b"));
     }
-
     if (auto* elapsedItem = m_table->item(0, 2)) {
         elapsedItem->setText(formatDurationMs(cur.elapsedMs));
     }
-
     if (m_activeTaskProgressBar) {
         int totalTok = cur.generatedTokens + cur.thinkingTokens;
         if (totalTok == 0) {
-            m_activeTaskProgressBar->setRange(0, 0); // Индикация обработки промпта
+            m_activeTaskProgressBar->setRange(0, 0);
             m_activeTaskProgressBar->setFormat("Prompt Eval...");
         } else {
             int targetMax = qMax(cur.expectedTokens, totalTok + 32);
@@ -131,6 +162,7 @@ void AiTaskQueueDock::updateActiveRowWidgets(const AiTask& cur) {
 
             m_activeTaskProgressBar->setRange(0, targetMax);
             m_activeTaskProgressBar->setValue(totalTok);
+
             QString speedStr = cur.tokensPerSec > 0.1
                                    ? QString(" (%1 tok/s)").arg(cur.tokensPerSec, 0, 'f', 1)
                                    : QString();
@@ -156,7 +188,6 @@ void AiTaskQueueDock::updateLiveMetrics() {
         m_timeStatsLabel->setText(QString("Task: %1 | Total: %2")
                                       .arg(formatDurationMs(cur.elapsedMs), formatDurationMs(totalMs)));
 
-        // Вычисляем общий прогресс пакета (завершённые задачи + доля текущей задачи)
         double currentFraction = 0.1;
         int totalTok = cur.generatedTokens + cur.thinkingTokens;
         if (totalTok > 0 && cur.expectedTokens > 0) {
@@ -228,22 +259,40 @@ void AiTaskQueueDock::appendTaskRow(const AiTask& task, const QString& statusTex
         m_table->setItem(row, 1, waitItem);
     }
 
-    auto* cancelBtn = new QPushButton("Cancel", m_table);
-    cancelBtn->setStyleSheet("QPushButton { background-color: #ff5555; color: #ffffff; border: none; border-radius: 3px; padding: 2px 8px; font-weight: bold; }"
-                             "QPushButton:hover { background-color: #ff6e6e; }");
-    connect(cancelBtn, &QPushButton::clicked, this, [this, id = task.taskId]() {
-        m_taskQueue->cancelTaskById(id);
-    });
-    m_table->setCellWidget(row, 6, cancelBtn);
+    // Легковесная ячейка отмены вместо создания тысяч QPushButton с индивидуальным QSS
+    auto* cancelItem = new QTableWidgetItem("✕ Cancel");
+    cancelItem->setTextAlignment(Qt::AlignCenter);
+    cancelItem->setForeground(QColor("#ff5555"));
+    QFont cf = cancelItem->font();
+    cf.setBold(true);
+    cancelItem->setFont(cf);
+    cancelItem->setToolTip("Click to cancel this task");
+    m_table->setItem(row, 6, cancelItem);
+}
+
+void AiTaskQueueDock::appendOverflowRow(int hiddenTasksCount) {
+    int row = m_table->rowCount();
+    m_table->insertRow(row);
+    auto* infoItem = new QTableWidgetItem(
+        QString("... +%1 more queued tasks (use 'Cancel All Background' or 'Cancel All' above)")
+            .arg(hiddenTasksCount));
+    infoItem->setForeground(QColor("#888899"));
+    QFont f = infoItem->font();
+    f.setItalic(true);
+    infoItem->setFont(f);
+    m_table->setItem(row, 4, infoItem);
 }
 
 void AiTaskQueueDock::refreshQueueView() {
     m_activeTaskProgressBar = nullptr;
-    m_table->setRowCount(0);
 
-    bool running = m_taskQueue->isProcessing();
+    const bool running = m_taskQueue->isProcessing();
     const auto highList = m_taskQueue->highQueueTasks();
     const auto lowList = m_taskQueue->lowQueueTasks();
+
+    m_table->setUpdatesEnabled(false);
+    m_table->blockSignals(true);
+    m_table->setRowCount(0);
 
     if (running) {
         const AiTask cur = m_taskQueue->currentTask();
@@ -253,15 +302,36 @@ void AiTaskQueueDock::refreshQueueView() {
         m_liveTickTimer.stop();
     }
 
+    int displayedQueued = 0;
+    int hiddenQueued = 0;
+
     for (const auto& t : highList) {
-        appendTaskRow(t, "Queued (High)", false);
+        if (displayedQueued < kMaxDisplayedQueuedRows) {
+            appendTaskRow(t, "Queued (High)", false);
+            ++displayedQueued;
+        } else {
+            ++hiddenQueued;
+        }
     }
     for (const auto& t : lowList) {
-        appendTaskRow(t, "Queued (Background)", false);
+        if (displayedQueued < kMaxDisplayedQueuedRows) {
+            appendTaskRow(t, "Queued (Background)", false);
+            ++displayedQueued;
+        } else {
+            ++hiddenQueued;
+        }
     }
 
-    int total = (running ? 1 : 0) + highList.size() + lowList.size();
-    int bgTotal = lowList.size() + (running && m_taskQueue->currentTask().priority == TaskPriority::Low_BackgroundSummary ? 1 : 0);
+    if (hiddenQueued > 0) {
+        appendOverflowRow(hiddenQueued);
+    }
+
+    m_table->blockSignals(false);
+    m_table->setUpdatesEnabled(true);
+
+    const int total = (running ? 1 : 0) + highList.size() + lowList.size();
+    const int bgTotal = lowList.size() +
+                        (running && m_taskQueue->currentTask().priority == TaskPriority::Low_BackgroundSummary ? 1 : 0);
 
     if (total == 0) {
         m_summaryLabel->setText("Idle (0 tasks in queue)");

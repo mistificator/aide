@@ -3,6 +3,7 @@
 #include <QDockWidget>
 #include <QMap>
 #include <QString>
+#include <QTimer>
 
 class QPlainTextEdit;
 class QTextEdit;
@@ -19,6 +20,7 @@ public:
     void setActiveFile(const QString& filePath);
     void setSelectedProjectScope(const QString& subprojectRelPath);
     QString selectedProjectScope() const;
+    void scheduleRefreshDisplay();
     void refreshDisplay();
 
 public slots:
@@ -37,13 +39,22 @@ private:
     void rebuildProjectScopeCombo();
     void updateEffectivePreview();
     static void setupMarkdownViewerStyle(QTextEdit* viewer);
-    static void renderMarkdownPreservingScroll(QTextEdit* viewer, const QString& markdownText, bool scrollToBottom = false);
+    static void renderMarkdownPreservingScroll(QTextEdit* viewer,
+                                               const QString& markdownText,
+                                               QString& cachedMarkdown,
+                                               bool scrollToBottom = false);
 
     ProjectManager* m_projectMgr = nullptr;
     QString m_activeFilePath;
-    QString m_selectedProjectScope; // "" для корневого проекта, иначе относительный путь подпроекта
+    QString m_selectedProjectScope; // "" для корня проекта
     QMap<QString, QString> m_liveFileMarkdownByPath;
     QMap<QString, QString> m_liveProjectMarkdownByScope;
+
+    QString m_cachedFileSummaryMd;
+    QString m_cachedProjectSummaryMd;
+    QString m_cachedEffectiveMd;
+
+    QTimer m_refreshDebounceTimer;
     bool m_updatingUi = false;
     bool m_editingProjectMarkdown = false;
 

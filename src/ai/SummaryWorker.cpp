@@ -38,6 +38,9 @@ SummaryWorker::SummaryWorker(ProjectManager* projMgr, AiTaskQueue* queue, QObjec
                         emit summaryStreamingReset(oldRelPath, false);
                     }
                 });
+        connect(m_projectMgr, &ProjectManager::projectClosed, this, [this]() {
+            m_deferredProjectScopes.clear();
+        });
     }
 
     updateTimerInterval();
@@ -80,6 +83,29 @@ void SummaryWorker::updateTimerInterval() {
     m_projectRebuildTimer.start(mins * 60 * 1000);
 }
 
+bool SummaryWorker::hasPendingFileSummariesForScope(const QString& subRel) const {
+    if (!m_taskQueue) return false;
+    const QString prefix = subRel.isEmpty() ? QString() : (subRel + '/');
+
+    auto matchesScope = [&](const AiTask& t) -> bool {
+        if (t.targetType != TaskTargetType::FileSummary) return false;
+        if (subRel.isEmpty()) return true;
+        return t.filePath.startsWith(prefix, Qt::CaseInsensitive) ||
+               (m_projectMgr && m_projectMgr->owningProjectRelPathForFile(t.filePath).compare(subRel, Qt::CaseInsensitive) == 0);
+    };
+
+    if (m_taskQueue->isProcessing() && matchesScope(m_taskQueue->currentTask())) {
+        return true;
+    }
+    for (const AiTask& t : m_taskQueue->lowQueueTasks()) {
+        if (matchesScope(t)) return true;
+    }
+    for (const AiTask& t : m_taskQueue->highQueueTasks()) {
+        if (matchesScope(t)) return true;
+    }
+    return false;
+}
+
 void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content) {
     if (filePath.isEmpty() || content.trimmed().isEmpty()) return;
     if (!m_projectMgr || !m_projectMgr->hasOpenProject()) return;
@@ -107,12 +133,9 @@ void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const Q
     const auto fc = m_projectMgr->fileContext(relPath);
     const QString currentSha = ProjectManager::computeSha256(content);
 
-    // Если саммари намеренно очищено (Clear) и хэш файла не менялся — не пересчитываем автоматически
     if (fc.summaryCreated && fc.aiSummary.trimmed().isEmpty() && fc.sha256 == currentSha) {
         return;
     }
-
-    // Если есть готовое саммари с тем же SHA-256 — повторно не пересчитываем
     if (!fc.aiSummary.trimmed().isEmpty() && !fc.sha256.isEmpty() && fc.sha256 == currentSha) {
         return;
     }
@@ -127,10 +150,10 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath,
     if (filePath.isEmpty() || content.trimmed().isEmpty() || !m_projectMgr) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
-    QString relPath = m_projectMgr->toRelativePath(filePath);
-    QString ownerSubRel = m_projectMgr->owningProjectRelPathForFile(filePath);
-    QString sha256 = ProjectManager::computeSha256(content);
-    QString llmModel = cfg.llmIdentifier();
+    const QString relPath = m_projectMgr->toRelativePath(filePath);
+    const QString ownerSubRel = m_projectMgr->owningProjectRelPathForFile(relPath);
+    const QString sha256 = ProjectManager::computeSha256(content);
+    const QString llmModel = cfg.llmIdentifier();
 
     m_projectMgr->setFileSummaryPending(relPath, true, sha256, llmModel);
 
@@ -150,6 +173,54 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath,
     m_taskQueue->enqueueTask(task);
 }
 
+int SummaryWorker::scheduleFileSummariesBatch(const QVector<BatchFileSummaryItem>& items,
+                                              int maxOutputTokensOverride,
+                                              int contextWindowOverride) {
+    if (items.isEmpty() || !m_projectMgr || !m_taskQueue) return 0;
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    const QString llmModel = cfg.llmIdentifier();
+    const QString tmpl = ConfigManager::instance().promptTemplate("FileSummary");
+    const int maxTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
+    const int ctxWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
+
+    QVector<AiTask> tasksToEnqueue;
+    tasksToEnqueue.reserve(items.size());
+
+    m_projectMgr->beginBatchUpdate();
+    for (const BatchFileSummaryItem& item : items) {
+        if (item.filePath.isEmpty() || item.content.trimmed().isEmpty()) continue;
+
+        const QString relPath = m_projectMgr->toRelativePath(item.filePath);
+        if (relPath.isEmpty()) continue;
+
+        const QString ownerSubRel = m_projectMgr->owningProjectRelPathForFile(relPath);
+        const QString sha256 = ProjectManager::computeSha256(item.content);
+
+        m_projectMgr->setFileSummaryPending(relPath, true, sha256, llmModel);
+
+        AiTask task;
+        task.priority = TaskPriority::Low_BackgroundSummary;
+        task.targetType = TaskTargetType::FileSummary;
+        task.filePath = relPath;
+        task.fileSha256 = sha256;
+        task.llmModel = llmModel;
+        task.maxOutputTokens = maxTokens;
+        task.contextWindow = ctxWindow;
+        task.systemPrompt = buildSystemPromptForNode(ownerSubRel);
+        task.userPrompt = tmpl + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(item.content));
+        task.stream = true;
+
+        tasksToEnqueue.append(std::move(task));
+    }
+    m_projectMgr->endBatchUpdate();
+
+    if (!tasksToEnqueue.isEmpty()) {
+        m_taskQueue->enqueueTasksBatch(tasksToEnqueue);
+    }
+    return tasksToEnqueue.size();
+}
+
 void SummaryWorker::continueFileSummary(const QString& filePath,
                                         const QByteArray& content,
                                         const QString& followUpInstruction,
@@ -158,20 +229,20 @@ void SummaryWorker::continueFileSummary(const QString& filePath,
     if (filePath.isEmpty() || content.trimmed().isEmpty() || !m_projectMgr) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
-    QString relPath = m_projectMgr->toRelativePath(filePath);
-    auto fc = m_projectMgr->fileContext(relPath);
+    const QString relPath = m_projectMgr->toRelativePath(filePath);
+    const auto fc = m_projectMgr->fileContext(relPath);
     if (fc.aiSummary.trimmed().isEmpty()) {
         forceRebuildFileSummary(filePath, content, maxOutputTokensOverride, contextWindowOverride);
         return;
     }
 
-    QString ownerSubRel = m_projectMgr->owningProjectRelPathForFile(filePath);
-    QString sha256 = ProjectManager::computeSha256(content);
-    QString llmModel = cfg.llmIdentifier();
+    const QString ownerSubRel = m_projectMgr->owningProjectRelPathForFile(relPath);
+    const QString sha256 = ProjectManager::computeSha256(content);
+    const QString llmModel = cfg.llmIdentifier();
     m_projectMgr->setFileSummaryPending(relPath, true, sha256, llmModel);
 
-    QString initialUserPrompt = ConfigManager::instance().promptTemplate("FileSummary")
-                                + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
+    const QString initialUserPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+                                      + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
 
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
@@ -197,32 +268,11 @@ void SummaryWorker::continueFileSummary(const QString& filePath,
     m_taskQueue->enqueueTask(task);
 }
 
-void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
-                                               int contextWindowOverride,
-                                               const QString& projectDirOrRel) {
+void SummaryWorker::enqueueProjectSummaryNow(const QString& subRel,
+                                             int maxOutputTokensOverride,
+                                             int contextWindowOverride) {
     if (!m_projectMgr || !m_projectMgr->hasOpenProject()) return;
-
-    QString subRel;
-    if (!projectDirOrRel.trimmed().isEmpty()) {
-        QString absDir = m_projectMgr->projectDirPathForRel(projectDirOrRel);
-        subRel = m_projectMgr->toRelativePath(absDir);
-        if (subRel == ".") subRel.clear();
-    }
-
-    // Если у этого проекта/подпроекта есть прямые дочерние подпроекты, чьи саммари устарели или ещё не созданы,
-    // сначала ставим в очередь их пересборку (снизу вверх), чтобы родительский проект получил актуальные саммари подпроектов
-    const QStringList directChildren = m_projectMgr->directChildSubprojects(subRel);
-    for (const QString& childSub : directChildren) {
-        if (m_projectMgr->isProjectSummaryDirty(childSub) ||
-            (m_projectMgr->projectSummary(childSub).trimmed().isEmpty() && m_projectMgr->indexedFilesCount(childSub, true) > 0)) {
-            const QString childTaskKey = makeProjectSummaryTaskKey(childSub);
-            if (!m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey)) {
-                forceRebuildProjectSummary(maxOutputTokensOverride, contextWindowOverride, childSub);
-            }
-        }
-    }
-
-    QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
+    const QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
     if (digest.trimmed().isEmpty()) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
@@ -242,6 +292,48 @@ void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
     m_taskQueue->enqueueTask(task);
 }
 
+void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
+                                               int contextWindowOverride,
+                                               const QString& projectDirOrRel) {
+    if (!m_projectMgr || !m_projectMgr->hasOpenProject()) return;
+
+    QString subRel;
+    if (!projectDirOrRel.trimmed().isEmpty()) {
+        const QString absDir = m_projectMgr->projectDirPathForRel(projectDirOrRel);
+        subRel = m_projectMgr->toRelativePath(absDir);
+        if (subRel == ".") subRel.clear();
+    }
+
+    // 1. Проверяем прямые дочерние подпроекты: если их саммари устарели или ещё не созданы,
+    // сначала запускаем их пересборку, а текущий родительский узел откладываем в m_deferredProjectScopes,
+    // чтобы его дайджест был собран ПОСЛЕ готовности всех дочерних подпроектов и файлов.
+    bool waitingForDependencies = hasPendingFileSummariesForScope(subRel);
+    const QStringList directChildren = m_projectMgr->directChildSubprojects(subRel);
+    for (const QString& childSub : directChildren) {
+        const QString childTaskKey = makeProjectSummaryTaskKey(childSub);
+        const bool childPending = m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey) ||
+                                  hasPendingFileSummariesForScope(childSub);
+        const bool childDirty = m_projectMgr->isProjectSummaryDirty(childSub) ||
+                                (m_projectMgr->projectSummary(childSub).trimmed().isEmpty() &&
+                                 m_projectMgr->indexedFilesCount(childSub, true) > 0);
+        if (childPending || childDirty) {
+            waitingForDependencies = true;
+            if (!m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey)) {
+                forceRebuildProjectSummary(maxOutputTokensOverride, contextWindowOverride, childSub);
+            }
+        }
+    }
+
+    if (waitingForDependencies) {
+        m_projectMgr->markProjectSummaryDirty(subRel, false);
+        m_deferredProjectScopes.insert(subRel, {maxOutputTokensOverride, contextWindowOverride});
+        return;
+    }
+
+    m_deferredProjectScopes.remove(subRel);
+    enqueueProjectSummaryNow(subRel, maxOutputTokensOverride, contextWindowOverride);
+}
+
 void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
                                            int maxOutputTokensOverride,
                                            int contextWindowOverride,
@@ -250,20 +342,20 @@ void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
 
     QString subRel;
     if (!projectDirOrRel.trimmed().isEmpty()) {
-        QString absDir = m_projectMgr->projectDirPathForRel(projectDirOrRel);
+        const QString absDir = m_projectMgr->projectDirPathForRel(projectDirOrRel);
         subRel = m_projectMgr->toRelativePath(absDir);
         if (subRel == ".") subRel.clear();
     }
 
-    QString existingSummary = m_projectMgr->projectSummary(subRel);
+    const QString existingSummary = m_projectMgr->projectSummary(subRel);
     if (existingSummary.trimmed().isEmpty()) {
         forceRebuildProjectSummary(maxOutputTokensOverride, contextWindowOverride, subRel);
         return;
     }
 
-    QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
+    const QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
     const auto& cfg = ConfigManager::instance().aiConfig();
-    QString initialUserPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
+    const QString initialUserPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
 
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
@@ -289,16 +381,42 @@ void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
 }
 
 void SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle() {
-    if (!m_projectMgr || !m_projectMgr->hasOpenProject()) return;
-    if (ConfigManager::instance().aiBehavior().autoSummaryMode != AutoSummaryMode::FilesAndProject) return;
+    if (!m_projectMgr || !m_projectMgr->hasOpenProject() || !m_taskQueue) return;
     if (!m_taskQueue->isIdle()) return;
+
+    // 1. Сначала проверяем явно запрошенные отложенные узлы снизу вверх
+    if (!m_deferredProjectScopes.isEmpty()) {
+        QStringList keys = m_deferredProjectScopes.keys();
+        std::sort(keys.begin(), keys.end(), [](const QString& a, const QString& b) {
+            int depthA = a.isEmpty() ? 0 : (a.count('/') + 1);
+            int depthB = b.isEmpty() ? 0 : (b.count('/') + 1);
+            if (depthA != depthB) return depthA > depthB;
+            return a.compare(b, Qt::CaseInsensitive) < 0;
+        });
+        const QString nextSub = keys.first();
+        const DeferredScopeLimits lim = m_deferredProjectScopes.take(nextSub);
+        enqueueProjectSummaryNow(nextSub, lim.maxOutputTokens, lim.contextWindow);
+        return;
+    }
+
+    // 2. Автоматическая пересборка грязных уровней снизу вверх в режиме FilesAndProject
+    if (ConfigManager::instance().aiBehavior().autoSummaryMode != AutoSummaryMode::FilesAndProject) {
+        return;
+    }
 
     const QStringList dirtyNodes = m_projectMgr->dirtyProjectRelPathsBottomUp();
     for (const QString& subRel : dirtyNodes) {
+        // Не запускаем авто-синтез саммари подпроекта по одному случайно открытому файлу,
+        // если в этом подпроекте есть другие разрешённые файлы, которые ещё вообще не индексировались
+        const int indexedDirect = m_projectMgr->indexedFilesCount(subRel, false);
+        const QStringList unindexedDirect = m_projectMgr->unindexedAllowedFilePaths(subRel, false);
+        if (indexedDirect <= 1 && !unindexedDirect.isEmpty()) {
+            continue;
+        }
         const QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
         if (!digest.trimmed().isEmpty()) {
-            forceRebuildProjectSummary(0, 0, subRel);
-            return; // Запускаем по одному уровню снизу вверх; по завершении onTaskCompleted запустит родителя
+            enqueueProjectSummaryNow(subRel, 0, 0);
+            return;
         }
     }
 }
@@ -333,36 +451,22 @@ void SummaryWorker::onTaskStreamChunk(const AiTask& task, const QString& chunk) 
 
 void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultText) {
     if (task.targetType == TaskTargetType::FileSummary) {
-        QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
+        const QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
         ? (task.previousOutput + "\n" + resultText)
         : resultText;
         m_projectMgr->updateFileSummary(task.filePath, task.fileSha256, task.llmModel, finalSummary);
 
-        // Если все задачи по файлам завершены и включён режим FilesAndProject —
-        // запускаем каскадное построение саммари подпроектов/проекта снизу вверх
-        if (ConfigManager::instance().aiBehavior().autoSummaryMode == AutoSummaryMode::FilesAndProject &&
-            m_taskQueue->lowQueueTasks().isEmpty()) {
-            const QString ownerSub = m_projectMgr->owningProjectRelPathForFile(task.filePath);
-            if (m_projectMgr->projectSummary(ownerSub).trimmed().isEmpty() ||
-                m_projectMgr->isProjectSummaryDirty(ownerSub)) {
-                const QString taskKey = makeProjectSummaryTaskKey(ownerSub);
-                if (!m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, taskKey)) {
-                    forceRebuildProjectSummary(0, 0, ownerSub);
-                }
-            }
+        if (m_taskQueue->lowQueueTasks().isEmpty()) {
+            QTimer::singleShot(0, this, &SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle);
         }
     } else if (task.targetType == TaskTargetType::ProjectSummary) {
         const QString subRel = extractSubprojectRelFromTaskKey(task.filePath);
-        QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
-                                   ? (task.previousOutput + "\n" + resultText)
-                                   : resultText;
+        const QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
+                                         ? (task.previousOutput + "\n" + resultText)
+                                         : resultText;
         m_projectMgr->setProjectSummary(finalSummary, task.llmModel, subRel);
 
-        // Если завершился пересчёт вложенного подпроекта и очередь пуста,
-        // при включённом режиме FilesAndProject переходим к следующему грязному родительскому уровню
-        if (!subRel.isEmpty() &&
-            ConfigManager::instance().aiBehavior().autoSummaryMode == AutoSummaryMode::FilesAndProject &&
-            m_taskQueue->lowQueueTasks().isEmpty()) {
+        if (m_taskQueue->lowQueueTasks().isEmpty()) {
             QTimer::singleShot(0, this, &SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle);
         }
     }

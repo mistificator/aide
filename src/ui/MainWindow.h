@@ -27,6 +27,7 @@ class ThemeAndSyntaxDownloader;
 class PromptHistoryDock;
 class ProjectPromptResultDialog;
 struct AiTask;
+
 class QMenuCompat;
 
 class MainWindow : public QMainWindow {
@@ -54,7 +55,6 @@ private slots:
     void onProjectTreeContextMenu(const QPoint& pos);
     void onRenameProjectFile(const QString& filePath);
     void onDeleteProjectFile(const QString& filePath);
-
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void onEditorAiContinue(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
@@ -62,7 +62,6 @@ private slots:
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
     void onTaskCancelled(const AiTask& task);
-
     void populateRecentProjectsMenu();
     void populateWindowMenu();
     void populateThemeMenu();
@@ -80,6 +79,10 @@ private:
                                   bool checkLimits = true,
                                   int maxTokensOverride = 0,
                                   int ctxWindowOverride = 0);
+    int enqueueBatchFilesWithProgress(const QStringList& files,
+                                      const QString& titlePrefix,
+                                      int* outMaxTokens = nullptr,
+                                      int* outCtxWindow = nullptr);
     void clearSingleFileSummary(const QString& filePath);
     void removeSingleFileSummary(const QString& filePath);
     void continueSingleFileSummary(const QString& filePath);
@@ -114,6 +117,7 @@ private:
     PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
+
     QMap<QString, QPointer<ProjectPromptResultDialog>> m_projectPromptWindows;
 
     QToolBar* m_aiToolBar = nullptr;
