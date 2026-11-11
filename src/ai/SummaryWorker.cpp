@@ -4,6 +4,7 @@
 #include "../core/ConfigManager.h"
 #include <QDir>
 #include <QFileInfo>
+#include <algorithm>
 
 namespace {
 constexpr const char* kRootProjectTaskKey = "__PROJECT_SUMMARY__";
@@ -104,6 +105,28 @@ bool SummaryWorker::hasPendingFileSummariesForScope(const QString& subRel) const
         if (matchesScope(t)) return true;
     }
     return false;
+}
+
+bool SummaryWorker::areDependenciesReadyForScope(const QString& subRel) const {
+    if (!m_projectMgr || !m_taskQueue) return false;
+    if (hasPendingFileSummariesForScope(subRel)) {
+        return false;
+    }
+
+    const QStringList directChildren = m_projectMgr->directChildSubprojects(subRel);
+    for (const QString& childSub : directChildren) {
+        if (m_deferredProjectScopes.contains(childSub)) {
+            return false;
+        }
+        const QString childTaskKey = makeProjectSummaryTaskKey(childSub);
+        if (m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey)) {
+            return false;
+        }
+        if (hasPendingFileSummariesForScope(childSub)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void SummaryWorker::checkAndScheduleFileSummary(const QString& filePath, const QByteArray& content) {
@@ -292,6 +315,25 @@ void SummaryWorker::enqueueProjectSummaryNow(const QString& subRel,
     m_taskQueue->enqueueTask(task);
 }
 
+void SummaryWorker::scheduleReadyDeferredProjectSummaries() {
+    if (m_deferredProjectScopes.isEmpty() || !m_projectMgr || !m_taskQueue) return;
+
+    QStringList keys = m_deferredProjectScopes.keys();
+    std::sort(keys.begin(), keys.end(), [](const QString& a, const QString& b) {
+        int depthA = a.isEmpty() ? 0 : (a.count('/') + 1);
+        int depthB = b.isEmpty() ? 0 : (b.count('/') + 1);
+        if (depthA != depthB) return depthA > depthB;
+        return a.compare(b, Qt::CaseInsensitive) < 0;
+    });
+
+    for (const QString& scopeRel : keys) {
+        if (areDependenciesReadyForScope(scopeRel)) {
+            const DeferredScopeLimits lim = m_deferredProjectScopes.take(scopeRel);
+            enqueueProjectSummaryNow(scopeRel, lim.maxOutputTokens, lim.contextWindow);
+        }
+    }
+}
+
 void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
                                                int contextWindowOverride,
                                                const QString& projectDirOrRel) {
@@ -303,35 +345,44 @@ void SummaryWorker::forceRebuildProjectSummary(int maxOutputTokensOverride,
         subRel = m_projectMgr->toRelativePath(absDir);
         if (subRel == ".") subRel.clear();
     }
+    if (!subRel.isEmpty()) {
+        m_projectMgr->ensureSubprojectNode(subRel);
+    }
 
-    // 1. Проверяем прямые дочерние подпроекты: если их саммари устарели или ещё не созданы,
-    // сначала запускаем их пересборку, а текущий родительский узел откладываем в m_deferredProjectScopes,
-    // чтобы его дайджест был собран ПОСЛЕ готовности всех дочерних подпроектов и файлов.
-    bool waitingForDependencies = hasPendingFileSummariesForScope(subRel);
-    const QStringList directChildren = m_projectMgr->directChildSubprojects(subRel);
-    for (const QString& childSub : directChildren) {
-        const QString childTaskKey = makeProjectSummaryTaskKey(childSub);
-        const bool childPending = m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey) ||
-                                  hasPendingFileSummariesForScope(childSub);
-        const bool childDirty = m_projectMgr->isProjectSummaryDirty(childSub) ||
-                                (m_projectMgr->projectSummary(childSub).trimmed().isEmpty() &&
-                                 m_projectMgr->indexedFilesCount(childSub, true) > 0);
-        if (childPending || childDirty) {
-            waitingForDependencies = true;
-            if (!m_taskQueue->hasPendingOrActiveTask(TaskTargetType::ProjectSummary, childTaskKey)) {
-                forceRebuildProjectSummary(maxOutputTokensOverride, contextWindowOverride, childSub);
+    // Рекурсивно проверяем все дочерние подпроекты (включая виртуальные папки):
+    // если у дочерней папки есть проиндексированные (или ожидающие индексации) файлы,
+    // но её виртуальное/реальное саммари пустое или устарело (dirty), планируем её пересборку снизу вверх.
+    auto collectTreeBottomUp = [&](auto& self, const QString& currentScope, bool isTargetRoot) -> bool {
+        bool anyChildScheduled = false;
+        const QStringList directChildren = m_projectMgr->directChildSubprojects(currentScope);
+        for (const QString& childSub : directChildren) {
+            if (self(self, childSub, false)) {
+                anyChildScheduled = true;
             }
         }
-    }
 
-    if (waitingForDependencies) {
-        m_projectMgr->markProjectSummaryDirty(subRel, false);
-        m_deferredProjectScopes.insert(subRel, {maxOutputTokensOverride, contextWindowOverride});
-        return;
-    }
+        const bool hasFiles = (m_projectMgr->indexedFilesCount(currentScope, true) > 0) ||
+                              hasPendingFileSummariesForScope(currentScope);
+        if (!hasFiles && !isTargetRoot) {
+            return false;
+        }
 
-    m_deferredProjectScopes.remove(subRel);
-    enqueueProjectSummaryNow(subRel, maxOutputTokensOverride, contextWindowOverride);
+        const bool needsBuild = isTargetRoot ||
+                                anyChildScheduled ||
+                                m_projectMgr->isProjectSummaryDirty(currentScope) ||
+                                m_projectMgr->projectSummary(currentScope).trimmed().isEmpty() ||
+                                hasPendingFileSummariesForScope(currentScope);
+
+        if (needsBuild) {
+            m_projectMgr->markProjectSummaryDirty(currentScope, false);
+            m_deferredProjectScopes.insert(currentScope, {maxOutputTokensOverride, contextWindowOverride});
+            return true;
+        }
+        return false;
+    };
+
+    collectTreeBottomUp(collectTreeBottomUp, subRel, true);
+    scheduleReadyDeferredProjectSummaries();
 }
 
 void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
@@ -382,35 +433,26 @@ void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
 
 void SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle() {
     if (!m_projectMgr || !m_projectMgr->hasOpenProject() || !m_taskQueue) return;
-    if (!m_taskQueue->isIdle()) return;
 
-    // 1. Сначала проверяем явно запрошенные отложенные узлы снизу вверх
     if (!m_deferredProjectScopes.isEmpty()) {
-        QStringList keys = m_deferredProjectScopes.keys();
-        std::sort(keys.begin(), keys.end(), [](const QString& a, const QString& b) {
-            int depthA = a.isEmpty() ? 0 : (a.count('/') + 1);
-            int depthB = b.isEmpty() ? 0 : (b.count('/') + 1);
-            if (depthA != depthB) return depthA > depthB;
-            return a.compare(b, Qt::CaseInsensitive) < 0;
-        });
-        const QString nextSub = keys.first();
-        const DeferredScopeLimits lim = m_deferredProjectScopes.take(nextSub);
-        enqueueProjectSummaryNow(nextSub, lim.maxOutputTokens, lim.contextWindow);
-        return;
+        scheduleReadyDeferredProjectSummaries();
+        if (!m_taskQueue->isIdle()) return;
     }
 
-    // 2. Автоматическая пересборка грязных уровней снизу вверх в режиме FilesAndProject
+    if (!m_taskQueue->isIdle()) return;
+
     if (ConfigManager::instance().aiBehavior().autoSummaryMode != AutoSummaryMode::FilesAndProject) {
         return;
     }
 
     const QStringList dirtyNodes = m_projectMgr->dirtyProjectRelPathsBottomUp();
     for (const QString& subRel : dirtyNodes) {
-        // Не запускаем авто-синтез саммари подпроекта по одному случайно открытому файлу,
-        // если в этом подпроекте есть другие разрешённые файлы, которые ещё вообще не индексировались
         const int indexedDirect = m_projectMgr->indexedFilesCount(subRel, false);
         const QStringList unindexedDirect = m_projectMgr->unindexedAllowedFilePaths(subRel, false);
         if (indexedDirect <= 1 && !unindexedDirect.isEmpty()) {
+            continue;
+        }
+        if (!areDependenciesReadyForScope(subRel)) {
             continue;
         }
         const QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
@@ -456,6 +498,7 @@ void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultTex
         : resultText;
         m_projectMgr->updateFileSummary(task.filePath, task.fileSha256, task.llmModel, finalSummary);
 
+        scheduleReadyDeferredProjectSummaries();
         if (m_taskQueue->lowQueueTasks().isEmpty()) {
             QTimer::singleShot(0, this, &SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle);
         }
@@ -466,6 +509,7 @@ void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultTex
                                          : resultText;
         m_projectMgr->setProjectSummary(finalSummary, task.llmModel, subRel);
 
+        scheduleReadyDeferredProjectSummaries();
         if (m_taskQueue->lowQueueTasks().isEmpty()) {
             QTimer::singleShot(0, this, &SummaryWorker::scheduleNextDirtyProjectSummaryIfIdle);
         }
@@ -480,14 +524,19 @@ void SummaryWorker::onTaskFailed(const AiTask& task, const QString&) {
         const QString subRel = extractSubprojectRelFromTaskKey(task.filePath);
         emit summaryStreamingReset(subRel, true);
     }
+    scheduleReadyDeferredProjectSummaries();
 }
 
 void SummaryWorker::onTaskCancelled(const AiTask& task) {
     if (task.targetType == TaskTargetType::FileSummary) {
         m_projectMgr->setFileSummaryPending(task.filePath, false);
         emit summaryStreamingReset(task.filePath, false);
+        if (m_taskQueue->lowQueueTasks().isEmpty() && !m_taskQueue->isProcessing()) {
+            m_deferredProjectScopes.clear();
+        }
     } else if (task.targetType == TaskTargetType::ProjectSummary) {
         const QString subRel = extractSubprojectRelFromTaskKey(task.filePath);
+        m_deferredProjectScopes.remove(subRel);
         emit summaryStreamingReset(subRel, true);
     }
 }

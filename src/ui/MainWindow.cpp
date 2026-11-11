@@ -66,29 +66,42 @@ public:
              role == Qt::FontRole || role == Qt::ToolTipRole)) {
             if (isDir(index)) {
                 const QString path = filePath(index);
-                if (m_pm->isSubprojectDir(path)) {
+                const QString subRel = m_pm->toRelativePath(path);
+                if (!subRel.isEmpty() && !subRel.startsWith("..")) {
+                    const bool hasStandalone = m_pm->hasStandaloneAideFile(subRel);
+                    const QString sum = m_pm->projectSummary(subRel);
+                    const bool hasSum = !sum.trimmed().isEmpty();
+
                     if (role == Qt::DisplayRole) {
-                        return QFileSystemModel::data(index, Qt::DisplayRole).toString() + " [.aide]";
-                    }
-                    if (role == Qt::ForegroundRole) {
-                        return QColor("#bd93f9");
-                    }
-                    if (role == Qt::FontRole) {
-                        QFont f = QFileSystemModel::data(index, Qt::FontRole).value<QFont>();
-                        f.setBold(true);
-                        return f;
-                    }
-                    if (role == Qt::ToolTipRole) {
-                        const QString subRel = m_pm->toRelativePath(path);
-                        const QString sum = m_pm->projectSummary(subRel);
+                        if (hasStandalone) {
+                            return QFileSystemModel::data(index, Qt::DisplayRole).toString() + " [.aide]";
+                        }
+                    } else if (role == Qt::ForegroundRole) {
+                        if (hasStandalone) return QColor("#bd93f9");
+                        if (hasSum) return QColor("#8be9fd");
+                    } else if (role == Qt::FontRole) {
+                        if (hasStandalone || hasSum) {
+                            QFont f = QFileSystemModel::data(index, Qt::FontRole).value<QFont>();
+                            f.setBold(true);
+                            return f;
+                        }
+                    } else if (role == Qt::ToolTipRole) {
                         const int indexed = m_pm->indexedFilesCount(subRel, true);
                         const bool dirty = m_pm->isProjectSummaryDirty(subRel);
-                        QString status = sum.trimmed().isEmpty()
-                                             ? "No subproject summary yet"
-                                             : (dirty ? "Summary Ready (Outdated / Dirty)" : "Summary Ready");
-                        return QString("Subproject (.aide): %1\nStatus: %2\nIndexed files: %3")
-                            .arg(subRel, status)
-                            .arg(indexed);
+                        const QString modeStr = hasStandalone
+                                                    ? QStringLiteral("Standalone (.aide file in folder)")
+                                                    : QStringLiteral("Virtual (stored in parent .aide)");
+                        const QString status = !hasSum
+                                                   ? QStringLiteral("No subproject summary yet")
+                                                   : (dirty ? QStringLiteral("Summary Ready (Outdated / Dirty)")
+                                                            : QStringLiteral("Summary Ready"));
+                        QString tip = QString("Subproject: %1\nMode: %2\nStatus: %3\nIndexed files: %4")
+                                          .arg(subRel, modeStr, status)
+                                          .arg(indexed);
+                        if (hasSum) {
+                            tip += "\n\n" + sum.left(280);
+                        }
+                        return tip;
                     }
                 }
             } else if (role == Qt::ForegroundRole || role == Qt::ToolTipRole) {
@@ -180,7 +193,6 @@ MainWindow::MainWindow(QWidget* parent)
     m_downloader->ensureResourcesPresent();
     updateCentralViewState();
 
-    // Открываем последний проект после отрисовки главного окна, чтобы окно не зависало до появления на экране
     QString lastProj = ConfigManager::instance().lastProjectPath();
     if (!lastProj.isEmpty() && QDir(lastProj).exists()) {
         QTimer::singleShot(0, this, [this, lastProj]() {
@@ -1036,13 +1048,17 @@ void MainWindow::onRecursiveProjectSummary(const QString& startDir) {
 void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
     if (!m_projectMgr->hasOpenProject()) return;
 
-    const QString targetName = subprojectRel.isEmpty()
-                                   ? QStringLiteral("Root Project")
-                                   : QString("Subproject '%1'").arg(subprojectRel);
+    const QString cleanSubRel = m_projectMgr->toRelativePath(subprojectRel);
+    if (!cleanSubRel.isEmpty()) {
+        m_projectMgr->ensureSubprojectNode(cleanSubRel);
+    }
 
-    // Проверяем, есть ли в этом подпроекте/проекте непроиндексированные разрешённые файлы
-    const QStringList unindexedFiles = m_projectMgr->unindexedAllowedFilePaths(subprojectRel, true);
-    const int indexedCount = m_projectMgr->indexedFilesCount(subprojectRel, true);
+    const QString targetName = cleanSubRel.isEmpty()
+                                   ? QStringLiteral("Root Project")
+                                   : QString("Subproject '%1'").arg(cleanSubRel);
+
+    const QStringList unindexedFiles = m_projectMgr->unindexedAllowedFilePaths(cleanSubRel, true);
+    const int indexedCount = m_projectMgr->indexedFilesCount(cleanSubRel, true);
 
     if (!unindexedFiles.isEmpty()) {
         QMessageBox msgBox(this);
@@ -1052,7 +1068,7 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
         if (indexedCount == 0) {
             msgBox.setText(
                 QString("<b>%1</b> currently has <b>0 indexed files</b>, and <b>%2 allowed source file(s)</b> without a summary.<br><br>"
-                        "Would you like to generate summaries for those %2 file(s) now and then automatically build the %1 summary?")
+                        "Would you like to generate summaries for those %2 file(s) now and then automatically synthesize the %1 summary (bottom-up across all subfolders)?")
                     .arg(targetName)
                     .arg(unindexedFiles.size()));
         } else {
@@ -1090,9 +1106,9 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
                 &maxTokens,
                 &ctxWindow);
             if (scheduled > 0) {
-                m_summaryWorker->forceRebuildProjectSummary(maxTokens, ctxWindow, subprojectRel);
+                m_summaryWorker->forceRebuildProjectSummary(maxTokens, ctxWindow, cleanSubRel);
                 statusBar()->showMessage(
-                    QString("Queued %1 file(s); %2 summary will be synthesized automatically upon completion.")
+                    QString("Queued %1 file(s); %2 summary (and nested virtual subprojects) will be synthesized automatically.")
                         .arg(scheduled)
                         .arg(targetName),
                     5000);
@@ -1102,10 +1118,9 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
         (void)buildExistingOnlyBtn;
     }
 
-    QString digest = m_projectMgr->buildAggregatedFilesDigest(subprojectRel);
+    QString digest = m_projectMgr->buildAggregatedFilesDigest(cleanSubRel);
     if (digest.trimmed().isEmpty()) {
-        // Если файлы уже стоят в очереди индексации — откладываем сборку саммари подпроекта до их окончания
-        m_summaryWorker->forceRebuildProjectSummary(0, 0, subprojectRel);
+        m_summaryWorker->forceRebuildProjectSummary(0, 0, cleanSubRel);
         statusBar()->showMessage(
             QString("Scheduled %1 summary (will run as soon as pending file summaries finish).").arg(targetName),
             4000);
@@ -1116,11 +1131,11 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
     int maxTokens = cfg.maxOutputSummaryTokens;
     int ctxWindow = cfg.contextWindow;
 
-    QString sysPrompt = m_projectMgr->projectSystemPrompt(subprojectRel);
+    QString sysPrompt = m_projectMgr->projectSystemPrompt(cleanSubRel);
     QString userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
-    QString title = subprojectRel.isEmpty()
+    QString title = cleanSubRel.isEmpty()
                         ? QStringLiteral("Rebuild Project Summary")
-                        : QString("Rebuild Subproject Summary (%1)").arg(subprojectRel);
+                        : QString("Rebuild Subproject Summary (%1)").arg(cleanSubRel);
 
     if (!verifyAndAdjustContextLimits(title,
                                       sysPrompt,
@@ -1132,7 +1147,7 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
         return;
     }
 
-    m_summaryWorker->forceRebuildProjectSummary(maxTokens, ctxWindow, subprojectRel);
+    m_summaryWorker->forceRebuildProjectSummary(maxTokens, ctxWindow, cleanSubRel);
     statusBar()->showMessage(QString("Queued %1 summary generation.").arg(targetName), 4000);
 }
 
@@ -1158,7 +1173,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() || (indexedCount > 0);
     auto* statusLbl = new QLabel(
         QString("<b>Project:</b> %1<br>"
-                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b> | Subprojects (.aide): <b>%4</b></span>")
+                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b> | Subproject Scopes: <b>%4</b></span>")
             .arg(QDir::toNativeSeparators(m_projectMgr->projectRootPath()),
                  hasSummary ? "Yes" : "No (Empty)",
                  QString::number(indexedCount),
@@ -1573,48 +1588,56 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
     if (isDir && QDir::cleanPath(clickedPath).compare(QDir::cleanPath(m_projectMgr->projectRootPath()), Qt::CaseInsensitive) != 0) {
         const QString folderName = QFileInfo(clickedPath).fileName();
         const QString subRel = m_projectMgr->toRelativePath(clickedPath);
-        const bool isSubproj = m_projectMgr->isSubprojectDir(clickedPath);
+        const bool hasStandalone = m_projectMgr->hasStandaloneAideFile(clickedPath);
 
-        if (!isSubproj) {
-            menu.addAction(QString("Mark '%1' as Subproject (.aide)").arg(folderName), this, [this, clickedPath, subRel]() {
+        menu.addAction(QString("Inspect Subproject '%1' in AI Inspector").arg(folderName), this, [this, subRel]() {
+            m_inspectorDock->inspectProjectScope(subRel);
+        });
+        menu.addAction(QString("Rebuild Subproject '%1' Summary").arg(folderName), this, [this, subRel]() {
+            m_inspectorDock->inspectProjectScope(subRel);
+            onRebuildProjectSummary(subRel);
+        });
+        menu.addAction(QString("Generate File Summaries in '%1' (Recursive)...").arg(folderName),
+                       this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
+
+        menu.addSeparator();
+        if (!hasStandalone) {
+            menu.addAction(QString("Create Standalone .aide File in '%1'").arg(folderName), this, [this, clickedPath, subRel]() {
                 if (m_projectMgr->createSubproject(clickedPath)) {
-                    m_inspectorDock->setSelectedProjectScope(subRel);
-                    m_inspectorDock->show();
-                    m_inspectorDock->raise();
+                    m_inspectorDock->inspectProjectScope(subRel);
                     m_projectTree->viewport()->update();
                     statusBar()->showMessage(
-                        QString("Created subproject (.aide) in '%1' and migrated its file summaries.").arg(subRel), 4000);
+                        QString("Created standalone .aide file in '%1' and migrated its summaries.").arg(subRel), 4000);
                 }
             });
         } else {
-            menu.addAction(QString("Inspect Subproject '%1' (.aide)").arg(folderName), this, [this, subRel]() {
-                m_inspectorDock->setSelectedProjectScope(subRel);
-                m_inspectorDock->show();
-                m_inspectorDock->raise();
-            });
-            menu.addAction(QString("Rebuild Subproject '%1' Summary").arg(folderName), this, [this, subRel]() {
-                onRebuildProjectSummary(subRel);
-            });
-            menu.addAction(QString("Remove Subproject '%1' (Delete .aide Only)").arg(folderName), this, [this, clickedPath, subRel]() {
+            menu.addAction(QString("Merge '%1' .aide into Parent Project (Keep Virtual Summary)").arg(folderName), this, [this, clickedPath, subRel]() {
                 auto ans = QMessageBox::question(
                     this,
-                    "Remove Subproject (.aide)",
-                    QString("Remove subproject marker (.aide file) from folder '%1'?\n\n"
+                    "Merge Subproject (.aide) into Parent",
+                    QString("Remove standalone .aide file from folder '%1' and keep its summaries as a Virtual Subproject inside the parent .aide file?\n\n"
                             "• The folder and all source files on disk will NOT be touched.\n"
-                            "• Existing file summaries from this subproject will be moved to the parent project (.aide).")
+                            "• The subproject summary, system prompt, and all file summaries will be preserved in the parent .aide file.")
                         .arg(subRel),
                     QMessageBox::Yes | QMessageBox::No,
                     QMessageBox::No);
                 if (ans == QMessageBox::Yes && m_projectMgr->removeSubproject(clickedPath)) {
+                    m_inspectorDock->inspectProjectScope(subRel);
                     m_projectTree->viewport()->update();
                     statusBar()->showMessage(
-                        QString("Removed subproject (.aide) from '%1'; summaries moved to parent project.").arg(subRel), 4000);
+                        QString("Merged .aide from '%1' into parent project (virtual subproject preserved).").arg(subRel), 4000);
                 }
             });
         }
         menu.addSeparator();
-        menu.addAction(QString("Generate Summaries in '%1' (Recursive)...").arg(folderName),
-                       this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
+    } else if (isDir) {
+        menu.addAction("Inspect Root Project Summary in AI Inspector", this, [this]() {
+            m_inspectorDock->inspectProjectScope({});
+        });
+        menu.addAction("Rebuild Root Project Summary", this, [this]() {
+            m_inspectorDock->inspectProjectScope({});
+            onRebuildProjectSummary({});
+        });
         menu.addSeparator();
     }
 

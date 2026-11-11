@@ -27,12 +27,12 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_refreshDebounceTimer.setInterval(25);
     connect(&m_refreshDebounceTimer, &QTimer::timeout, this, &ContextInspectorDock::refreshDisplay);
 
-    auto* tabs = new QTabWidget(this);
-    tabs->setMinimumWidth(0);
-    tabs->setUsesScrollButtons(true);
+    m_tabs = new QTabWidget(this);
+    m_tabs->setMinimumWidth(0);
+    m_tabs->setUsesScrollButtons(true);
 
     // Вкладка 1: Document
-    auto* docSplit = new QSplitter(Qt::Vertical, tabs);
+    auto* docSplit = new QSplitter(Qt::Vertical, m_tabs);
     docSplit->setMinimumWidth(0);
     docSplit->setChildrenCollapsible(false);
 
@@ -101,10 +101,10 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setStretchFactor(0, 2);
     docSplit->setStretchFactor(1, 1);
     docSplit->setSizes({420, 210});
-    tabs->addTab(docSplit, "Document");
+    m_tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Project (с выбором корневого проекта или подпроекта .aide)
-    auto* projSplit = new QSplitter(Qt::Vertical, tabs);
+    // Вкладка 2: Project (с выбором корневого проекта, виртуального или .aide подпроекта)
+    auto* projSplit = new QSplitter(Qt::Vertical, m_tabs);
     projSplit->setMinimumWidth(0);
     projSplit->setChildrenCollapsible(false);
 
@@ -115,16 +115,16 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     auto* scopeRow = new QHBoxLayout();
     scopeRow->setSpacing(4);
-    auto* scopeLbl = new QLabel("Target (.aide):", projTop);
+    auto* scopeLbl = new QLabel("Target Scope:", projTop);
     scopeLbl->setStyleSheet("font-weight: bold;");
     m_projectScopeCombo = new QComboBox(projTop);
     m_projectScopeCombo->setMinimumWidth(0);
     m_projectScopeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_projectScopeCombo->setToolTip("Select Root Project or a nested Subproject (.aide)");
+    m_projectScopeCombo->setToolTip("Select Root Project or any Subproject folder (Virtual or standalone .aide)");
     scopeRow->addWidget(scopeLbl);
     scopeRow->addWidget(m_projectScopeCombo, 1);
 
-    m_projectMetaLabel = new QLabel("LLM: - | Indexed Files: 0", projTop);
+    m_projectMetaLabel = new QLabel("Mode: - | LLM: - | Indexed Files: 0", projTop);
     m_projectMetaLabel->setStyleSheet("color: #888899; font-size: 11px;");
     m_projectMetaLabel->setWordWrap(true);
     m_projectMetaLabel->setMinimumWidth(0);
@@ -132,7 +132,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
 
     auto* projSumHdr = new QHBoxLayout();
     projSumHdr->setSpacing(4);
-    auto* projSumTitle = new QLabel("Project Summary:", projTop);
+    auto* projSumTitle = new QLabel("Summary:", projTop);
     projSumTitle->setMinimumWidth(0);
     projSumTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
@@ -175,10 +175,10 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     projSplit->setStretchFactor(0, 2);
     projSplit->setStretchFactor(1, 1);
     projSplit->setSizes({420, 210});
-    tabs->addTab(projSplit, "Project");
+    m_tabs->addTab(projSplit, "Project");
 
     // Вкладка 3: Effective Context
-    auto* effPage = new QWidget(tabs);
+    auto* effPage = new QWidget(m_tabs);
     effPage->setMinimumWidth(0);
     auto* effLay = new QVBoxLayout(effPage);
     effLay->setContentsMargins(6, 6, 6, 6);
@@ -191,9 +191,9 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     setupMarkdownViewerStyle(m_effectiveContextPreview);
     effLay->addWidget(m_tokenEstimateLabel);
     effLay->addWidget(m_effectiveContextPreview);
-    tabs->addTab(effPage, "Effective Context");
+    m_tabs->addTab(effPage, "Effective Context");
 
-    setWidget(tabs);
+    setWidget(m_tabs);
 
     connect(m_projectScopeCombo, &QComboBox::currentIndexChanged, this, [this](int idx) {
         if (m_updatingUi || idx < 0) return;
@@ -370,15 +370,21 @@ void ContextInspectorDock::rebuildProjectScopeCombo() {
     m_projectScopeCombo->setEnabled(true);
     QString rootDirName = QDir(m_projectMgr->projectRootPath()).dirName();
     if (rootDirName.isEmpty()) rootDirName = m_projectMgr->projectRootPath();
-    m_projectScopeCombo->addItem(QString("Root Project (%1)").arg(rootDirName), QString());
+    m_projectScopeCombo->addItem(QString("Root Project (%1) [.aide]").arg(rootDirName), QString());
 
     const QStringList subs = m_projectMgr->subprojectRelPaths();
     int targetIdx = 0;
     for (int i = 0; i < subs.size(); ++i) {
         const QString& subRel = subs[i];
-        m_projectScopeCombo->addItem(QString("Subproject: %1").arg(subRel), subRel);
-        if (subRel == m_selectedProjectScope) {
+        const bool isStandalone = m_projectMgr->hasStandaloneAideFile(subRel);
+        const bool hasSum = !m_projectMgr->projectSummary(subRel).trimmed().isEmpty();
+        const QString badge = isStandalone
+                                  ? QStringLiteral("[.aide]")
+                                  : (hasSum ? QStringLiteral("[Virtual • Summary Ready]") : QStringLiteral("[Virtual]"));
+        m_projectScopeCombo->addItem(QString("%1 %2").arg(subRel, badge), subRel);
+        if (subRel.compare(m_selectedProjectScope, Qt::CaseInsensitive) == 0) {
             targetIdx = i + 1;
+            m_selectedProjectScope = subRel;
         }
     }
 
@@ -390,9 +396,23 @@ void ContextInspectorDock::rebuildProjectScopeCombo() {
 }
 
 void ContextInspectorDock::setSelectedProjectScope(const QString& subprojectRelPath) {
-    m_selectedProjectScope = subprojectRelPath.trimmed();
+    QString clean = subprojectRelPath.trimmed();
+    if (!clean.isEmpty() && m_projectMgr && m_projectMgr->hasOpenProject()) {
+        clean = m_projectMgr->toRelativePath(clean);
+        m_projectMgr->ensureSubprojectNode(clean);
+    }
+    m_selectedProjectScope = clean;
     rebuildProjectScopeCombo();
     refreshDisplay();
+}
+
+void ContextInspectorDock::inspectProjectScope(const QString& subprojectRelPath) {
+    setSelectedProjectScope(subprojectRelPath);
+    if (m_tabs) {
+        m_tabs->setCurrentIndex(1); // Переключаем на вкладку "Project"
+    }
+    show();
+    raise();
 }
 
 QString ContextInspectorDock::selectedProjectScope() const {
@@ -463,9 +483,15 @@ void ContextInspectorDock::refreshDisplay() {
     const int indexedInScope = hasProj ? m_projectMgr->indexedFilesCount(m_selectedProjectScope, true) : 0;
     const int directChildSubs = hasProj ? m_projectMgr->directChildSubprojects(m_selectedProjectScope).size() : 0;
     const bool isDirty = hasProj && m_projectMgr->isProjectSummaryDirty(m_selectedProjectScope);
+    const QString storageMode = !hasProj
+                                    ? QStringLiteral("-")
+                                    : (m_selectedProjectScope.isEmpty() || m_projectMgr->hasStandaloneAideFile(m_selectedProjectScope)
+                                           ? QStringLiteral(".aide file")
+                                           : QStringLiteral("Virtual (in parent .aide)"));
 
     m_projectMetaLabel->setText(
-        QString("LLM: %1 | Indexed Files: %2 | Subprojects: %3%4")
+        QString("Mode: %1 | LLM: %2 | Indexed Files: %3 | Child Folders: %4%5")
+            .arg(storageMode)
             .arg(projLlm.isEmpty() ? "-" : projLlm)
             .arg(indexedInScope)
             .arg(directChildSubs)
@@ -505,14 +531,16 @@ void ContextInspectorDock::refreshDisplay() {
 
         QString ownerInfo = fc.subprojectRelPath.isEmpty()
                                 ? QStringLiteral("Root")
-                                : QString("Subproject (%1)").arg(fc.subprojectRelPath);
+                                : QString("%1 (%2)")
+                                      .arg(fc.subprojectRelPath,
+                                           m_projectMgr->hasStandaloneAideFile(fc.subprojectRelPath) ? ".aide" : "virtual");
         QString llmInfo = fc.isSummaryPending
                               ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
                               : (fc.llmModel.isEmpty() ? (isClearedEmpty ? "cleared (empty)" : (summaryAllowed ? "-" : "Skipped by settings")) : fc.llmModel);
         QString shaInfo = fc.isSummaryPending
                               ? (fc.pendingSha256.isEmpty() ? "-" : fc.pendingSha256.left(12))
                               : (fc.sha256.isEmpty() ? "-" : fc.sha256.left(12));
-        m_fileMetaLabel->setText(QString("Owner: %1 | LLM: %2 | SHA-256: %3").arg(ownerInfo, llmInfo, shaInfo));
+        m_fileMetaLabel->setText(QString("Scope: %1 | LLM: %2 | SHA-256: %3").arg(ownerInfo, llmInfo, shaInfo));
 
         if (m_filePromptEdit->toPlainText() != fc.userPrompt) {
             m_filePromptEdit->setPlainText(fc.userPrompt);
@@ -547,7 +575,7 @@ void ContextInspectorDock::refreshDisplay() {
         m_continueFileBtn->setEnabled(false);
         m_fileHeaderLabel->setText("Document: None (Unsaved or Closed)");
         m_fileHeaderLabel->setToolTip({});
-        m_fileMetaLabel->setText("Owner: - | LLM: - | SHA-256: -");
+        m_fileMetaLabel->setText("Scope: - | LLM: - | SHA-256: -");
         m_filePromptEdit->clear();
         m_cachedFileSummaryMd.clear();
         m_fileSummaryView->clear();

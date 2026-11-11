@@ -44,7 +44,11 @@ public:
     QString toRelativePath(const QString& filePathOrRel) const;
     QString toAbsolutePath(const QString& relPath) const;
 
+    // Различие между любым подпроектом (виртуальным или .aide) и физическим файлом .aide на диске
     bool isSubprojectDir(const QString& dirPathOrRel) const;
+    bool hasStandaloneAideFile(const QString& dirPathOrRel) const;
+    void ensureSubprojectNode(const QString& dirPathOrRel);
+
     QStringList subprojectRelPaths() const;
     QStringList directChildSubprojects(const QString& parentSubRel = {}) const;
     QStringList dirtyProjectRelPathsBottomUp() const;
@@ -109,27 +113,35 @@ signals:
 private:
     struct ProjectNodeData {
         QString subprojectRel; // "" для корня проекта
-        QString aideFilePath;
+        QString aideFilePath;  // пусто для виртуального подпроекта; непусто для корня и отдельных .aide
         QString projectName;
         QString systemPrompt;
         QString summary;
         QString summaryLlm;
         bool summaryDirty = false;
         QDateTime updatedAt;
+
+        bool isVirtual() const { return !subprojectRel.isEmpty() && aideFilePath.isEmpty(); }
     };
 
     QString normalizeScopeRel(const QString& scopeOrPath) const;
     QString parentSubprojectRel(const QString& subRel) const;
+    QString owningStorageNodeForRelPath(const QString& relPath) const;
+    void ensureVirtualSubprojectChain(const QString& dirRel);
+
     static QString defaultAideFilePathForDir(const QString& absDirPath);
     static QString findExistingAideFileInDir(const QString& absDirPath);
 
-    bool loadNodeFromDisk(const QString& subRel, const QString& aidePath, QMap<QString, FileContextData>& outLoadedFiles);
-    bool saveNodeToDisk(const ProjectNodeData& node) const;
+    bool loadNodeFromDisk(const QString& subRel,
+                          const QString& aidePath,
+                          QMap<QString, FileContextData>& outLoadedFiles,
+                          QMap<QString, ProjectNodeData>& outLoadedVirtualNodes);
+    bool saveNodeToDisk(const ProjectNodeData& storageNode) const;
     void rebuildWatcherPaths();
     void reassignAllFilesToNearestOwners();
 
     QString m_rootPath;
-    QMap<QString, ProjectNodeData> m_nodes;     // ключ: subprojectRel ("" = корень)
+    QMap<QString, ProjectNodeData> m_nodes;     // ключ: subprojectRel ("" = корень, остальные = реальные или виртуальные папки)
     QMap<QString, FileContextData> m_files;     // ключ: relPath относительно m_rootPath
     QFileSystemWatcher* m_fsWatcher = nullptr;
     QTimer m_watchDebounceTimer;

@@ -5,6 +5,7 @@
 #include <QString>
 #include <QTimer>
 
+class QTabWidget;
 class QPlainTextEdit;
 class QTextEdit;
 class QLabel;
@@ -19,6 +20,7 @@ public:
 
     void setActiveFile(const QString& filePath);
     void setSelectedProjectScope(const QString& subprojectRelPath);
+    void inspectProjectScope(const QString& subprojectRelPath);
     QString selectedProjectScope() const;
     void scheduleRefreshDisplay();
     void refreshDisplay();
@@ -45,6 +47,7 @@ private:
                                                bool scrollToBottom = false);
 
     ProjectManager* m_projectMgr = nullptr;
+    QTabWidget* m_tabs = nullptr;
     QString m_activeFilePath;
     QString m_selectedProjectScope; // "" для корня проекта
     QMap<QString, QString> m_liveFileMarkdownByPath;

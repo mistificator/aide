@@ -50,18 +50,21 @@ ProjectFileSelectorWidget::FastFilterRules ProjectFileSelectorWidget::buildFastF
     FastFilterRules rules;
     const auto& cfgMgr = ConfigManager::instance();
     const auto beh = cfgMgr.aiBehavior();
+
     for (const QString& ext : beh.summaryAllowedExtensions) {
         QString clean = ext.trimmed().toLower();
         if (clean.startsWith("*.")) clean = clean.mid(2);
         else if (clean.startsWith('.')) clean = clean.mid(1);
         if (!clean.isEmpty()) rules.allowedExtensions.insert(clean);
     }
+
     if (beh.summaryUseSyntaxExtensions) {
         for (const QString& ext : cfgMgr.extensionsFromLoadedSyntaxes()) {
             QString clean = ext.trimmed().toLower();
             if (!clean.isEmpty()) rules.allowedExtensions.insert(clean);
         }
     }
+
     for (const QString& pat : beh.summaryAllowedFilenames) {
         QString p = pat.trimmed();
         if (p.isEmpty()) continue;
@@ -73,6 +76,7 @@ ProjectFileSelectorWidget::FastFilterRules ProjectFileSelectorWidget::buildFastF
             rules.exactAllowedNames.insert(p.toLower());
         }
     }
+
     for (const QString& pat : beh.summaryIgnoredDirs) {
         QString p = pat.trimmed();
         if (p.isEmpty()) continue;
@@ -166,6 +170,7 @@ int ProjectFileSelectorWidget::countDirectoriesQuick(const QString& dirPath,
                                                      int& abortCounter) const {
     QDir dir(dirPath);
     if (!dir.exists()) return 0;
+
     int count = 1;
     const QFileInfoList subDirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::NoSort);
     for (const QFileInfo& subFi : subDirs) {
@@ -182,6 +187,7 @@ void ProjectFileSelectorWidget::rebuildTree() {
     const int myGen = ++m_buildGeneration;
     m_isLoading = true;
     m_updatingChecks = true;
+
     m_progressBar->show();
     m_progressBar->setRange(0, 0);
     m_progressBar->setFormat("Scanning project folders...");
@@ -204,7 +210,7 @@ void ProjectFileSelectorWidget::rebuildTree() {
     QFileInfo rootFi(m_rootDirPath);
     auto* rootItem = new QTreeWidgetItem();
     QString rootName = rootFi.fileName().isEmpty() ? m_rootDirPath : rootFi.fileName();
-    if (m_projectMgr && m_projectMgr->isSubprojectDir(m_rootDirPath)) {
+    if (m_projectMgr && m_projectMgr->hasStandaloneAideFile(m_rootDirPath)) {
         rootName += " [.aide Subproject]";
         rootItem->setIcon(0, m_subprojectIcon);
     } else {
@@ -284,21 +290,26 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
         if (rules.isDirIgnored(subName)) continue;
 
         const QString absSubPath = subFi.absoluteFilePath();
-        const bool isSubproj = m_projectMgr && m_projectMgr->isSubprojectDir(absSubPath);
+        const QString childRelPrefix = relDirPrefix.isEmpty() ? subName : (relDirPrefix + "/" + subName);
+        const bool isStandaloneAide = m_projectMgr && m_projectMgr->hasStandaloneAideFile(absSubPath);
+        const bool hasFolderSum = m_projectMgr && !m_projectMgr->projectSummary(childRelPrefix).trimmed().isEmpty();
 
         auto* dirItem = new QTreeWidgetItem();
         QString displayName = subName;
-        if (isSubproj) {
-            displayName += " [.aide Subproject]";
+        if (isStandaloneAide) {
+            displayName += " [.aide]";
             dirItem->setIcon(0, m_subprojectIcon);
             dirItem->setForeground(1, QColor("#bd93f9"));
-            dirItem->setText(1, "Subproject (.aide)");
+            dirItem->setText(1, hasFolderSum ? "Subproject (.aide • Summary Ready)" : "Subproject (.aide)");
+        } else if (hasFolderSum) {
+            dirItem->setIcon(0, m_subprojectIcon);
+            dirItem->setForeground(1, QColor("#8be9fd"));
+            dirItem->setText(1, "Virtual Subproject (Summary Ready)");
         } else {
             dirItem->setIcon(0, m_dirIcon);
         }
         dirItem->setText(0, displayName);
 
-        const QString childRelPrefix = relDirPrefix.isEmpty() ? subName : (relDirPrefix + "/" + subName);
         if (populateDirectoryItem(absSubPath, childRelPrefix, dirItem,
                                   rules, processedDirs, totalDirs, totalFilesFound)) {
             dirItem->setFlags(dirItem->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
@@ -318,6 +329,7 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
         const QString fileName = fileFi.fileName();
         const QString absPath = fileFi.absoluteFilePath();
         const QString relPath = relDirPrefix.isEmpty() ? fileName : (relDirPrefix + "/" + fileName);
+
         const bool allowed = rules.isFileAllowed(fileName, suffix);
         const auto fc = m_projectMgr ? m_projectMgr->fileContext(relPath) : FileContextData{};
         const bool hasSummary = fc.summaryCreated || !fc.aiSummary.trimmed().isEmpty();
@@ -375,11 +387,13 @@ bool ProjectFileSelectorWidget::populateDirectoryItem(const QString& dirPath,
 
 void ProjectFileSelectorWidget::collectCheckedFiles(QTreeWidgetItem* item, QStringList& outPaths) const {
     if (!item || item->checkState(0) == Qt::Unchecked) return;
+
     QString filePath = item->data(0, RoleFilePath).toString();
     if (!filePath.isEmpty() && item->checkState(0) == Qt::Checked) {
         outPaths.append(filePath);
         return;
     }
+
     for (int i = 0; i < item->childCount(); ++i) {
         collectCheckedFiles(item->child(i), outPaths);
     }
@@ -387,11 +401,13 @@ void ProjectFileSelectorWidget::collectCheckedFiles(QTreeWidgetItem* item, QStri
 
 void ProjectFileSelectorWidget::collectCheckedBytes(QTreeWidgetItem* item, qint64& outBytes) const {
     if (!item || item->checkState(0) == Qt::Unchecked) return;
+
     QString filePath = item->data(0, RoleFilePath).toString();
     if (!filePath.isEmpty() && item->checkState(0) == Qt::Checked) {
         outBytes += item->data(0, RoleFileSize).toLongLong();
         return;
     }
+
     for (int i = 0; i < item->childCount(); ++i) {
         collectCheckedBytes(item->child(i), outBytes);
     }
@@ -423,6 +439,7 @@ void ProjectFileSelectorWidget::notifySelectionChanged() {
 
 void ProjectFileSelectorWidget::applyCheckFilter(QTreeWidgetItem* item, int mode) {
     if (!item) return;
+
     QString filePath = item->data(0, RoleFilePath).toString();
     if (!filePath.isEmpty()) {
         bool allowed = item->data(0, RoleIsAllowed).toBool();
@@ -438,6 +455,7 @@ void ProjectFileSelectorWidget::applyCheckFilter(QTreeWidgetItem* item, int mode
             item->setCheckState(0, hasSummary ? Qt::Checked : Qt::Unchecked);
         }
     }
+
     for (int i = 0; i < item->childCount(); ++i) {
         applyCheckFilter(item->child(i), mode);
     }
@@ -482,6 +500,7 @@ void ProjectFileSelectorWidget::uncheckAll() {
 // ============================================================================
 // RecursiveSummaryDialog
 // ============================================================================
+
 RecursiveSummaryDialog::RecursiveSummaryDialog(ProjectManager* projMgr,
                                                const QString& rootDirPath,
                                                QWidget* parent)
@@ -491,6 +510,7 @@ RecursiveSummaryDialog::RecursiveSummaryDialog(ProjectManager* projMgr,
     resize(760, 580);
 
     auto* mainLay = new QVBoxLayout(this);
+
     auto* infoLabel = new QLabel(
         QString("<b>Target Directory:</b> %1<br>"
                 "<span style='color:#888899;'>Files without an existing summary are pre-selected. "

@@ -3,7 +3,6 @@
 #include <QObject>
 #include <QTimer>
 #include <QMap>
-#include <QPair>
 #include "AiTaskQueue.h"
 
 class ProjectManager;
@@ -61,6 +60,8 @@ private:
 
     void updateTimerInterval();
     void scheduleNextDirtyProjectSummaryIfIdle();
+    void scheduleReadyDeferredProjectSummaries();
+    bool areDependenciesReadyForScope(const QString& subRel) const;
     void enqueueProjectSummaryNow(const QString& subRel, int maxOutputTokensOverride, int contextWindowOverride);
     bool hasPendingFileSummariesForScope(const QString& subRel) const;
     QString buildSystemPromptForNode(const QString& subprojectRel) const;
