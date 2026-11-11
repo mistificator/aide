@@ -3,11 +3,13 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QList>
+#include <QStringList>
 #include <QPointer>
 #include "../editor/CodeEditor.h"
 
 class QTreeView;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QComboBox;
 class QMenu;
@@ -44,6 +46,7 @@ private slots:
     void onOpenFile();
     void onOpenFolder();
     void onCloseAllProjects();
+    void onExportProjectWiki();
     void onCompareUnsavedDiff(CodeEditor* targetEditor = nullptr);
     void onFindReplaceDialog();
     void onEditorPreferences();
@@ -55,6 +58,9 @@ private slots:
     void onProjectTreeContextMenu(const QPoint& pos);
     void onRenameProjectFile(const QString& filePath);
     void onDeleteProjectFile(const QString& filePath);
+    void onProjectSearchTextChanged(const QString& text);
+    void onProjectSearchNext();
+    void onProjectSearchPrev();
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
     void onEditorAiContinue(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
@@ -75,6 +81,7 @@ private:
     void updateCentralViewState();
     void updateAiActionsState();
     void applyProjectExplorerFilter();
+    void revealProjectFileInTree(const QString& relFilePath);
     void rebuildSingleFileSummary(const QString& filePath,
                                   bool checkLimits = true,
                                   int maxTokensOverride = 0,
@@ -113,6 +120,13 @@ private:
     QComboBox* m_projectFilterCombo = nullptr;
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
+    QLineEdit* m_projectSearchEdit = nullptr;
+    QLabel* m_projectSearchCountLabel = nullptr;
+    QPushButton* m_projectSearchPrevBtn = nullptr;
+    QPushButton* m_projectSearchNextBtn = nullptr;
+    QStringList m_projectSearchMatches;
+    int m_projectSearchIndex = -1;
+
     ContextInspectorDock* m_inspectorDock = nullptr;
     PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
@@ -124,6 +138,7 @@ private:
     QAction* m_actProjCustomPrompt = nullptr;
     QAction* m_actProjSummaryRebuild = nullptr;
     QAction* m_actProjRecursiveSummary = nullptr;
+    QAction* m_actProjExportWiki = nullptr;
     QAction* m_actFileCustomPrompt = nullptr;
     QAction* m_actFileSummaryRebuild = nullptr;
     QAction* m_actFileSummaryRemove = nullptr;

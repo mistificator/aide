@@ -60,10 +60,27 @@
 class ProjectTreeModel : public QFileSystemModel {
 public:
     ProjectTreeModel(ProjectManager* pm, QObject* parent = nullptr) : QFileSystemModel(parent), m_pm(pm) {}
+
+    void setHighlightQuery(const QString& query) {
+        m_highlightQuery = query.trimmed();
+    }
+
+    QString highlightQuery() const {
+        return m_highlightQuery;
+    }
+
     QVariant data(const QModelIndex& index, int role) const override {
         if (index.column() == 0 && m_pm && m_pm->hasOpenProject() &&
             (role == Qt::DisplayRole || role == Qt::ForegroundRole ||
-             role == Qt::FontRole || role == Qt::ToolTipRole)) {
+             role == Qt::BackgroundRole || role == Qt::FontRole || role == Qt::ToolTipRole)) {
+
+            const bool hasSearchMatch = !m_highlightQuery.isEmpty() &&
+                                        fileName(index).contains(m_highlightQuery, Qt::CaseInsensitive);
+
+            if (role == Qt::BackgroundRole && hasSearchMatch) {
+                return QColor(241, 250, 140, 65);
+            }
+
             if (isDir(index)) {
                 const QString path = filePath(index);
                 const QString subRel = m_pm->toRelativePath(path);
@@ -77,10 +94,11 @@ public:
                             return QFileSystemModel::data(index, Qt::DisplayRole).toString() + " [.aide]";
                         }
                     } else if (role == Qt::ForegroundRole) {
+                        if (hasSearchMatch) return QColor("#f1fa8c");
                         if (hasStandalone) return QColor("#bd93f9");
                         if (hasSum) return QColor("#8be9fd");
                     } else if (role == Qt::FontRole) {
-                        if (hasStandalone || hasSum) {
+                        if (hasSearchMatch || hasStandalone || hasSum) {
                             QFont f = QFileSystemModel::data(index, Qt::FontRole).value<QFont>();
                             f.setBold(true);
                             return f;
@@ -104,26 +122,34 @@ public:
                         return tip;
                     }
                 }
-            } else if (role == Qt::ForegroundRole || role == Qt::ToolTipRole) {
-                const QString path = filePath(index);
-                auto fc = m_pm->fileContext(path);
-                bool hasCreatedSummary = fc.summaryCreated || !fc.aiSummary.isEmpty();
-                if (role == Qt::ForegroundRole) {
-                    if (fc.isSummaryPending) return QColor("#ffb86c");
-                    if (hasCreatedSummary) return QColor("#50fa7b");
-                } else if (role == Qt::ToolTipRole) {
-                    QString ownerNote = fc.subprojectRelPath.isEmpty()
-                    ? QString()
-                    : QString("\nSubproject: %1").arg(fc.subprojectRelPath);
-                    if (fc.isSummaryPending) return "AI Summary: Indexing in background..." + ownerNote;
-                    if (!fc.aiSummary.isEmpty())
-                        return QString("AI Summary Ready (%1)%2:\n%3")
-                            .arg(fc.llmModel, ownerNote, fc.aiSummary.left(300));
-                    if (fc.summaryCreated)
-                        return "AI Summary: Created (intentionally empty / cleared)" + ownerNote;
-                    if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
-                        return "AI Summary: Not required according to AI Behavior settings" + ownerNote;
-                    return "AI Summary: Not indexed yet (open file or run recursive summary)" + ownerNote;
+            } else {
+                if (role == Qt::FontRole && hasSearchMatch) {
+                    QFont f = QFileSystemModel::data(index, Qt::FontRole).value<QFont>();
+                    f.setBold(true);
+                    return f;
+                }
+                if (role == Qt::ForegroundRole || role == Qt::ToolTipRole) {
+                    const QString path = filePath(index);
+                    auto fc = m_pm->fileContext(path);
+                    bool hasCreatedSummary = fc.summaryCreated || !fc.aiSummary.isEmpty();
+                    if (role == Qt::ForegroundRole) {
+                        if (hasSearchMatch) return QColor("#f1fa8c");
+                        if (fc.isSummaryPending) return QColor("#ffb86c");
+                        if (hasCreatedSummary) return QColor("#50fa7b");
+                    } else if (role == Qt::ToolTipRole) {
+                        QString ownerNote = fc.subprojectRelPath.isEmpty()
+                        ? QString()
+                        : QString("\nSubproject: %1").arg(fc.subprojectRelPath);
+                        if (fc.isSummaryPending) return "AI Summary: Indexing in background..." + ownerNote;
+                        if (!fc.aiSummary.isEmpty())
+                            return QString("AI Summary Ready (%1)%2:\n%3")
+                                .arg(fc.llmModel, ownerNote, fc.aiSummary.left(300));
+                        if (fc.summaryCreated)
+                            return "AI Summary: Created (intentionally empty / cleared)" + ownerNote;
+                        if (!ConfigManager::instance().shouldGenerateSummaryForFile(path))
+                            return "AI Summary: Not required according to AI Behavior settings" + ownerNote;
+                        return "AI Summary: Not indexed yet (open file or run recursive summary)" + ownerNote;
+                    }
                 }
             }
         }
@@ -131,6 +157,7 @@ public:
     }
 private:
     ProjectManager* m_pm;
+    QString m_highlightQuery;
 };
 
 class QMenuCompat : public QMenu {
@@ -285,8 +312,41 @@ void MainWindow::setupUiAndDocks() {
 
     applyProjectExplorerFilter();
 
+    // Нижняя панель быстрого поиска файлов в Project Explorer
+    auto* searchFooterBox = new QWidget(projExplorerPage);
+    searchFooterBox->setStyleSheet(
+        "QWidget { background-color: rgba(128, 128, 150, 0.12); border-top: 1px solid rgba(128, 128, 150, 0.25); }");
+    auto* searchFooterLay = new QHBoxLayout(searchFooterBox);
+    searchFooterLay->setContentsMargins(6, 4, 6, 4);
+    searchFooterLay->setSpacing(4);
+
+    m_projectSearchEdit = new QLineEdit(searchFooterBox);
+    m_projectSearchEdit->setPlaceholderText("Find file in project...");
+    m_projectSearchEdit->setClearButtonEnabled(true);
+    m_projectSearchEdit->setToolTip("Case-insensitive file name search. Press Enter for next match.");
+
+    m_projectSearchCountLabel = new QLabel("0/0", searchFooterBox);
+    m_projectSearchCountLabel->setStyleSheet("color: #888899; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+    m_projectSearchCountLabel->hide();
+
+    m_projectSearchPrevBtn = new QPushButton(QString::fromUtf8("▲"), searchFooterBox);
+    m_projectSearchPrevBtn->setFixedWidth(24);
+    m_projectSearchPrevBtn->setToolTip("Previous matching file");
+    m_projectSearchPrevBtn->setEnabled(false);
+
+    m_projectSearchNextBtn = new QPushButton(QString::fromUtf8("▼"), searchFooterBox);
+    m_projectSearchNextBtn->setFixedWidth(24);
+    m_projectSearchNextBtn->setToolTip("Next matching file (Enter)");
+    m_projectSearchNextBtn->setEnabled(false);
+
+    searchFooterLay->addWidget(m_projectSearchEdit, 1);
+    searchFooterLay->addWidget(m_projectSearchCountLabel);
+    searchFooterLay->addWidget(m_projectSearchPrevBtn);
+    searchFooterLay->addWidget(m_projectSearchNextBtn);
+
     projExplorerLay->addWidget(pathHeaderBox);
     projExplorerLay->addWidget(m_projectTree, 1);
+    projExplorerLay->addWidget(searchFooterBox);
 
     m_projectDockStack->addWidget(noProjExplorerLabel);
     m_projectDockStack->addWidget(projExplorerPage);
@@ -351,6 +411,7 @@ void MainWindow::setupMenus() {
     fileMenu->addAction("Save Project (.aide)", this, [this]() {
         if (m_projectMgr->saveProjectFile()) statusBar()->showMessage("Project and subprojects (.aide) saved.", 3000);
     });
+    fileMenu->addAction("Export Project Summaries as Wiki (Markdown)...", this, &MainWindow::onExportProjectWiki);
     fileMenu->addSeparator();
     fileMenu->addAction("Compare Unsaved Changes (Diff)...", QKeySequence("Ctrl+D"), this, [this]() {
         onCompareUnsavedDiff(m_tabWidget->currentEditor());
@@ -534,6 +595,13 @@ void MainWindow::setupMenus() {
         [this]() { onRecursiveProjectSummary(); });
     m_actProjRecursiveSummary->setToolTip("Generate Summaries for Project Files (Recursive)...");
 
+    projectAiMenu->addSeparator();
+    m_actProjExportWiki = projectAiMenu->addAction(
+        "Export Project Summaries as Wiki (Markdown)...",
+        this,
+        &MainWindow::onExportProjectWiki);
+    m_actProjExportWiki->setToolTip("Export project, subproject, and file AI summaries as a structured Markdown Wiki");
+
     m_aiToolBar->addAction(m_actProjCustomPrompt);
     m_aiToolBar->addAction(m_actProjSummaryRebuild);
     m_aiToolBar->addAction(m_actProjRecursiveSummary);
@@ -591,6 +659,11 @@ void MainWindow::setupConnections() {
     });
     connect(m_projectTree, &QTreeView::customContextMenuRequested, this, &MainWindow::onProjectTreeContextMenu);
 
+    connect(m_projectSearchEdit, &QLineEdit::textChanged, this, &MainWindow::onProjectSearchTextChanged);
+    connect(m_projectSearchEdit, &QLineEdit::returnPressed, this, &MainWindow::onProjectSearchNext);
+    connect(m_projectSearchNextBtn, &QPushButton::clicked, this, &MainWindow::onProjectSearchNext);
+    connect(m_projectSearchPrevBtn, &QPushButton::clicked, this, &MainWindow::onProjectSearchPrev);
+
     connect(m_tabWidget, &EditorTabWidget::activeEditorChanged, this, [this](CodeEditor* ed) {
         onActiveEditorChanged(ed);
         updateCentralViewState();
@@ -632,7 +705,11 @@ void MainWindow::setupConnections() {
                         updateCentralViewState();
                     }
                 }
-                m_projectTree->viewport()->update();
+                if (!m_projectSearchEdit->text().trimmed().isEmpty()) {
+                    onProjectSearchTextChanged(m_projectSearchEdit->text());
+                } else {
+                    m_projectTree->viewport()->update();
+                }
             });
     connect(m_projectMgr, &ProjectManager::fileRenamedInProject, this,
             [this](const QString& oldRelPath, const QString&, const QString& newAbsPath) {
@@ -646,7 +723,11 @@ void MainWindow::setupConnections() {
                         m_inspectorDock->setActiveFile(newAbsPath);
                     }
                 }
-                m_projectTree->viewport()->update();
+                if (!m_projectSearchEdit->text().trimmed().isEmpty()) {
+                    onProjectSearchTextChanged(m_projectSearchEdit->text());
+                } else {
+                    m_projectTree->viewport()->update();
+                }
             });
     connect(m_projectMgr, &ProjectManager::projectLoaded, this, [this](const QString&) {
         updateAiActionsState();
@@ -709,6 +790,152 @@ void MainWindow::setupConnections() {
     connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
         applyProjectExplorerFilter();
     });
+}
+
+void MainWindow::revealProjectFileInTree(const QString& relFilePath) {
+    if (relFilePath.isEmpty() || !m_projectMgr->hasOpenProject()) return;
+    const QString absPath = m_projectMgr->toAbsolutePath(relFilePath);
+    const QModelIndex rootIdx = m_projectTree->rootIndex();
+    const QModelIndex targetIdx = m_fsModel->index(absPath);
+    if (!targetIdx.isValid()) return;
+
+    // Раскрываем все родительские папки от корня проекта до найденного файла
+    QList<QModelIndex> parentsToExpand;
+    for (QModelIndex p = targetIdx.parent(); p.isValid() && p != rootIdx; p = p.parent()) {
+        parentsToExpand.prepend(p);
+    }
+    for (const QModelIndex& p : parentsToExpand) {
+        m_projectTree->expand(p);
+    }
+
+    m_projectTree->setCurrentIndex(targetIdx);
+    m_projectTree->scrollTo(targetIdx, QAbstractItemView::PositionAtCenter);
+
+    // Повторная докрутка через 60 мс на случай асинхронной подгрузки вложенной папки QFileSystemModel
+    QTimer::singleShot(60, this, [this, absPath]() {
+        if (!m_projectMgr->hasOpenProject()) return;
+        const QModelIndex idx = m_fsModel->index(absPath);
+        if (idx.isValid()) {
+            m_projectTree->setCurrentIndex(idx);
+            m_projectTree->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+        }
+    });
+}
+
+void MainWindow::onProjectSearchTextChanged(const QString& text) {
+    const QString query = text.trimmed();
+    m_fsModel->setHighlightQuery(query);
+    m_projectTree->viewport()->update();
+
+    m_projectSearchMatches.clear();
+    m_projectSearchIndex = -1;
+
+    if (query.isEmpty() || !m_projectMgr->hasOpenProject()) {
+        m_projectSearchCountLabel->hide();
+        m_projectSearchPrevBtn->setEnabled(false);
+        m_projectSearchNextBtn->setEnabled(false);
+        return;
+    }
+
+    const QStringList& allFiles = m_projectMgr->allProjectFileRelPaths();
+    for (const QString& rel : allFiles) {
+        const QString fileName = QFileInfo(rel).fileName();
+        if (fileName.contains(query, Qt::CaseInsensitive)) {
+            m_projectSearchMatches.append(rel);
+        }
+    }
+
+    m_projectSearchCountLabel->show();
+    if (m_projectSearchMatches.isEmpty()) {
+        m_projectSearchCountLabel->setStyleSheet("color: #ff5555; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+        m_projectSearchCountLabel->setText("0/0");
+        m_projectSearchPrevBtn->setEnabled(false);
+        m_projectSearchNextBtn->setEnabled(false);
+        return;
+    }
+
+    m_projectSearchIndex = 0;
+    m_projectSearchCountLabel->setStyleSheet("color: #f1fa8c; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+    m_projectSearchCountLabel->setText(QString("1/%1").arg(m_projectSearchMatches.size()));
+    m_projectSearchPrevBtn->setEnabled(m_projectSearchMatches.size() > 1);
+    m_projectSearchNextBtn->setEnabled(m_projectSearchMatches.size() > 1);
+
+    revealProjectFileInTree(m_projectSearchMatches.first());
+}
+
+void MainWindow::onProjectSearchNext() {
+    if (m_projectSearchMatches.isEmpty()) return;
+    m_projectSearchIndex = (m_projectSearchIndex + 1) % m_projectSearchMatches.size();
+    m_projectSearchCountLabel->setText(
+        QString("%1/%2").arg(m_projectSearchIndex + 1).arg(m_projectSearchMatches.size()));
+    revealProjectFileInTree(m_projectSearchMatches[m_projectSearchIndex]);
+}
+
+void MainWindow::onProjectSearchPrev() {
+    if (m_projectSearchMatches.isEmpty()) return;
+    m_projectSearchIndex = (m_projectSearchIndex - 1 + m_projectSearchMatches.size()) % m_projectSearchMatches.size();
+    m_projectSearchCountLabel->setText(
+        QString("%1/%2").arg(m_projectSearchIndex + 1).arg(m_projectSearchMatches.size()));
+    revealProjectFileInTree(m_projectSearchMatches[m_projectSearchIndex]);
+}
+
+void MainWindow::onExportProjectWiki() {
+    if (!m_projectMgr->hasOpenProject()) {
+        QMessageBox::information(this, "Export Project Wiki", "Please open a project folder first.");
+        return;
+    }
+
+    const int indexedCount = m_projectMgr->indexedFilesCount(QString(), true);
+    const bool hasRootSum = !m_projectMgr->projectSummary().trimmed().isEmpty();
+    if (indexedCount == 0 && !hasRootSum) {
+        auto ans = QMessageBox::question(
+            this,
+            "Export Project Wiki",
+            "This project does not have any generated file or project summaries yet.\n"
+            "Do you still want to export an empty Wiki skeleton?",
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (ans != QMessageBox::Yes) return;
+    }
+
+    const QString startDir = ConfigManager::instance().resolveInitialDialogDir(m_projectMgr->projectRootPath());
+    const QString targetDir = QFileDialog::getExistingDirectory(
+        this,
+        "Select Destination Folder for Markdown Wiki Export",
+        startDir);
+    if (targetDir.isEmpty()) return;
+
+    ConfigManager::instance().setLastDialogDir(targetDir);
+
+    QString err;
+    const int exportedCount = m_projectMgr->exportProjectWiki(targetDir, &err);
+    if (exportedCount < 0) {
+        QMessageBox::warning(this, "Export Wiki Failed", "Could not export Project Wiki:\n" + err);
+        return;
+    }
+
+    statusBar()->showMessage(
+        QString("Exported Project Wiki (%1 Markdown file(s)) to %2")
+            .arg(exportedCount)
+            .arg(QDir::toNativeSeparators(targetDir)),
+        5000);
+
+    const QString rootReadmePath = QDir(targetDir).filePath("README.md");
+    auto openAns = QMessageBox::question(
+        this,
+        "Project Wiki Exported",
+        QString("Successfully exported <b>%1 Markdown (.md) file(s)</b> mirroring the project structure into:<br>"
+                "<code>%2</code><br><br>"
+                "Would you like to open the exported root <b>README.md</b> in the editor?")
+            .arg(exportedCount)
+            .arg(QDir::toNativeSeparators(targetDir).toHtmlEscaped()),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::Yes);
+
+    if (openAns == QMessageBox::Yes && QFileInfo::exists(rootReadmePath)) {
+        m_tabWidget->openFile(rootReadmePath);
+        updateCentralViewState();
+    }
 }
 
 void MainWindow::rebuildSingleFileSummary(const QString& filePath,
@@ -1173,7 +1400,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     bool hasSummary = !m_projectMgr->projectSummary().trimmed().isEmpty() || (indexedCount > 0);
     auto* statusLbl = new QLabel(
         QString("<b>Project:</b> %1<br>"
-                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b> | Subproject Scopes: <b>%4</b></span>")
+                "<span style='color:#888899;'>Project Summary Ready: <b>%2</b> | Indexed Project Files: <b>%3</b> | Indexed Subprojects: <b>%4</b></span>")
             .arg(QDir::toNativeSeparators(m_projectMgr->projectRootPath()),
                  hasSummary ? "Yes" : "No (Empty)",
                  QString::number(indexedCount),
@@ -1589,13 +1816,16 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
         const QString folderName = QFileInfo(clickedPath).fileName();
         const QString subRel = m_projectMgr->toRelativePath(clickedPath);
         const bool hasStandalone = m_projectMgr->hasStandaloneAideFile(clickedPath);
+        const bool isIndexedSub = m_projectMgr->isSubprojectDir(subRel);
 
-        menu.addAction(QString("Inspect Subproject '%1' in AI Inspector").arg(folderName), this, [this, subRel]() {
-            m_inspectorDock->inspectProjectScope(subRel);
-        });
+        if (isIndexedSub) {
+            menu.addAction(QString("Inspect Subproject '%1' in AI Inspector").arg(folderName), this, [this, subRel]() {
+                m_inspectorDock->inspectProjectScope(subRel);
+            });
+        }
         menu.addAction(QString("Rebuild Subproject '%1' Summary").arg(folderName), this, [this, subRel]() {
-            m_inspectorDock->inspectProjectScope(subRel);
             onRebuildProjectSummary(subRel);
+            m_inspectorDock->inspectProjectScope(subRel);
         });
         menu.addAction(QString("Generate File Summaries in '%1' (Recursive)...").arg(folderName),
                        this, [this, clickedPath]() { onRecursiveProjectSummary(clickedPath); });
@@ -1647,6 +1877,7 @@ void MainWindow::onProjectTreeContextMenu(const QPoint& pos) {
     menu.addAction("Generate Summaries for Entire Project (Recursive)...", this, [this]() {
         onRecursiveProjectSummary(m_projectMgr->projectRootPath());
     });
+    menu.addAction("Export Project Summaries as Wiki (Markdown)...", this, &MainWindow::onExportProjectWiki);
     menu.addSeparator();
     QAction* filterAct = menu.addAction("Show Only Supported File Extensions");
     filterAct->setCheckable(true);
@@ -1686,6 +1917,7 @@ void MainWindow::updateAiActionsState() {
     if (m_actProjCustomPrompt)     m_actProjCustomPrompt->setEnabled(hasProj);
     if (m_actProjSummaryRebuild)   m_actProjSummaryRebuild->setEnabled(hasProj);
     if (m_actProjRecursiveSummary) m_actProjRecursiveSummary->setEnabled(hasProj);
+    if (m_actProjExportWiki)       m_actProjExportWiki->setEnabled(hasProj);
 
     if (m_actFileCustomPrompt)     m_actFileCustomPrompt->setEnabled(hasDoc);
     if (m_actFileSummaryRebuild)   m_actFileSummaryRebuild->setEnabled(hasSavedFileDoc);
@@ -1747,6 +1979,7 @@ void MainWindow::openProjectAtPath(const QString& dirPath) {
     m_tabWidget->setProjectRootPath(m_projectMgr->projectRootPath());
     m_fsModel->setRootPath(dirPath);
     m_projectTree->setRootIndex(m_fsModel->index(dirPath));
+    m_projectSearchEdit->clear();
     m_inspectorDock->setSelectedProjectScope({});
     m_inspectorDock->refreshDisplay();
     ConfigManager::instance().addRecentProject(dirPath);
@@ -1787,6 +2020,7 @@ void MainWindow::onCloseAllProjects() {
     m_tabWidget->setProjectRootPath({});
     m_projectPathLabel->setText("-");
     m_projectPathLabel->setToolTip({});
+    m_projectSearchEdit->clear();
     ConfigManager::instance().setLastProjectPath({});
     m_inspectorDock->setActiveFile({});
     updateCentralViewState();

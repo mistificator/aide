@@ -44,7 +44,7 @@ public:
     QString toRelativePath(const QString& filePathOrRel) const;
     QString toAbsolutePath(const QString& relPath) const;
 
-    // Различие между любым подпроектом (виртуальным или .aide) и физическим файлом .aide на диске
+    // Различие между проиндексированным подпроектом (виртуальным или .aide) и физическим файлом .aide на диске
     bool isSubprojectDir(const QString& dirPathOrRel) const;
     bool hasStandaloneAideFile(const QString& dirPathOrRel) const;
     void ensureSubprojectNode(const QString& dirPathOrRel);
@@ -53,7 +53,10 @@ public:
     QStringList directChildSubprojects(const QString& parentSubRel = {}) const;
     QStringList dirtyProjectRelPathsBottomUp() const;
     QString owningProjectRelPathForFile(const QString& filePathOrRel) const;
+    QString nearestIndexedSubprojectForFile(const QString& filePathOrRel) const;
     QString projectDirPathForRel(const QString& subprojectRel) const;
+
+    const QStringList& allProjectFileRelPaths() const { return m_allProjectFiles; }
 
     bool createSubproject(const QString& dirPath);
     bool removeSubproject(const QString& dirPath);
@@ -88,6 +91,8 @@ public:
 
     bool renameProjectFile(const QString& oldAbsPath, const QString& newAbsPath);
     bool deleteProjectFile(const QString& absPath);
+
+    int exportProjectWiki(const QString& targetRootDir, QString* outError = nullptr) const;
 
     QString buildAggregatedFilesDigest(const QString& subprojectRel = {}) const;
     QString buildEffectiveSystemContext(const QString& filePath) const;
@@ -141,8 +146,9 @@ private:
     void reassignAllFilesToNearestOwners();
 
     QString m_rootPath;
-    QMap<QString, ProjectNodeData> m_nodes;     // ключ: subprojectRel ("" = корень, остальные = реальные или виртуальные папки)
+    QMap<QString, ProjectNodeData> m_nodes;     // ключ: subprojectRel ("" = корень)
     QMap<QString, FileContextData> m_files;     // ключ: relPath относительно m_rootPath
+    QStringList m_allProjectFiles;              // все неигнорируемые файлы проекта (relPath) для быстрого поиска
     QFileSystemWatcher* m_fsWatcher = nullptr;
     QTimer m_watchDebounceTimer;
     bool m_reconciling = false;

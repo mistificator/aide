@@ -103,7 +103,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     docSplit->setSizes({420, 210});
     m_tabs->addTab(docSplit, "Document");
 
-    // Вкладка 2: Project (с выбором корневого проекта, виртуального или .aide подпроекта)
+    // Вкладка 2: Project (только корневой проект и реально проиндексированные подпроекты)
     auto* projSplit = new QSplitter(Qt::Vertical, m_tabs);
     projSplit->setMinimumWidth(0);
     projSplit->setChildrenCollapsible(false);
@@ -120,7 +120,7 @@ ContextInspectorDock::ContextInspectorDock(ProjectManager* projMgr, QWidget* par
     m_projectScopeCombo = new QComboBox(projTop);
     m_projectScopeCombo->setMinimumWidth(0);
     m_projectScopeCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_projectScopeCombo->setToolTip("Select Root Project or any Subproject folder (Virtual or standalone .aide)");
+    m_projectScopeCombo->setToolTip("Select Root Project or an indexed Subproject (Virtual or standalone .aide)");
     scopeRow->addWidget(scopeLbl);
     scopeRow->addWidget(m_projectScopeCombo, 1);
 
@@ -372,6 +372,7 @@ void ContextInspectorDock::rebuildProjectScopeCombo() {
     if (rootDirName.isEmpty()) rootDirName = m_projectMgr->projectRootPath();
     m_projectScopeCombo->addItem(QString("Root Project (%1) [.aide]").arg(rootDirName), QString());
 
+    // В список попадают только проиндексированные подпроекты (subprojectRelPaths() уже отфильтрован)
     const QStringList subs = m_projectMgr->subprojectRelPaths();
     int targetIdx = 0;
     for (int i = 0; i < subs.size(); ++i) {
@@ -398,8 +399,7 @@ void ContextInspectorDock::rebuildProjectScopeCombo() {
 void ContextInspectorDock::setSelectedProjectScope(const QString& subprojectRelPath) {
     QString clean = subprojectRelPath.trimmed();
     if (!clean.isEmpty() && m_projectMgr && m_projectMgr->hasOpenProject()) {
-        clean = m_projectMgr->toRelativePath(clean);
-        m_projectMgr->ensureSubprojectNode(clean);
+        clean = m_projectMgr->nearestIndexedSubprojectForFile(clean);
     }
     m_selectedProjectScope = clean;
     rebuildProjectScopeCombo();
@@ -409,7 +409,7 @@ void ContextInspectorDock::setSelectedProjectScope(const QString& subprojectRelP
 void ContextInspectorDock::inspectProjectScope(const QString& subprojectRelPath) {
     setSelectedProjectScope(subprojectRelPath);
     if (m_tabs) {
-        m_tabs->setCurrentIndex(1); // Переключаем на вкладку "Project"
+        m_tabs->setCurrentIndex(1);
     }
     show();
     raise();
@@ -422,9 +422,9 @@ QString ContextInspectorDock::selectedProjectScope() const {
 void ContextInspectorDock::setActiveFile(const QString& filePath) {
     m_activeFilePath = filePath;
     if (!filePath.isEmpty() && m_projectMgr && m_projectMgr->hasOpenProject()) {
-        const QString ownerSub = m_projectMgr->owningProjectRelPathForFile(filePath);
-        if (m_selectedProjectScope != ownerSub) {
-            m_selectedProjectScope = ownerSub;
+        const QString indexedOwner = m_projectMgr->nearestIndexedSubprojectForFile(filePath);
+        if (m_selectedProjectScope != indexedOwner) {
+            m_selectedProjectScope = indexedOwner;
         }
     }
     rebuildProjectScopeCombo();
@@ -481,7 +481,12 @@ void ContextInspectorDock::refreshDisplay() {
     const QString projSum = hasProj ? m_projectMgr->projectSummary(m_selectedProjectScope) : QString();
     const QString projLlm = hasProj ? m_projectMgr->projectSummaryLlm(m_selectedProjectScope) : QString();
     const int indexedInScope = hasProj ? m_projectMgr->indexedFilesCount(m_selectedProjectScope, true) : 0;
-    const int directChildSubs = hasProj ? m_projectMgr->directChildSubprojects(m_selectedProjectScope).size() : 0;
+    int indexedChildSubs = 0;
+    if (hasProj) {
+        for (const QString& ch : m_projectMgr->directChildSubprojects(m_selectedProjectScope)) {
+            if (m_projectMgr->isSubprojectDir(ch)) ++indexedChildSubs;
+        }
+    }
     const bool isDirty = hasProj && m_projectMgr->isProjectSummaryDirty(m_selectedProjectScope);
     const QString storageMode = !hasProj
                                     ? QStringLiteral("-")
@@ -490,11 +495,11 @@ void ContextInspectorDock::refreshDisplay() {
                                            : QStringLiteral("Virtual (in parent .aide)"));
 
     m_projectMetaLabel->setText(
-        QString("Mode: %1 | LLM: %2 | Indexed Files: %3 | Child Folders: %4%5")
+        QString("Mode: %1 | LLM: %2 | Indexed Files: %3 | Indexed Subfolders: %4%5")
             .arg(storageMode)
             .arg(projLlm.isEmpty() ? "-" : projLlm)
             .arg(indexedInScope)
-            .arg(directChildSubs)
+            .arg(indexedChildSubs)
             .arg(isDirty ? " [Outdated / Dirty]" : ""));
 
     m_continueProjBtn->setEnabled(hasProj && !projSum.trimmed().isEmpty());
@@ -529,11 +534,12 @@ void ContextInspectorDock::refreshDisplay() {
         m_fileHeaderLabel->setText(QString("Document: %1%2").arg(fc.relativePath, statusSuffix));
         m_fileHeaderLabel->setToolTip(fc.relativePath);
 
-        QString ownerInfo = fc.subprojectRelPath.isEmpty()
+        const QString indexedSub = m_projectMgr->nearestIndexedSubprojectForFile(m_activeFilePath);
+        QString ownerInfo = indexedSub.isEmpty()
                                 ? QStringLiteral("Root")
                                 : QString("%1 (%2)")
-                                      .arg(fc.subprojectRelPath,
-                                           m_projectMgr->hasStandaloneAideFile(fc.subprojectRelPath) ? ".aide" : "virtual");
+                                      .arg(indexedSub,
+                                           m_projectMgr->hasStandaloneAideFile(indexedSub) ? ".aide" : "virtual");
         QString llmInfo = fc.isSummaryPending
                               ? (fc.pendingLlmModel.isEmpty() ? "-" : fc.pendingLlmModel + " (pending)")
                               : (fc.llmModel.isEmpty() ? (isClearedEmpty ? "cleared (empty)" : (summaryAllowed ? "-" : "Skipped by settings")) : fc.llmModel);
