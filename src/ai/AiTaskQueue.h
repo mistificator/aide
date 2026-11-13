@@ -55,6 +55,9 @@ class AiTaskQueue : public QObject {
 public:
     explicit AiTaskQueue(AiProvider* provider, QObject* parent = nullptr);
 
+    void setLlmConnected(bool connected);
+    bool isLlmConnected() const { return m_isLlmConnected; }
+
     QString enqueueTask(const AiTask& inputTask);
     void enqueueTasksBatch(const QVector<AiTask>& inputTasks);
 
@@ -106,6 +109,7 @@ private:
     QQueue<AiTask> m_highQueue;
     QQueue<AiTask> m_lowQueue;
     bool m_isProcessing = false;
+    bool m_isLlmConnected = false;
     AiTask m_currentTask;
 
     QElapsedTimer m_batchTimer;

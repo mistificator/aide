@@ -790,6 +790,20 @@ void ConfigManager::setAiProfiles(const QVector<AiConnectionConfig>& profiles, c
     emit aiConfigChanged(m_aiConfig);
 }
 
+void ConfigManager::setActiveAiProfile(const QString& profileName) {
+    const QString clean = profileName.trimmed();
+    if (clean.isEmpty() || m_aiConfig.profileName == clean) return;
+
+    for (const auto& p : m_aiProfiles) {
+        if (p.profileName == clean) {
+            m_aiConfig = p;
+            saveConfig();
+            emit aiConfigChanged(m_aiConfig);
+            return;
+        }
+    }
+}
+
 void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
     m_aiBehavior = behavior;
     m_aiBehavior.promptHistoryLimit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);

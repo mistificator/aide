@@ -334,8 +334,15 @@ void AiTaskQueueDock::refreshQueueView() {
                         (running && m_taskQueue->currentTask().priority == TaskPriority::Low_BackgroundSummary ? 1 : 0);
 
     if (total == 0) {
+        m_summaryLabel->setStyleSheet("font-weight: bold;");
         m_summaryLabel->setText("Idle (0 tasks in queue)");
+    } else if (!m_taskQueue->isLlmConnected() && !running) {
+        m_summaryLabel->setStyleSheet("font-weight: bold; color: #ffb86c;");
+        m_summaryLabel->setText(QString("Paused — Waiting for LLM Connection (User: %1 | Bg: %2)")
+                                    .arg(highList.size())
+                                    .arg(lowList.size()));
     } else {
+        m_summaryLabel->setStyleSheet("font-weight: bold;");
         m_summaryLabel->setText(QString("Active: %1 | User: %2 | Bg: %3")
                                     .arg(running ? 1 : 0)
                                     .arg(highList.size())

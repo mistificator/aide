@@ -55,6 +55,8 @@
 #include <QCheckBox>
 #include <QToolBar>
 #include <QTimer>
+#include <QPainter>
+#include <QRadialGradient>
 #include <algorithm>
 
 class ProjectTreeModel : public QFileSystemModel {
@@ -220,6 +222,12 @@ MainWindow::MainWindow(QWidget* parent)
     m_downloader->ensureResourcesPresent();
     updateCentralViewState();
 
+    m_llmConnectRetryTimer.setSingleShot(true);
+    connect(&m_llmConnectRetryTimer, &QTimer::timeout, this, &MainWindow::probeLlmConnectionNow);
+
+    refreshProfileSelectors();
+    setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Disconnected");
+
     QString lastProj = ConfigManager::instance().lastProjectPath();
     if (!lastProj.isEmpty() && QDir(lastProj).exists()) {
         QTimer::singleShot(0, this, [this, lastProj]() {
@@ -227,11 +235,13 @@ MainWindow::MainWindow(QWidget* parent)
         });
     }
 
-    QTimer::singleShot(0, this, []() {
+    // При старте AIDE: запускаем локальную LLM (если включён автозапуск) и выполняем автоматический Test/Fetch
+    QTimer::singleShot(0, this, [this]() {
         const auto& cfgMgr = ConfigManager::instance();
         if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
             LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
         }
+        startLlmConnectionCheck(true);
     });
 }
 
@@ -384,6 +394,22 @@ void MainWindow::setupUiAndDocks() {
     tabifyDockWidget(m_taskQueueDock, m_debugConsoleDock);
     m_debugConsoleDock->hide();
 
+    // Комбобокс выбора профиля ИИ в статусбаре
+    auto* statusProfLbl = new QLabel("Profile:", this);
+    statusProfLbl->setStyleSheet("color: #888899; font-size: 11px; margin-left: 4px;");
+    m_statusProfileCombo = new QComboBox(this);
+    m_statusProfileCombo->setMinimumWidth(150);
+    m_statusProfileCombo->setToolTip("Switch active AI Connection Profile");
+
+    // Кнопка-индикатор статуса подключения к LLM (серая / жёлтая / зелёная лампа)
+    m_llmConnStatusBtn = new QPushButton("LLM: Disconnected", this);
+    m_llmConnStatusBtn->setFlat(true);
+    m_llmConnStatusBtn->setIconSize(QSize(14, 14));
+    m_llmConnStatusBtn->setToolTip("Click to test / reconnect to current LLM endpoint");
+    connect(m_llmConnStatusBtn, &QPushButton::clicked, this, [this]() {
+        startLlmConnectionCheck(true);
+    });
+
     m_queueStatusBtn = new QPushButton("AI: Idle", this);
     m_queueStatusBtn->setFlat(true);
     m_queueStatusBtn->setToolTip("Click to open AI Task Queue");
@@ -394,6 +420,9 @@ void MainWindow::setupUiAndDocks() {
 
     m_langStatusLabel = new QLabel("Lang: -", this);
     statusBar()->addPermanentWidget(m_langStatusLabel);
+    statusBar()->addPermanentWidget(statusProfLbl);
+    statusBar()->addPermanentWidget(m_statusProfileCombo);
+    statusBar()->addPermanentWidget(m_llmConnStatusBtn);
     statusBar()->addPermanentWidget(m_queueStatusBtn);
 }
 
@@ -609,6 +638,16 @@ void MainWindow::setupMenus() {
         &MainWindow::onExportProjectWiki);
     m_actProjExportWiki->setToolTip("Export project, subproject, and file AI summaries as a structured Markdown Wiki");
 
+    auto* tbProfLabel = new QLabel(" AI Profile: ", m_aiToolBar);
+    tbProfLabel->setStyleSheet("color: #888899; font-size: 11px; font-weight: bold;");
+    m_aiToolBar->addWidget(tbProfLabel);
+
+    m_toolbarProfileCombo = new QComboBox(m_aiToolBar);
+    m_toolbarProfileCombo->setMinimumWidth(165);
+    m_toolbarProfileCombo->setToolTip("Switch active AI Connection Profile");
+    m_aiToolBar->addWidget(m_toolbarProfileCombo);
+    m_aiToolBar->addSeparator();
+
     m_aiToolBar->addAction(m_actProjCustomPrompt);
     m_aiToolBar->addAction(m_actProjSummaryRebuild);
     m_aiToolBar->addAction(m_actProjRecursiveSummary);
@@ -747,10 +786,13 @@ void MainWindow::setupConnections() {
     });
 
     connect(m_taskQueue, &AiTaskQueue::queueStatusChanged, this, [this](int high, int low, bool busy) {
-        if (!busy && high == 0 && low == 0)
+        if (!busy && high == 0 && low == 0) {
             m_queueStatusBtn->setText("AI: Idle");
-        else
+        } else if (!m_taskQueue->isLlmConnected() && !busy) {
+            m_queueStatusBtn->setText(QString("AI: Waiting for LLM (User: %1 | Bg: %2)").arg(high).arg(low));
+        } else {
             m_queueStatusBtn->setText(QString("AI: Busy (User: %1 | Background: %2)").arg(high).arg(low));
+        }
     });
 
     connect(m_taskQueue, &AiTaskQueue::taskCompleted, this, &MainWindow::onTaskCompleted);
@@ -798,8 +840,23 @@ void MainWindow::setupConnections() {
         applyProjectExplorerFilter();
     });
 
+    if (m_toolbarProfileCombo) {
+        connect(m_toolbarProfileCombo, &QComboBox::currentIndexChanged, this, &MainWindow::onQuickProfileSelected);
+    }
+    if (m_statusProfileCombo) {
+        connect(m_statusProfileCombo, &QComboBox::currentIndexChanged, this, &MainWindow::onQuickProfileSelected);
+    }
+
+    connect(&ConfigManager::instance(), &ConfigManager::aiConfigChanged, this, [this](const AiConnectionConfig&) {
+        refreshProfileSelectors();
+    });
+
+    connect(m_aiProvider, &AiProvider::modelsFetched, this, &MainWindow::onModelsFetchedForStatus);
+
     connect(&LocalLlmProcessManager::instance(), &LocalLlmProcessManager::debugLog,
             m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
+    connect(&LocalLlmProcessManager::instance(), &LocalLlmProcessManager::processStateChanged,
+            this, &MainWindow::onLocalLlmProcessStateChanged);
 }
 
 void MainWindow::revealProjectFileInTree(const QString& relFilePath) {
@@ -830,6 +887,278 @@ void MainWindow::revealProjectFileInTree(const QString& relFilePath) {
             m_projectTree->scrollTo(idx, QAbstractItemView::PositionAtCenter);
         }
     });
+}
+
+QIcon MainWindow::createStatusLampIcon(const QColor& fillColor, const QColor& glowColor) {
+    QIcon icon;
+    for (int sz : {14, 16, 20}) {
+        QPixmap px(sz, sz);
+        px.fill(Qt::transparent);
+        QPainter p(&px);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        const QPointF center(sz * 0.5, sz * 0.5);
+        const double radius = sz * 0.34;
+
+        // Внешнее свечение лампы
+        QRadialGradient glow(center, sz * 0.48);
+        QColor g0 = glowColor;
+        g0.setAlpha(150);
+        QColor g1 = glowColor;
+        g1.setAlpha(0);
+        glow.setColorAt(0.0, g0);
+        glow.setColorAt(1.0, g1);
+        p.setPen(Qt::NoPen);
+        p.setBrush(glow);
+        p.drawEllipse(center, sz * 0.48, sz * 0.48);
+
+        // Основной корпус лампы с бликом
+        QRadialGradient lampGrad(QPointF(center.x() - radius * 0.3, center.y() - radius * 0.3), radius * 1.3);
+        lampGrad.setColorAt(0.0, fillColor.lighter(135));
+        lampGrad.setColorAt(0.7, fillColor);
+        lampGrad.setColorAt(1.0, fillColor.darker(130));
+
+        p.setPen(QPen(QColor(25, 26, 36, 200), 1.0));
+        p.setBrush(lampGrad);
+        p.drawEllipse(center, radius, radius);
+
+        icon.addPixmap(px);
+    }
+    return icon;
+}
+
+void MainWindow::setLlmConnectionState(LlmConnectionState state,
+                                       const QString& statusText,
+                                       const QString& toolTipText) {
+    m_llmConnState = state;
+    if (!m_llmConnStatusBtn) return;
+
+    static const QIcon grayLamp   = createStatusLampIcon(QColor("#7c7f93"), QColor("#6272a4"));
+    static const QIcon yellowLamp = createStatusLampIcon(QColor("#f1fa8c"), QColor("#ffb86c"));
+    static const QIcon greenLamp  = createStatusLampIcon(QColor("#50fa7b"), QColor("#50fa7b"));
+
+    const auto& cfg = ConfigManager::instance().aiConfig();
+    if (state == LlmConnectionState::Connected) {
+        m_llmConnStatusBtn->setIcon(greenLamp);
+        m_llmConnStatusBtn->setStyleSheet("QPushButton { color: #50fa7b; font-weight: bold; }");
+        m_llmConnStatusBtn->setText(statusText.isEmpty() ? "LLM: Connected" : statusText);
+        m_llmConnStatusBtn->setToolTip(
+            toolTipText.isEmpty()
+                ? QString("Connected to LLM (%1 — %2)\nClick to re-test connection.")
+                      .arg(cfg.profileName, cfg.endpointUrl)
+                : toolTipText);
+    } else if (state == LlmConnectionState::Connecting) {
+        m_llmConnStatusBtn->setIcon(yellowLamp);
+        m_llmConnStatusBtn->setStyleSheet("QPushButton { color: #f1fa8c; font-weight: bold; }");
+        m_llmConnStatusBtn->setText(statusText.isEmpty() ? "LLM: Connecting..." : statusText);
+        m_llmConnStatusBtn->setToolTip(
+            toolTipText.isEmpty()
+                ? QString("Testing connection / waiting for LLM port (%1 — %2)...\n"
+                          "Task queue is paused until connection turns green.")
+                      .arg(cfg.profileName, cfg.endpointUrl)
+                : toolTipText);
+    } else {
+        m_llmConnStatusBtn->setIcon(grayLamp);
+        m_llmConnStatusBtn->setStyleSheet("QPushButton { color: #888899; }");
+        m_llmConnStatusBtn->setText(statusText.isEmpty() ? "LLM: Disconnected" : statusText);
+        m_llmConnStatusBtn->setToolTip(
+            toolTipText.isEmpty()
+                ? QString("No connection to LLM (%1 — %2).\n"
+                          "Task queue is paused. Click to retry Test / Fetch.")
+                      .arg(cfg.profileName, cfg.endpointUrl)
+                : toolTipText);
+    }
+}
+
+void MainWindow::refreshProfileSelectors() {
+    m_updatingProfileCombos = true;
+    const auto profiles = ConfigManager::instance().aiProfiles();
+    const QString activeName = ConfigManager::instance().activeAiProfileName();
+
+    auto populateCombo = [&](QComboBox* combo) {
+        if (!combo) return;
+        combo->blockSignals(true);
+        combo->clear();
+        int activeIdx = 0;
+        for (int i = 0; i < profiles.size(); ++i) {
+            combo->addItem(profiles[i].profileName, profiles[i].profileName);
+            if (profiles[i].profileName == activeName) {
+                activeIdx = i;
+            }
+        }
+        combo->setCurrentIndex(activeIdx);
+        combo->blockSignals(false);
+    };
+
+    populateCombo(m_toolbarProfileCombo);
+    populateCombo(m_statusProfileCombo);
+    m_updatingProfileCombos = false;
+}
+
+void MainWindow::onQuickProfileSelected(int index) {
+    if (m_updatingProfileCombos || index < 0) return;
+
+    auto* senderCombo = qobject_cast<QComboBox*>(sender());
+    if (!senderCombo) return;
+
+    const QString selectedProfileName = senderCombo->itemData(index).toString().trimmed();
+    if (selectedProfileName.isEmpty()) return;
+
+    auto& cfgMgr = ConfigManager::instance();
+    if (cfgMgr.activeAiProfileName() == selectedProfileName) return;
+
+    cfgMgr.setActiveAiProfile(selectedProfileName);
+    refreshProfileSelectors();
+
+    // Если включён автозапуск локальной LLM — останавливаем процесс старого профиля и запускаем новый
+    if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
+        LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
+    }
+
+    // Автоматически запускаем Test / Fetch для нового профиля (очередь ждёт зелёной лампы)
+    startLlmConnectionCheck(true);
+
+    m_inspectorDock->refreshDisplay();
+    statusBar()->showMessage(QString("Switched AI Profile to '%1' — testing connection...").arg(selectedProfileName), 4000);
+}
+
+void MainWindow::startLlmConnectionCheck(bool allowLocalStartupRetries) {
+    m_llmConnectRetryTimer.stop();
+
+    // Пока соединение не подтверждено, очередь не должна молотить вхолостую
+    m_taskQueue->setLlmConnected(false);
+
+    const auto cfg = ConfigManager::instance().aiConfig();
+    auto& procMgr = LocalLlmProcessManager::instance();
+
+    const bool hasLocalExec = cfg.useLocalExecutable && !cfg.localExecutablePath.trimmed().isEmpty();
+    const bool localStartingOrRunning = hasLocalExec &&
+                                        (allowLocalStartupRetries ||
+                                         procMgr.isTransitioning() ||
+                                         procMgr.isExecutableRunning(cfg.localExecutablePath));
+
+    // Локальная LLM может долго загружать веса в память (до ~90-120 секунд) до открытия HTTP-порта
+    m_llmConnectRetriesLeft = localStartingOrRunning ? 60 : 0;
+
+    if (procMgr.transitionState() == LocalLlmProcessManager::TransitionState::Stopping) {
+        setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Stopping...");
+        return;
+    }
+
+    if (procMgr.transitionState() == LocalLlmProcessManager::TransitionState::Starting ||
+        procMgr.transitionState() == LocalLlmProcessManager::TransitionState::Restarting) {
+        setLlmConnectionState(LlmConnectionState::Connecting, "LLM: Starting Local Process...");
+        m_llmConnectRetryTimer.start(1500);
+        return;
+    }
+
+    setLlmConnectionState(LlmConnectionState::Connecting, "LLM: Connecting...");
+    probeLlmConnectionNow();
+}
+
+void MainWindow::probeLlmConnectionNow() {
+    m_llmConnectRetryTimer.stop();
+    const auto cfg = ConfigManager::instance().aiConfig();
+
+    if (cfg.endpointUrl.trimmed().isEmpty()) {
+        setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Disconnected");
+        m_taskQueue->setLlmConnected(false);
+        return;
+    }
+
+    setLlmConnectionState(LlmConnectionState::Connecting, "LLM: Connecting...");
+    m_aiProvider->fetchAvailableModels(cfg);
+}
+
+void MainWindow::onModelsFetchedForStatus(const QStringList& models) {
+    if (!models.isEmpty()) {
+        m_llmConnectRetryTimer.stop();
+        m_llmConnectRetriesLeft = 0;
+
+        const auto cfg = ConfigManager::instance().aiConfig();
+        QString labelModel = cfg.modelName.trimmed();
+        if (labelModel.isEmpty()) {
+            labelModel = models.first();
+        }
+        if (labelModel.length() > 24) {
+            labelModel = labelModel.left(22) + "..";
+        }
+
+        setLlmConnectionState(
+            LlmConnectionState::Connected,
+            QString("LLM: Connected (%1)").arg(labelModel),
+            QString("Connected to %1 (%2)\nAvailable models: %3\nActive model: %4\nClick to re-test connection.")
+                .arg(cfg.profileName, cfg.endpointUrl)
+                .arg(models.size())
+                .arg(cfg.modelName.isEmpty() ? models.first() : cfg.modelName));
+
+        // Зелёная лампа — разрешаем очереди обрабатывать задачи
+        m_taskQueue->setLlmConnected(true);
+        return;
+    }
+
+    // Если список моделей пуст (порт ещё не отвечает или ошибка соединения):
+    // проверяем, не загружается ли сейчас локальный исполняемый файл LLM
+    const auto cfg = ConfigManager::instance().aiConfig();
+    auto& procMgr = LocalLlmProcessManager::instance();
+    const bool localAlive = cfg.useLocalExecutable &&
+                            !cfg.localExecutablePath.trimmed().isEmpty() &&
+                            (procMgr.isTransitioning() || procMgr.isExecutableRunning(cfg.localExecutablePath));
+
+    if (m_llmConnectRetriesLeft > 0 && localAlive) {
+        --m_llmConnectRetriesLeft;
+        setLlmConnectionState(
+            LlmConnectionState::Connecting,
+            "LLM: Waiting for local port...",
+            QString("Local LLM process is running, waiting for HTTP server (%1) to become ready...\n"
+                    "Remaining automatic retries: %2")
+                .arg(cfg.endpointUrl)
+                .arg(m_llmConnectRetriesLeft));
+        m_llmConnectRetryTimer.start(2000);
+        return;
+    }
+
+    m_llmConnectRetryTimer.stop();
+    m_llmConnectRetriesLeft = 0;
+    m_taskQueue->setLlmConnected(false);
+    setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Disconnected");
+}
+
+void MainWindow::onLocalLlmProcessStateChanged() {
+    auto& procMgr = LocalLlmProcessManager::instance();
+    const auto tState = procMgr.transitionState();
+    const auto cfg = ConfigManager::instance().aiConfig();
+
+    if (tState == LocalLlmProcessManager::TransitionState::Starting ||
+        tState == LocalLlmProcessManager::TransitionState::Restarting) {
+        m_llmConnectRetryTimer.stop();
+        m_taskQueue->setLlmConnected(false);
+        m_llmConnectRetriesLeft = 60;
+        setLlmConnectionState(LlmConnectionState::Connecting, "LLM: Starting Local Process...");
+        return;
+    }
+
+    if (tState == LocalLlmProcessManager::TransitionState::Stopping) {
+        m_llmConnectRetryTimer.stop();
+        m_llmConnectRetriesLeft = 0;
+        m_taskQueue->setLlmConnected(false);
+        setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Stopping...");
+        return;
+    }
+
+    // Переход завершён (Idle): проверяем, запущен ли процесс
+    if (cfg.useLocalExecutable && !cfg.localExecutablePath.trimmed().isEmpty()) {
+        if (procMgr.isExecutableRunning(cfg.localExecutablePath)) {
+            if (m_llmConnState != LlmConnectionState::Connected) {
+                startLlmConnectionCheck(true);
+            }
+        } else {
+            m_llmConnectRetryTimer.stop();
+            m_llmConnectRetriesLeft = 0;
+            m_taskQueue->setLlmConnected(false);
+            setLlmConnectionState(LlmConnectionState::Disconnected, "LLM: Disconnected");
+        }
+    }
 }
 
 void MainWindow::onProjectSearchTextChanged(const QString& text) {
@@ -2306,6 +2635,7 @@ void MainWindow::onTaskCancelled(const AiTask& task) {
 }
 
 void MainWindow::onAiPreferences() {
+    const AiConnectionConfig prevCfg = ConfigManager::instance().aiConfig();
     AiPreferencesDialog dlg(m_aiProvider, this);
     if (dlg.exec() == QDialog::Accepted) {
         auto& cfgMgr = ConfigManager::instance();
@@ -2314,9 +2644,22 @@ void MainWindow::onAiPreferences() {
         cfgMgr.setAiBehavior(dlg.resultBehavior());
         cfgMgr.setPromptTemplates(dlg.resultPrompts());
 
-        // Синхронизируем локальный процесс с выбранным профилем при включённом автозапуске
+        refreshProfileSelectors();
+
         if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
             LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
+        }
+
+        // Если изменился профиль, URL, ключ, бэкенд или мы ещё не подключены — запускаем Test/Fetch
+        const AiConnectionConfig newCfg = cfgMgr.aiConfig();
+        if (m_llmConnState != LlmConnectionState::Connected ||
+            prevCfg.profileName != newCfg.profileName ||
+            prevCfg.backend != newCfg.backend ||
+            prevCfg.endpointUrl != newCfg.endpointUrl ||
+            prevCfg.apiKey != newCfg.apiKey ||
+            prevCfg.localExecutablePath != newCfg.localExecutablePath ||
+            prevCfg.localCommandLineArgs != newCfg.localCommandLineArgs) {
+            startLlmConnectionCheck(true);
         }
 
         m_projectMgr->saveProjectFile();
@@ -2330,10 +2673,12 @@ void MainWindow::onAiPreferences() {
             }
         }
     } else {
-        // Если пользователь переключал профили в диалоге и нажал Cancel — возвращаем процесс активного профиля
         const auto& cfgMgr = ConfigManager::instance();
         if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
             LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
+        }
+        if (m_llmConnState != LlmConnectionState::Connected) {
+            startLlmConnectionCheck(true);
         }
     }
 }

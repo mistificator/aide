@@ -15,6 +15,17 @@ AiTaskQueue::AiTaskQueue(AiProvider* provider, QObject* parent)
     connect(m_provider, &AiProvider::requestError, this, &AiTaskQueue::onProviderError);
 }
 
+void AiTaskQueue::setLlmConnected(bool connected) {
+    if (m_isLlmConnected == connected) return;
+    m_isLlmConnected = connected;
+    emitStatus();
+
+    if (m_isLlmConnected && !m_isProcessing && (!m_highQueue.isEmpty() || !m_lowQueue.isEmpty())) {
+        startBatchTimerIfNeeded();
+        QTimer::singleShot(0, this, &AiTaskQueue::processNext);
+    }
+}
+
 int AiTaskQueue::estimateExpectedTokens(const AiTask& task) {
     const int promptTok = (task.userPrompt.length() + 3) / 4;
     int est = 512;
@@ -113,11 +124,16 @@ bool AiTaskQueue::hasPendingOrActiveTask(TaskTargetType targetType, const QStrin
 QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
     AiTask task = inputTask;
     prepareTaskDefaults(task);
-    startBatchTimerIfNeeded();
+    if (m_isLlmConnected) {
+        startBatchTimerIfNeeded();
+    }
 
     if (task.priority == TaskPriority::High_UserAction) {
         if (task.targetEditor) {
-            task.targetEditor->setAiBusy(true, (m_isProcessing || !m_highQueue.isEmpty()) ? "Queued..." : "Generating...");
+            QString waitMsg = !m_isLlmConnected
+                                  ? "Waiting for LLM connection..."
+                                  : ((m_isProcessing || !m_highQueue.isEmpty()) ? "Queued..." : "Generating...");
+            task.targetEditor->setAiBusy(true, waitMsg);
         }
         m_highQueue.enqueue(task);
     } else {
@@ -139,7 +155,7 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
     }
 
     emitStatus();
-    if (!m_isProcessing) {
+    if (!m_isProcessing && m_isLlmConnected) {
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
     }
     return task.taskId;
@@ -147,9 +163,10 @@ QString AiTaskQueue::enqueueTask(const AiTask& inputTask) {
 
 void AiTaskQueue::enqueueTasksBatch(const QVector<AiTask>& inputTasks) {
     if (inputTasks.isEmpty()) return;
-    startBatchTimerIfNeeded();
+    if (m_isLlmConnected) {
+        startBatchTimerIfNeeded();
+    }
 
-    // Строим хеш-индекс существующих фоновых задач для дедупликации за O(1)
     QHash<QString, int> lowQueueIndexByKey;
     lowQueueIndexByKey.reserve(m_lowQueue.size() + inputTasks.size());
     for (int i = 0; i < m_lowQueue.size(); ++i) {
@@ -164,7 +181,8 @@ void AiTaskQueue::enqueueTasksBatch(const QVector<AiTask>& inputTasks) {
 
         if (task.priority == TaskPriority::High_UserAction) {
             if (task.targetEditor) {
-                task.targetEditor->setAiBusy(true, "Queued...");
+                task.targetEditor->setAiBusy(
+                    true, m_isLlmConnected ? "Queued..." : "Waiting for LLM connection...");
             }
             m_highQueue.enqueue(std::move(task));
         } else {
@@ -189,7 +207,7 @@ void AiTaskQueue::enqueueTasksBatch(const QVector<AiTask>& inputTasks) {
     }
 
     emitStatus();
-    if (!m_isProcessing) {
+    if (!m_isProcessing && m_isLlmConnected) {
         QTimer::singleShot(0, this, &AiTaskQueue::processNext);
     }
 }
@@ -348,7 +366,8 @@ void AiTaskQueue::cancelAllTasks() {
 }
 
 void AiTaskQueue::processNext() {
-    if (m_isProcessing) return;
+    // Не обрабатываем очередь, если уже идёт запрос или нет подтверждённого подключения к LLM
+    if (m_isProcessing || !m_isLlmConnected) return;
 
     while (!m_highQueue.isEmpty()) {
         const AiTask& head = m_highQueue.head();
@@ -371,6 +390,7 @@ void AiTaskQueue::processNext() {
         return;
     }
 
+    startBatchTimerIfNeeded();
     m_isProcessing = true;
     m_currentTask.isThinking = false;
     m_currentTask.generatedTokens = 0;

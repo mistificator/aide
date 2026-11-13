@@ -102,6 +102,7 @@ public:
     QVector<AiConnectionConfig> aiProfiles() const { return m_aiProfiles; }
     QString activeAiProfileName() const { return m_aiConfig.profileName; }
     void setAiProfiles(const QVector<AiConnectionConfig>& profiles, const QString& activeProfileName);
+    void setActiveAiProfile(const QString& profileName);
     static QVector<AiConnectionConfig> defaultAiProfiles();
 
     // Настройки поведения AI и фильтрации саммари

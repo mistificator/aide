@@ -978,6 +978,14 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     connect(m_provider, &AiProvider::modelsFetched, this, [this](const QStringList& models) {
         m_fetchBtn->setEnabled(true);
         if (models.isEmpty()) {
+            auto& procMgr = LocalLlmProcessManager::instance();
+            const QString execPath = m_localExecPathEdit->text().trimmed();
+            if (m_useLocalExecCheck->isChecked() && !execPath.isEmpty() &&
+                (procMgr.isTransitioning() || procMgr.isExecutableRunning(execPath))) {
+                m_statusLabel->setStyleSheet("color: #f1fa8c;");
+                m_statusLabel->setText("Local process is running — waiting for HTTP port to become ready...");
+                return;
+            }
             m_statusLabel->setStyleSheet("color: #ff5555;");
             m_statusLabel->setText("No models returned or connection failed.");
             return;
