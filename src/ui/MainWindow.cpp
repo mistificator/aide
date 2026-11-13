@@ -226,6 +226,13 @@ MainWindow::MainWindow(QWidget* parent)
             openProjectAtPath(lastProj);
         });
     }
+
+    QTimer::singleShot(0, this, []() {
+        const auto& cfgMgr = ConfigManager::instance();
+        if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
+            LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
+        }
+    });
 }
 
 void MainWindow::setupUiAndDocks() {
@@ -790,6 +797,9 @@ void MainWindow::setupConnections() {
     connect(&ConfigManager::instance(), &ConfigManager::aiBehaviorChanged, this, [this](const AiBehaviorConfig&) {
         applyProjectExplorerFilter();
     });
+
+    connect(&LocalLlmProcessManager::instance(), &LocalLlmProcessManager::debugLog,
+            m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
 }
 
 void MainWindow::revealProjectFileInTree(const QString& relFilePath) {
@@ -2303,16 +2313,27 @@ void MainWindow::onAiPreferences() {
         cfgMgr.setAiConfig(dlg.resultConfig());
         cfgMgr.setAiBehavior(dlg.resultBehavior());
         cfgMgr.setPromptTemplates(dlg.resultPrompts());
+
+        // Синхронизируем локальный процесс с выбранным профилем при включённом автозапуске
+        if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
+            LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
+        }
+
         m_projectMgr->saveProjectFile();
         m_inspectorDock->refreshDisplay();
         m_projectTree->viewport()->update();
-
         if (cfgMgr.aiBehavior().autoSummaryMode != AutoSummaryMode::None) {
             for (int i = 0; i < m_tabWidget->count(); ++i) {
                 if (auto* ed = m_tabWidget->editorAt(i); ed && !ed->filePath().isEmpty()) {
                     m_summaryWorker->checkAndScheduleFileSummary(ed->filePath(), ed->toPlainText().toUtf8());
                 }
             }
+        }
+    } else {
+        // Если пользователь переключал профили в диалоге и нажал Cancel — возвращаем процесс активного профиля
+        const auto& cfgMgr = ConfigManager::instance();
+        if (cfgMgr.aiBehavior().autoStartLocalExecutable) {
+            LocalLlmProcessManager::instance().syncWithProfile(cfgMgr.aiConfig(), true);
         }
     }
 }

@@ -41,6 +41,11 @@ struct AiConnectionConfig {
     int timeoutSec = 120;
     int projectSummaryIntervalMin = 5;
 
+    // Настройки локального исполняемого файла для профиля
+    bool useLocalExecutable = false;
+    QString localExecutablePath;
+    QString localCommandLineArgs;
+
     QString llmIdentifier() const {
         QString providerPrefix = (backend == AiBackendType::Ollama) ? "ollama"
                                  : (backend == AiBackendType::KoboldCpp) ? "koboldcpp"
@@ -52,16 +57,19 @@ struct AiConnectionConfig {
 
 struct AiBehaviorConfig {
     QString responseLocale = "default";
-    AutoSummaryMode autoSummaryMode = AutoSummaryMode::None; // По умолчанию: Do not auto-create summaries
+    AutoSummaryMode autoSummaryMode = AutoSummaryMode::FilesAndProject;
     bool includeDocumentSummaryInPrompt = true;
     bool includeProjectSummaryInPrompt = true;
     bool summaryUseSyntaxExtensions = true;
-    QStringList summaryAllowedFilenames;
-    QStringList summaryAllowedExtensions;
-    QStringList summaryIgnoredDirs;
     int promptHistoryLimit = 50;
     ProjectCustomPromptContextMode projectCustomPromptContextMode =
         ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
+    QStringList summaryAllowedFilenames;
+    QStringList summaryAllowedExtensions;
+    QStringList summaryIgnoredDirs;
+
+    // Общая опция автозапуска для оффлайн-профилей с указанным исполняемым файлом
+    bool autoStartLocalExecutable = false;
 };
 
 struct PromptHistoryItem {

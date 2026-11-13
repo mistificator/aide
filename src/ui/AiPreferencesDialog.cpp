@@ -13,13 +13,31 @@
 #include <QSpinBox>
 #include <QPushButton>
 #include <QCheckBox>
+#include <QProgressBar>
 #include <QDialogButtonBox>
 #include <QInputDialog>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QDir>
 #include <QMessageBox>
 #include <QLabel>
 #include <QLocale>
 #include <QSet>
+#include <QCoreApplication>
+#include <QRegularExpression>
+#include <QThread>
 #include <algorithm>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#else
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -45,15 +63,476 @@ constexpr PromptActionMeta kPromptActions[] = {
 
 } // namespace
 
+// ============================================================================
+// LocalLlmProcessManager
+// ============================================================================
+
+LocalLlmProcessManager& LocalLlmProcessManager::instance() {
+    // ВАЖНО: parent должен быть nullptr, чтобы QApplication::~QApplication()
+    // не пытался вызвать operator delete для статического объекта!
+    static LocalLlmProcessManager inst(nullptr);
+    return inst;
+}
+
+LocalLlmProcessManager::LocalLlmProcessManager(QObject* parent)
+    : QObject(parent),
+    m_process(new QProcess(this)),
+    m_killFallbackTimer(new QTimer(this)) {
+    m_process->setProcessChannelMode(QProcess::SeparateChannels);
+
+    m_killFallbackTimer->setSingleShot(true);
+    m_killFallbackTimer->setInterval(1500);
+    connect(m_killFallbackTimer, &QTimer::timeout, this, [this]() {
+        if (m_process && m_process->state() != QProcess::NotRunning) {
+            emit debugLog("LOCAL_LLM",
+                          "Force killing local LLM process (timeout waiting for graceful exit)",
+                          m_launchedExecPath);
+            m_process->kill();
+        }
+    });
+
+    connect(m_process, &QProcess::started, this, [this]() {
+        if (!m_process) return;
+        const QString exeName = QFileInfo(m_launchedExecPath).fileName();
+        const qint64 pid = m_process->processId();
+        emit debugLog("LOCAL_LLM",
+                      QString("Process started: %1 (PID: %2)").arg(exeName).arg(pid),
+                      QString("Executable: %1\nArguments: %2")
+                          .arg(m_launchedExecPath, m_launchedCliArgs.isEmpty() ? "(none)" : m_launchedCliArgs));
+
+        QTimer::singleShot(450, this, [this]() {
+            if (m_transitionState == TransitionState::Starting ||
+                m_transitionState == TransitionState::Restarting) {
+                finishTransitionToIdle();
+            }
+        });
+    });
+
+    connect(m_process, &QProcess::readyReadStandardOutput, this, [this]() {
+        if (!m_process) return;
+        const QString out = QString::fromLocal8Bit(m_process->readAllStandardOutput()).trimmed();
+        if (!out.isEmpty()) {
+            const QString exeName = QFileInfo(m_launchedExecPath).fileName();
+            emit debugLog("LLM_STDOUT",
+                          QString("%1 [stdout] (PID: %2)").arg(exeName).arg(m_process->processId()),
+                          out);
+        }
+    });
+
+    connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
+        if (!m_process) return;
+        const QString err = QString::fromLocal8Bit(m_process->readAllStandardError()).trimmed();
+        if (!err.isEmpty()) {
+            const QString exeName = QFileInfo(m_launchedExecPath).fileName();
+            emit debugLog("LLM_STDERR",
+                          QString("%1 [stderr] (PID: %2)").arg(exeName).arg(m_process->processId()),
+                          err);
+        }
+    });
+
+    connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+        if (!m_process) return;
+        if (err == QProcess::Crashed &&
+            (m_transitionState == TransitionState::Stopping || m_transitionState == TransitionState::Restarting)) {
+            return;
+        }
+        m_lastError = m_process->errorString();
+        emit debugLog("LOCAL_LLM",
+                      "Process error: " + m_lastError,
+                      m_launchedExecPath);
+        if (err == QProcess::FailedToStart) {
+            if (m_killFallbackTimer) m_killFallbackTimer->stop();
+            finishTransitionToIdle();
+            emit processFailure("Failed to start local LLM executable:\n" + m_lastError);
+        }
+    });
+
+    connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
+                if (m_killFallbackTimer) m_killFallbackTimer->stop();
+                const QString exeName = QFileInfo(m_launchedExecPath).fileName();
+                emit debugLog("LOCAL_LLM",
+                              QString("Process finished: %1 (exit code: %2, status: %3)")
+                                  .arg(exeName)
+                                  .arg(exitCode)
+                                  .arg(exitStatus == QProcess::NormalExit ? "Normal" : "Terminated"),
+                              {});
+
+                if (m_transitionState == TransitionState::Restarting) {
+                    const QString nextExec = m_pendingExecPath;
+                    const QString nextArgs = m_pendingCliArgs;
+                    m_pendingExecPath.clear();
+                    m_pendingCliArgs.clear();
+                    QTimer::singleShot(300, this, [this, nextExec, nextArgs]() {
+                        beginStartInternal(nextExec, nextArgs);
+                    });
+                    return;
+                }
+
+                QTimer::singleShot(350, this, [this]() {
+                    finishTransitionToIdle();
+                });
+            });
+
+    if (auto* app = QCoreApplication::instance()) {
+        connect(app, &QCoreApplication::aboutToQuit, this, &LocalLlmProcessManager::shutdown);
+    }
+}
+
+LocalLlmProcessManager::~LocalLlmProcessManager() {
+    shutdown();
+}
+
+void LocalLlmProcessManager::shutdown() {
+    if (m_killFallbackTimer) {
+        m_killFallbackTimer->stop();
+        delete m_killFallbackTimer;
+        m_killFallbackTimer = nullptr;
+    }
+    if (m_process) {
+        m_process->disconnect(this);
+        if (m_process->state() != QProcess::NotRunning) {
+            m_process->terminate();
+            if (!m_process->waitForFinished(800)) {
+                m_process->kill();
+                m_process->waitForFinished(1000);
+            }
+        }
+        delete m_process;
+        m_process = nullptr;
+    }
+    m_transitionState = TransitionState::Idle;
+}
+
+void LocalLlmProcessManager::finishTransitionToIdle() {
+    m_transitionState = TransitionState::Idle;
+    emit processStateChanged();
+}
+
+QString LocalLlmProcessManager::normalizeExecPath(const QString& path) {
+    QString trimmed = path.trimmed();
+    if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length() >= 2) {
+        trimmed = trimmed.mid(1, trimmed.length() - 2).trimmed();
+    }
+    if (trimmed.isEmpty()) return {};
+    QFileInfo fi(trimmed);
+    QString canonical = fi.canonicalFilePath();
+    QString resolved = canonical.isEmpty() ? fi.absoluteFilePath() : canonical;
+    return QDir::cleanPath(resolved);
+}
+
+bool LocalLlmProcessManager::isManagedRunning() const {
+    return m_process && (m_process->state() == QProcess::Running || m_process->state() == QProcess::Starting);
+}
+
+qint64 LocalLlmProcessManager::managedPid() const {
+    return isManagedRunning() ? m_process->processId() : 0;
+}
+
+qint64 LocalLlmProcessManager::findExternalProcessPid(const QString& execPath, qint64 excludePid) {
+    const QString normTarget = normalizeExecPath(execPath);
+    if (normTarget.isEmpty()) return 0;
+
+    const QFileInfo targetFi(normTarget);
+    const QString targetFileName = targetFi.fileName();
+    if (targetFileName.isEmpty()) return 0;
+
+#ifdef Q_OS_WIN
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    const DWORD selfPid = GetCurrentProcessId();
+    qint64 matchedPid = 0;
+
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            const qint64 pid = static_cast<qint64>(pe.th32ProcessID);
+            if (pid <= 0 || pid == static_cast<qint64>(selfPid) || (excludePid > 0 && pid == excludePid)) {
+                continue;
+            }
+            const QString exeName = QString::fromWCharArray(pe.szExeFile);
+            if (exeName.compare(targetFileName, Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (hProc) {
+                wchar_t fullPathBuf[MAX_PATH * 4]{};
+                DWORD bufLen = static_cast<DWORD>(std::size(fullPathBuf));
+                if (QueryFullProcessImageNameW(hProc, 0, fullPathBuf, &bufLen)) {
+                    const QString procNorm = normalizeExecPath(QString::fromWCharArray(fullPathBuf, bufLen));
+                    CloseHandle(hProc);
+                    if (procNorm.compare(normTarget, Qt::CaseInsensitive) == 0) {
+                        matchedPid = pid;
+                        break;
+                    }
+                    continue;
+                }
+                CloseHandle(hProc);
+            }
+            matchedPid = pid;
+            break;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return matchedPid;
+#else
+    QDir procDir("/proc");
+    if (!procDir.exists()) return 0;
+
+    const qint64 selfPid = QCoreApplication::applicationPid();
+    const QStringList entries = procDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& entry : entries) {
+        bool ok = false;
+        qint64 pid = entry.toLongLong(&ok);
+        if (!ok || pid <= 0 || pid == selfPid || (excludePid > 0 && pid == excludePid)) {
+            continue;
+        }
+        const QString exeLink = QFile::symLinkTarget(QString("/proc/%1/exe").arg(pid));
+        if (exeLink.isEmpty()) continue;
+        if (normalizeExecPath(exeLink) == normTarget) {
+            return pid;
+        }
+    }
+    return 0;
+#endif
+}
+
+bool LocalLlmProcessManager::terminateExternalProcessPid(qint64 pid) {
+    if (pid <= 0) return false;
+#ifdef Q_OS_WIN
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!hProc) return false;
+    BOOL ok = TerminateProcess(hProc, 0);
+    if (ok) {
+        WaitForSingleObject(hProc, 1500);
+    }
+    CloseHandle(hProc);
+    return ok != FALSE;
+#else
+    if (::kill(static_cast<pid_t>(pid), SIGTERM) == 0) {
+        for (int i = 0; i < 10; ++i) {
+            if (::kill(static_cast<pid_t>(pid), 0) != 0) return true;
+            QThread::msleep(50);
+        }
+        ::kill(static_cast<pid_t>(pid), SIGKILL);
+        return true;
+    }
+    return false;
+#endif
+}
+
+bool LocalLlmProcessManager::isExecutableRunning(const QString& execPath,
+                                                 qint64* outPid,
+                                                 bool* outIsExternal) const {
+    if (isManagedRunning()) {
+        if (outPid) *outPid = m_process->processId();
+        if (outIsExternal) *outIsExternal = false;
+        return true;
+    }
+    const qint64 extPid = findExternalProcessPid(execPath, 0);
+    if (extPid > 0) {
+        if (outPid) *outPid = extPid;
+        if (outIsExternal) *outIsExternal = true;
+        return true;
+    }
+    if (outPid) *outPid = 0;
+    if (outIsExternal) *outIsExternal = false;
+    return false;
+}
+
+bool LocalLlmProcessManager::isRunningConfigModified(const QString& currentExecPath,
+                                                     const QString& currentCliArgs) const {
+    if (!isManagedRunning()) return false;
+    const QString normCurrent = normalizeExecPath(currentExecPath);
+    const QString normLaunched = normalizeExecPath(m_launchedExecPath);
+#ifdef Q_OS_WIN
+    const bool execChanged = (normCurrent.compare(normLaunched, Qt::CaseInsensitive) != 0);
+#else
+    const bool execChanged = (normCurrent != normLaunched);
+#endif
+    const bool argsChanged = (currentCliArgs.trimmed() != m_launchedCliArgs.trimmed());
+    return execChanged || argsChanged;
+}
+
+void LocalLlmProcessManager::beginStartInternal(const QString& execPath, const QString& cliArgs) {
+    if (!m_process) return;
+    const QString normExec = normalizeExecPath(execPath);
+    if (normExec.isEmpty() || !QFileInfo::exists(normExec) || !QFileInfo(normExec).isFile()) {
+        m_lastError = "Executable file does not exist: " + execPath;
+        emit debugLog("LOCAL_LLM", m_lastError, {});
+        finishTransitionToIdle();
+        emit processFailure(m_lastError);
+        return;
+    }
+
+    qint64 activePid = 0;
+    bool isExt = false;
+    if (isExecutableRunning(normExec, &activePid, &isExt)) {
+        m_lastError = QString("Executable is already running (PID: %1%2).")
+        .arg(activePid)
+            .arg(isExt ? ", external OS process" : "");
+        emit debugLog("LOCAL_LLM", m_lastError, normExec);
+        finishTransitionToIdle();
+        return;
+    }
+
+    const QStringList argsList = QProcess::splitCommand(cliArgs.trimmed());
+    m_launchedExecPath = normExec;
+    m_launchedCliArgs = cliArgs.trimmed();
+    m_lastError.clear();
+
+    m_process->setWorkingDirectory(QFileInfo(normExec).absolutePath());
+    m_process->start(normExec, argsList);
+}
+
+void LocalLlmProcessManager::startProcess(const QString& execPath, const QString& cliArgs) {
+    if (isTransitioning()) return;
+    m_transitionState = TransitionState::Starting;
+    emit processStateChanged();
+
+    QTimer::singleShot(150, this, [this, execPath, cliArgs]() {
+        beginStartInternal(execPath, cliArgs);
+    });
+}
+
+void LocalLlmProcessManager::stopProcess(const QString& execPath) {
+    if (isTransitioning()) return;
+
+    if (isManagedRunning()) {
+        m_transitionState = TransitionState::Stopping;
+        emit processStateChanged();
+        emit debugLog("LOCAL_LLM",
+                      QString("Stopping local LLM process (PID: %1)...").arg(m_process->processId()),
+                      m_launchedExecPath);
+        m_process->terminate();
+        if (m_killFallbackTimer) m_killFallbackTimer->start();
+        return;
+    }
+
+    const QString targetExec = execPath.isEmpty() ? m_launchedExecPath : execPath;
+    const qint64 extPid = findExternalProcessPid(targetExec, 0);
+    if (extPid > 0) {
+        m_transitionState = TransitionState::Stopping;
+        emit processStateChanged();
+        emit debugLog("LOCAL_LLM",
+                      QString("Stopping external OS process (PID: %1)...").arg(extPid),
+                      targetExec);
+
+        QTimer::singleShot(300, this, [this, extPid]() {
+            bool ok = terminateExternalProcessPid(extPid);
+            if (!ok) {
+                m_lastError = QString("Could not terminate external process (PID: %1).").arg(extPid);
+                emit debugLog("LOCAL_LLM", m_lastError, {});
+                emit processFailure(m_lastError);
+            } else {
+                emit debugLog("LOCAL_LLM", QString("External process (PID: %1) terminated.").arg(extPid), {});
+            }
+            finishTransitionToIdle();
+        });
+    }
+}
+
+void LocalLlmProcessManager::restartProcess(const QString& execPath, const QString& cliArgs) {
+    if (isTransitioning()) return;
+
+    m_pendingExecPath = execPath;
+    m_pendingCliArgs = cliArgs;
+    m_transitionState = TransitionState::Restarting;
+    emit processStateChanged();
+
+    if (isManagedRunning()) {
+        emit debugLog("LOCAL_LLM",
+                      QString("Restarting local LLM process (stopping PID: %1)...").arg(m_process->processId()),
+                      execPath);
+        m_process->terminate();
+        if (m_killFallbackTimer) m_killFallbackTimer->start();
+        return;
+    }
+
+    const qint64 extPid = findExternalProcessPid(execPath, 0);
+    if (extPid > 0) {
+        emit debugLog("LOCAL_LLM",
+                      QString("Restarting external OS process (stopping PID: %1)...").arg(extPid),
+                      execPath);
+        QTimer::singleShot(250, this, [this, extPid]() {
+            terminateExternalProcessPid(extPid);
+            const QString nextExec = m_pendingExecPath;
+            const QString nextArgs = m_pendingCliArgs;
+            m_pendingExecPath.clear();
+            m_pendingCliArgs.clear();
+            beginStartInternal(nextExec, nextArgs);
+        });
+        return;
+    }
+
+    QTimer::singleShot(200, this, [this]() {
+        const QString nextExec = m_pendingExecPath;
+        const QString nextArgs = m_pendingCliArgs;
+        m_pendingExecPath.clear();
+        m_pendingCliArgs.clear();
+        beginStartInternal(nextExec, nextArgs);
+    });
+}
+
+void LocalLlmProcessManager::syncWithProfile(const AiConnectionConfig& cfg, bool autoStartEnabled) {
+    if (!autoStartEnabled) return;
+
+    const bool wantsLocal = cfg.useLocalExecutable && !cfg.localExecutablePath.trimmed().isEmpty();
+    if (wantsLocal) {
+        const QString normExec = normalizeExecPath(cfg.localExecutablePath);
+        if (normExec.isEmpty() || !QFileInfo::exists(normExec)) {
+            emit debugLog("LOCAL_LLM",
+                          QString("Auto-start skipped for profile '%1': executable not found").arg(cfg.profileName),
+                          cfg.localExecutablePath);
+            return;
+        }
+
+        if (isManagedRunning()) {
+            if (isRunningConfigModified(cfg.localExecutablePath, cfg.localCommandLineArgs)) {
+                emit debugLog("LOCAL_LLM",
+                              QString("Profile switched to '%1': restarting local LLM process with new parameters")
+                                  .arg(cfg.profileName),
+                              normExec);
+                restartProcess(cfg.localExecutablePath, cfg.localCommandLineArgs);
+            }
+        } else {
+            qint64 extPid = 0;
+            if (!isExecutableRunning(cfg.localExecutablePath, &extPid, nullptr)) {
+                emit debugLog("LOCAL_LLM",
+                              QString("Auto-starting local LLM executable for profile '%1'").arg(cfg.profileName),
+                              normExec);
+                startProcess(cfg.localExecutablePath, cfg.localCommandLineArgs);
+            }
+        }
+    } else {
+        // Если переключились на профиль без локального исполняемого файла — останавливаем прежний запущенный процесс
+        if (isManagedRunning()) {
+            emit debugLog("LOCAL_LLM",
+                          QString("Profile switched to '%1' (no local executable): stopping previous LLM process")
+                              .arg(cfg.profileName),
+                          m_launchedExecPath);
+            stopProcess();
+        }
+    }
+}
+
+// ============================================================================
+// AiPreferencesDialog
+// ============================================================================
+
 AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     : QDialog(parent), m_provider(provider) {
     setWindowTitle("AI Preferences");
-    resize(660, 680);
+    resize(680, 790);
 
     auto& cfgMgr = ConfigManager::instance();
     m_profiles = cfgMgr.aiProfiles();
     if (m_profiles.isEmpty()) m_profiles = ConfigManager::defaultAiProfiles();
     m_promptTemplates = cfgMgr.promptTemplates();
+    auto behCfg = cfgMgr.aiBehavior();
 
     auto* mainLay = new QVBoxLayout(this);
     auto* tabs = new QTabWidget(this);
@@ -70,13 +549,96 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_newProfileBtn = new QPushButton("New...", profileGroup);
     m_deleteProfileBtn = new QPushButton("Delete", profileGroup);
     m_resetProfilesBtn = new QPushButton("Reset Presets", profileGroup);
-
     profileRow->addWidget(new QLabel("Profile:", profileGroup));
     profileRow->addWidget(m_profileCombo, 1);
     profileRow->addWidget(m_newProfileBtn);
     profileRow->addWidget(m_deleteProfileBtn);
     profileRow->addWidget(m_resetProfilesBtn);
     connLay->addWidget(profileGroup);
+
+    // Чекбокс использования локального исполняемого файла для текущего профиля
+    m_useLocalExecCheck = new QCheckBox("Use / Launch Local LLM Executable for This Profile", connPage);
+    m_useLocalExecCheck->setStyleSheet("font-weight: bold;");
+    connLay->addWidget(m_useLocalExecCheck);
+
+    // Секция под чекбоксом
+    m_localExecGroup = new QGroupBox("Local LLM Executable && Command Line", connPage);
+    auto* localExecLay = new QVBoxLayout(m_localExecGroup);
+    localExecLay->setSpacing(6);
+
+    // Общий чекбокс автозапуска для всех оффлайн-профилей с указанным исполняемым файлом
+    m_autoStartLocalExecCheck = new QCheckBox(
+        "Auto-start local executable on AIDE launch and switch process when changing profiles",
+        m_localExecGroup);
+    m_autoStartLocalExecCheck->setToolTip(
+        "Shared option across offline profiles: automatically launches the configured executable when AIDE starts, "
+        "and stops the previous process / starts the new one when switching profiles.");
+    m_autoStartLocalExecCheck->setChecked(behCfg.autoStartLocalExecutable);
+    localExecLay->addWidget(m_autoStartLocalExecCheck);
+
+    auto* localForm = new QFormLayout();
+    auto* execPathRow = new QHBoxLayout();
+    m_localExecPathEdit = new QLineEdit(m_localExecGroup);
+    m_localExecPathEdit->setPlaceholderText("Path to local LLM server binary (e.g. llama-server.exe, koboldcpp.exe)...");
+    m_browseLocalExecBtn = new QPushButton("Browse...", m_localExecGroup);
+    m_browseLocalExecBtn->setToolTip("Select local LLM executable file from filesystem");
+    execPathRow->addWidget(m_localExecPathEdit, 1);
+    execPathRow->addWidget(m_browseLocalExecBtn);
+
+    auto* execArgsRow = new QHBoxLayout();
+    m_localExecArgsEdit = new QLineEdit(m_localExecGroup);
+    m_localExecArgsEdit->setPlaceholderText("e.g. -m \"model.gguf\" --port 5001 -c 16384 --ngl 99 (supports {model})");
+    m_browseLocalModelBtn = new QPushButton("Browse Model...", m_localExecGroup);
+    m_browseLocalModelBtn->setToolTip("Select a model file from filesystem and insert/replace its path in Command Line Args");
+    execArgsRow->addWidget(m_localExecArgsEdit, 1);
+    execArgsRow->addWidget(m_browseLocalModelBtn);
+
+    localForm->addRow("Executable File:", execPathRow);
+    localForm->addRow("Command Line Args:", execArgsRow);
+    localExecLay->addLayout(localForm);
+
+    auto* procCtrlRow = new QHBoxLayout();
+    m_startLocalExecBtn = new QPushButton("Start", m_localExecGroup);
+    m_startLocalExecBtn->setStyleSheet(
+        "QPushButton { background-color: #50fa7b; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 12px; }"
+        "QPushButton:hover { background-color: #69ff94; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_stopLocalExecBtn = new QPushButton("Stop", m_localExecGroup);
+    m_stopLocalExecBtn->setStyleSheet(
+        "QPushButton { background-color: #ff5555; color: #ffffff; font-weight: bold; border-radius: 4px; padding: 4px 12px; }"
+        "QPushButton:hover { background-color: #ff6e6e; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_restartLocalExecBtn = new QPushButton("Restart", m_localExecGroup);
+    m_restartLocalExecBtn->setToolTip("Restart local executable (use when command-line parameters or executable path changed)");
+    m_restartLocalExecBtn->setStyleSheet(
+        "QPushButton { background-color: #ffb86c; color: #191a24; font-weight: bold; border-radius: 4px; padding: 4px 12px; }"
+        "QPushButton:hover { background-color: #ffc98a; }"
+        "QPushButton:disabled { background-color: #44475a; color: #888899; }");
+
+    m_localExecStatusLabel = new QLabel("Status: Not running", m_localExecGroup);
+    m_localExecStatusLabel->setWordWrap(true);
+
+    procCtrlRow->addWidget(m_startLocalExecBtn);
+    procCtrlRow->addWidget(m_stopLocalExecBtn);
+    procCtrlRow->addWidget(m_restartLocalExecBtn);
+    procCtrlRow->addWidget(m_localExecStatusLabel, 1);
+    localExecLay->addLayout(procCtrlRow);
+
+    // Прогресс-бар с диапазоном (0, 0) для индикации запуска, остановки и перезапуска
+    m_localExecProgressBar = new QProgressBar(m_localExecGroup);
+    m_localExecProgressBar->setMinimumHeight(14);
+    m_localExecProgressBar->setMaximumHeight(14);
+    m_localExecProgressBar->setRange(0, 0);
+    m_localExecProgressBar->setTextVisible(false);
+    m_localExecProgressBar->setStyleSheet(
+        "QProgressBar { border: 1px solid #44475a; border-radius: 4px; background: #191a22; }"
+        "QProgressBar::chunk { background-color: #bd93f9; border-radius: 3px; }");
+    m_localExecProgressBar->hide();
+    localExecLay->addWidget(m_localExecProgressBar);
+
+    connLay->addWidget(m_localExecGroup);
 
     auto* form = new QFormLayout();
 
@@ -140,9 +702,9 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     form->addRow("Context Window:", m_ctxWindowSpin);
     form->addRow("Request Timeout:", m_timeoutSpin);
     form->addRow("Project Summary Rebuild:", m_summaryIntervalSpin);
-
     connLay->addLayout(form);
     connLay->addStretch();
+
     tabs->addTab(connPage, "Connection && Profiles");
 
     // =========================================================================
@@ -151,9 +713,6 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     auto* behPage = new QWidget(tabs);
     auto* behLay = new QVBoxLayout(behPage);
 
-    auto behCfg = cfgMgr.aiBehavior();
-
-    // Группа выбора языка генерации Markdown и комментариев в коде
     auto* localeGroup = new QGroupBox("Localization (Markdown && Code Comments Language)", behPage);
     auto* localeLay = new QHBoxLayout(localeGroup);
     localeLay->addWidget(new QLabel("Output Language:", localeGroup));
@@ -166,18 +725,16 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
         QString langName;
         QString label;
     };
-
     QVector<LanguageEntry> langEntries;
     QSet<QLocale::Language> seenLanguages;
+
     const QList<QLocale> sysLocales = QLocale::matchingLocales(
         QLocale::AnyLanguage, QLocale::AnyScript, QLocale::AnyTerritory);
-
     for (const QLocale& loc : sysLocales) {
         const QLocale::Language lang = loc.language();
         if (lang == QLocale::C || lang == QLocale::AnyLanguage || seenLanguages.contains(lang)) {
             continue;
         }
-
         const QString langStr = QLocale::languageToString(lang).trimmed();
         const QString langCode = QLocale::languageToCode(lang).trimmed();
         if (langStr.isEmpty() || langCode.isEmpty()) {
@@ -185,17 +742,14 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
         }
         seenLanguages.insert(lang);
 
-        // Предпочитаем самоназвание из базовой локали языка, при отсутствии — из текущей локали
         QString nativeLang = QLocale(lang).nativeLanguageName().trimmed();
         if (nativeLang.isEmpty()) {
             nativeLang = loc.nativeLanguageName().trimmed();
         }
-
         QString disp = langStr;
         if (!nativeLang.isEmpty() && nativeLang.compare(langStr, Qt::CaseInsensitive) != 0) {
             disp += QString(" [%1]").arg(nativeLang);
         }
-
         langEntries.append({lang, langCode, langStr, disp});
     }
 
@@ -301,6 +855,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
 
     behLay->addWidget(filterGroup);
     behLay->addStretch();
+
     tabs->addTab(behPage, "Behavior && Summary Rules");
 
     // =========================================================================
@@ -348,8 +903,8 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_promptHistoryLimitSpin->setValue(behCfg.promptHistoryLimit);
     historyLay->addWidget(m_promptHistoryLimitSpin);
     historyLay->addStretch();
-
     promptsLay->addWidget(historyGroup);
+
     promptsLay->addWidget(promptsGroup, 1);
     tabs->addTab(promptsPage, "Prompts");
 
@@ -383,6 +938,32 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     connect(m_fetchBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onFetchModelsClicked);
     connect(syncSyntaxExtBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onSyncSyntaxExtensionsClicked);
 
+    connect(m_useLocalExecCheck, &QCheckBox::toggled, this, &AiPreferencesDialog::onUseLocalExecToggled);
+    connect(m_browseLocalExecBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onBrowseLocalExecClicked);
+    connect(m_browseLocalModelBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onBrowseLocalModelClicked);
+    connect(m_startLocalExecBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onStartLocalExecClicked);
+    connect(m_stopLocalExecBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onStopLocalExecClicked);
+    connect(m_restartLocalExecBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onRestartLocalExecClicked);
+    connect(m_localExecPathEdit, &QLineEdit::textChanged, this, [this](const QString&) {
+        updateLocalExecProcessUi();
+    });
+    connect(m_localExecArgsEdit, &QLineEdit::textChanged, this, [this](const QString&) {
+        updateLocalExecProcessUi();
+    });
+
+    auto& procMgr = LocalLlmProcessManager::instance();
+    connect(&procMgr, &LocalLlmProcessManager::processStateChanged, this, &AiPreferencesDialog::updateLocalExecProcessUi);
+    connect(&procMgr, &LocalLlmProcessManager::processFailure, this, [this](const QString& errText) {
+        updateLocalExecProcessUi();
+        if (isVisible()) {
+            QMessageBox::warning(this, "Local LLM Process Error", errText);
+        }
+    });
+
+    m_processPollTimer.setInterval(1200);
+    connect(&m_processPollTimer, &QTimer::timeout, this, &AiPreferencesDialog::updateLocalExecProcessUi);
+    m_processPollTimer.start();
+
     connect(m_promptActionCombo, &QComboBox::currentIndexChanged, this, &AiPreferencesDialog::onPromptSelectionChanged);
     connect(m_resetCurrentPromptBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onResetCurrentPromptClicked);
     connect(m_resetAllPromptsBtn, &QPushButton::clicked, this, &AiPreferencesDialog::onResetAllPromptsClicked);
@@ -408,6 +989,8 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
         m_statusLabel->setStyleSheet("color: #50fa7b;");
         m_statusLabel->setText(QString("Connected! Found %1 model(s).").arg(models.size()));
     });
+
+    updateLocalExecProcessUi();
 }
 
 void AiPreferencesDialog::loadProfileIntoUi(const AiConnectionConfig& cfg) {
@@ -423,8 +1006,15 @@ void AiPreferencesDialog::loadProfileIntoUi(const AiConnectionConfig& cfg) {
     m_ctxWindowSpin->setValue(cfg.contextWindow);
     m_timeoutSpin->setValue(cfg.timeoutSec);
     m_summaryIntervalSpin->setValue(cfg.projectSummaryIntervalMin);
+
+    m_useLocalExecCheck->setChecked(cfg.useLocalExecutable);
+    m_localExecGroup->setVisible(cfg.useLocalExecutable);
+    m_localExecPathEdit->setText(cfg.localExecutablePath);
+    m_localExecArgsEdit->setText(cfg.localCommandLineArgs);
+
     m_statusLabel->clear();
     m_updatingProfileUi = false;
+    updateLocalExecProcessUi();
 }
 
 void AiPreferencesDialog::saveUiIntoCurrentProfile() {
@@ -441,6 +1031,193 @@ void AiPreferencesDialog::saveUiIntoCurrentProfile() {
     dst.contextWindow = m_ctxWindowSpin->value();
     dst.timeoutSec = m_timeoutSpin->value();
     dst.projectSummaryIntervalMin = m_summaryIntervalSpin->value();
+
+    dst.useLocalExecutable = m_useLocalExecCheck->isChecked();
+    dst.localExecutablePath = m_localExecPathEdit->text().trimmed();
+    dst.localCommandLineArgs = m_localExecArgsEdit->text().trimmed();
+}
+
+void AiPreferencesDialog::onUseLocalExecToggled(bool checked) {
+    m_localExecGroup->setVisible(checked);
+    updateLocalExecProcessUi();
+}
+
+void AiPreferencesDialog::onBrowseLocalExecClicked() {
+    QString currentExec = m_localExecPathEdit->text().trimmed();
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(currentExec);
+#ifdef Q_OS_WIN
+    QString filter = "Executables (*.exe *.bat *.cmd);;All Files (*)";
+#else
+    QString filter = "All Files (*)";
+#endif
+    QString path = QFileDialog::getOpenFileName(this, "Select Local LLM Executable", startDir, filter);
+    if (path.isEmpty()) return;
+    ConfigManager::instance().setLastDialogDir(path);
+    m_localExecPathEdit->setText(QDir::toNativeSeparators(path));
+}
+
+QString AiPreferencesDialog::substituteModelIntoArgs(const QString& currentArgs,
+                                                     const QString& modelFilePath,
+                                                     const QString& execPath) {
+    const QString nativeModel = QDir::toNativeSeparators(modelFilePath.trimmed());
+    const QString quotedModel = nativeModel.contains(' ')
+                                    ? QString("\"%1\"").arg(nativeModel)
+                                    : nativeModel;
+    QString args = currentArgs.trimmed();
+
+    static const QRegularExpression rxPlaceholder(R"(\{model\})", QRegularExpression::CaseInsensitiveOption);
+    if (rxPlaceholder.match(args).hasMatch()) {
+        args.replace(rxPlaceholder, quotedModel);
+        return args;
+    }
+
+    static const QRegularExpression rxExistingFlag(
+        R"(((?:^|\s)(?:-m|--model)(?:\s+|=))(?:"[^"]*"|'[^']*'|[^\s]+))");
+    auto m = rxExistingFlag.match(args);
+    if (m.hasMatch()) {
+        QString replacement = m.captured(1) + quotedModel;
+        args.replace(m.capturedStart(), m.capturedLength(), replacement);
+        return args;
+    }
+
+    if (args.endsWith("-m") || args.endsWith("--model")) {
+        return args + " " + quotedModel;
+    }
+
+    const QString exeName = QFileInfo(execPath).fileName().toLower();
+    const QString flag = exeName.contains("kobold") ? QStringLiteral("--model") : QStringLiteral("-m");
+    if (args.isEmpty()) {
+        return QString("%1 %2").arg(flag, quotedModel);
+    }
+
+    return QString("%1 %2 %3").arg(args, flag, quotedModel);
+}
+
+void AiPreferencesDialog::onBrowseLocalModelClicked() {
+    QString startDir = ConfigManager::instance().resolveInitialDialogDir(m_localExecPathEdit->text().trimmed());
+    QString filter = "LLM Model Files (*.gguf *.bin *.safetensors *.ggml *.pt *.pth *.onnx *.kobold);;All Files (*)";
+    QString modelPath = QFileDialog::getOpenFileName(
+        this, "Select Local Model File to Substitute into Command Line", startDir, filter);
+    if (modelPath.isEmpty()) return;
+
+    ConfigManager::instance().setLastDialogDir(modelPath);
+    QString updatedArgs = substituteModelIntoArgs(
+        m_localExecArgsEdit->text(), modelPath, m_localExecPathEdit->text());
+    m_localExecArgsEdit->setText(updatedArgs);
+}
+
+void AiPreferencesDialog::onStartLocalExecClicked() {
+    const QString execPath = m_localExecPathEdit->text().trimmed();
+    const QString cliArgs = m_localExecArgsEdit->text().trimmed();
+    if (execPath.isEmpty()) {
+        QMessageBox::warning(this, "Local LLM Executable", "Please select a local executable file first.");
+        return;
+    }
+
+    auto& procMgr = LocalLlmProcessManager::instance();
+    qint64 activePid = 0;
+    bool isExt = false;
+    if (procMgr.isExecutableRunning(execPath, &activePid, &isExt)) {
+        QMessageBox::information(
+            this,
+            "Already Running",
+            QString("The local executable is already running (PID: %1%2).\n"
+                    "Use 'Restart' if you want to relaunch it with new command-line parameters.")
+                .arg(activePid)
+                .arg(isExt ? ", launched externally in OS" : ""));
+        updateLocalExecProcessUi();
+        return;
+    }
+
+    procMgr.startProcess(execPath, cliArgs);
+}
+
+void AiPreferencesDialog::onStopLocalExecClicked() {
+    const QString execPath = m_localExecPathEdit->text().trimmed();
+    LocalLlmProcessManager::instance().stopProcess(execPath);
+}
+
+void AiPreferencesDialog::onRestartLocalExecClicked() {
+    const QString execPath = m_localExecPathEdit->text().trimmed();
+    const QString cliArgs = m_localExecArgsEdit->text().trimmed();
+    if (execPath.isEmpty()) {
+        QMessageBox::warning(this, "Local LLM Executable", "Please select a local executable file first.");
+        return;
+    }
+    LocalLlmProcessManager::instance().restartProcess(execPath, cliArgs);
+}
+
+void AiPreferencesDialog::updateLocalExecProcessUi() {
+    if (!m_localExecGroup) return;
+
+    auto& procMgr = LocalLlmProcessManager::instance();
+    const auto tState = procMgr.transitionState();
+
+    // Во время запуска/остановки/перезапуска показываем бегущий прогресс-бар (0, 0)
+    if (tState != LocalLlmProcessManager::TransitionState::Idle) {
+        m_localExecProgressBar->show();
+        m_startLocalExecBtn->setEnabled(false);
+        m_stopLocalExecBtn->setEnabled(false);
+        m_restartLocalExecBtn->setEnabled(false);
+        m_localExecStatusLabel->setStyleSheet("color: #bd93f9; font-weight: bold;");
+
+        if (tState == LocalLlmProcessManager::TransitionState::Starting) {
+            m_localExecStatusLabel->setText("Starting local LLM executable...");
+        } else if (tState == LocalLlmProcessManager::TransitionState::Stopping) {
+            m_localExecStatusLabel->setText("Stopping local LLM executable...");
+        } else {
+            m_localExecStatusLabel->setText("Restarting local LLM executable...");
+        }
+        return;
+    }
+
+    m_localExecProgressBar->hide();
+
+    const QString execPath = m_localExecPathEdit->text().trimmed();
+    const QString cliArgs = m_localExecArgsEdit->text().trimmed();
+    const QString normExec = LocalLlmProcessManager::normalizeExecPath(execPath);
+    const bool execExists = !normExec.isEmpty() && QFileInfo::exists(normExec) && QFileInfo(normExec).isFile();
+
+    qint64 pid = 0;
+    bool isExternal = false;
+    const bool running = procMgr.isExecutableRunning(execPath, &pid, &isExternal);
+    const bool configChanged = procMgr.isRunningConfigModified(execPath, cliArgs);
+
+    m_startLocalExecBtn->setEnabled(!running && execExists);
+    m_stopLocalExecBtn->setEnabled(running);
+    m_restartLocalExecBtn->setEnabled(running && execExists);
+
+    if (running) {
+        if (configChanged) {
+            m_restartLocalExecBtn->setText("Restart (Apply Changes)");
+            m_localExecStatusLabel->setStyleSheet("color: #ffb86c; font-weight: bold;");
+            m_localExecStatusLabel->setText(
+                QString("Running (PID: %1) — Executable or CLI args modified. Click 'Restart' to apply.")
+                    .arg(pid));
+        } else if (isExternal) {
+            m_restartLocalExecBtn->setText("Restart");
+            m_localExecStatusLabel->setStyleSheet("color: #8be9fd; font-weight: bold;");
+            m_localExecStatusLabel->setText(
+                QString("Already running in OS (PID: %1). Click 'Restart' to relaunch with current CLI args.")
+                    .arg(pid));
+        } else {
+            m_restartLocalExecBtn->setText("Restart");
+            m_localExecStatusLabel->setStyleSheet("color: #50fa7b; font-weight: bold;");
+            m_localExecStatusLabel->setText(QString("Running (PID: %1)").arg(pid));
+        }
+    } else {
+        m_restartLocalExecBtn->setText("Restart");
+        if (execPath.isEmpty()) {
+            m_localExecStatusLabel->setStyleSheet("color: #888899;");
+            m_localExecStatusLabel->setText("Status: Stopped (select an executable file)");
+        } else if (!execExists) {
+            m_localExecStatusLabel->setStyleSheet("color: #ff5555; font-weight: bold;");
+            m_localExecStatusLabel->setText("Status: Executable file not found on disk");
+        } else {
+            m_localExecStatusLabel->setStyleSheet("color: #888899;");
+            m_localExecStatusLabel->setText("Status: Stopped (Ready to start)");
+        }
+    }
 }
 
 void AiPreferencesDialog::loadPromptIntoUi(int index) {
@@ -490,6 +1267,11 @@ void AiPreferencesDialog::onProfileSelectionChanged(int index) {
     saveUiIntoCurrentProfile();
     m_currentProfileIndex = index;
     loadProfileIntoUi(m_profiles[index]);
+
+    // Если включён автозапуск — закрываем прошлый процесс и запускаем процесс выбранного профиля
+    if (m_autoStartLocalExecCheck && m_autoStartLocalExecCheck->isChecked()) {
+        LocalLlmProcessManager::instance().syncWithProfile(m_profiles[index], true);
+    }
 }
 
 void AiPreferencesDialog::onNewProfileClicked() {
@@ -607,7 +1389,10 @@ AiConnectionConfig AiPreferencesDialog::resultConfig() const {
         m_maxSummaryTokensSpin->value(),
         m_ctxWindowSpin->value(),
         m_timeoutSpin->value(),
-        m_summaryIntervalSpin->value()
+        m_summaryIntervalSpin->value(),
+        m_useLocalExecCheck->isChecked(),
+        m_localExecPathEdit->text().trimmed(),
+        m_localExecArgsEdit->text().trimmed()
     };
 }
 
@@ -633,5 +1418,6 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
         m_projCustomPromptCtxCombo
             ? m_projCustomPromptCtxCombo->currentData().toInt()
             : static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+    b.autoStartLocalExecutable = m_autoStartLocalExecCheck && m_autoStartLocalExecCheck->isChecked();
     return b;
 }

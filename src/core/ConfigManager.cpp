@@ -300,7 +300,10 @@ QJsonObject ConfigManager::serializeAiConfig(const AiConnectionConfig& cfg) {
         {"maxOutputSummaryTokens", cfg.maxOutputSummaryTokens},
         {"contextWindow", cfg.contextWindow},
         {"timeoutSec", cfg.timeoutSec},
-        {"projectSummaryIntervalMin", cfg.projectSummaryIntervalMin}
+        {"projectSummaryIntervalMin", cfg.projectSummaryIntervalMin},
+        {"useLocalExecutable", cfg.useLocalExecutable},
+        {"localExecutablePath", cfg.localExecutablePath},
+        {"localCommandLineArgs", cfg.localCommandLineArgs}
     };
 }
 
@@ -319,6 +322,10 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     cfg.contextWindow = ai["contextWindow"].toInt(131072);
     cfg.timeoutSec = ai["timeoutSec"].toInt(120);
     cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+
+    cfg.useLocalExecutable = ai["useLocalExecutable"].toBool(false);
+    cfg.localExecutablePath = ai["localExecutablePath"].toString();
+    cfg.localCommandLineArgs = ai["localCommandLineArgs"].toString();
 
     if (cfg.profileName == "KoboldCpp (Offline)" &&
         cfg.backend == AiBackendType::KoboldCpp &&
@@ -399,6 +406,7 @@ void ConfigManager::loadConfig() {
             }
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
             m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
+            m_aiBehavior.autoStartLocalExecutable = beh["autoStartLocalExecutable"].toBool(false);
 
             if (beh.contains("summaryAllowedFilenames")) {
                 m_aiBehavior.summaryAllowedFilenames.clear();
@@ -687,16 +695,17 @@ void ConfigManager::saveConfig() {
     for (const QString& dirPat : m_aiBehavior.summaryIgnoredDirs) ignoredDirsArr.append(dirPat);
 
     QJsonObject behaviorObj{
+        {"responseLocale", m_aiBehavior.responseLocale},
         {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
-        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
-        {"responseLocale", m_aiBehavior.responseLocale.isEmpty() ? QStringLiteral("default") : m_aiBehavior.responseLocale},
+        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryAllowedFilenames", allowedFilesArr},
         {"summaryAllowedExtensions", allowedExtsArr},
-        {"summaryIgnoredDirs", ignoredDirsArr}
+        {"summaryIgnoredDirs", ignoredDirsArr},
+        {"autoStartLocalExecutable", m_aiBehavior.autoStartLocalExecutable}
     };
 
     QJsonArray historyArr;
