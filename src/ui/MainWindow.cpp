@@ -18,6 +18,7 @@
 #include "../ai/AiTaskQueue.h"
 #include "../ai/SummaryWorker.h"
 #include "../syntax/ThemeAndSyntaxDownloader.h"
+#include "../core/SystemProxyManager.h"
 
 #include <QComboBox>
 #include <QPlainTextEdit>
@@ -724,6 +725,11 @@ void MainWindow::setupConnections() {
     connect(m_tabWidget, &EditorTabWidget::diffRequested, this, &MainWindow::onCompareUnsavedDiff);
 
     connect(m_aiProvider, &AiProvider::debugLog, m_debugConsoleDock, &AiDebugConsoleDock::appendLog);
+    SystemProxyManager::setLogger([this](const QString& category, const QString& summary, const QString& payload) {
+        if (m_debugConsoleDock) {
+            m_debugConsoleDock->appendLog(category, summary, payload);
+        }
+    });
 
     connect(m_inspectorDock, &ContextInspectorDock::rebuildFileSummaryClicked, this, [this](const QString& path) {
         rebuildSingleFileSummary(path, true);

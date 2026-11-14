@@ -1,6 +1,7 @@
 // src/main.cpp
 #include <QApplication>
 #include "core/ConfigManager.h"
+#include "core/SystemProxyManager.h"
 #include "syntax/ColorScheme.h"
 #include "ui/AppIcon.h"
 #include "ui/MainWindow.h"
@@ -19,6 +20,9 @@ int main(int argc, char *argv[]) {
     auto& cfg = ConfigManager::instance();
     cfg.initializeStorage();
     cfg.loadConfig();
+
+    // Глобальная поддержка системных прокси (HTTP / HTTPS / SOCKS4 / SOCKS4a / SOCKS5 / SOCKS5h)
+    SystemProxyManager::install();
 
     ColorScheme::installWindowThemeFilter(&app);
     ColorScheme::applyApplicationTheme(cfg.activeTheme());

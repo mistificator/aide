@@ -99,6 +99,8 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     src/core/ConfigManager.cpp
     src/core/ProjectManager.h
     src/core/ProjectManager.cpp
+    src/core/SystemProxyManager.h
+    src/core/SystemProxyManager.cpp
     src/syntax/ColorScheme.h
     src/syntax/ColorScheme.cpp
     src/syntax/LexicalHighlighter.h
