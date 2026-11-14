@@ -494,8 +494,9 @@ void SummaryWorker::onTaskStreamChunk(const AiTask& task, const QString& chunk) 
 void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultText) {
     if (task.targetType == TaskTargetType::FileSummary) {
         const QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
-        ? (task.previousOutput + "\n" + resultText)
-        : resultText;
+                                   ? (task.previousOutput + "\n" + resultText)
+                                   : resultText;
+        emit summaryStreamingReset(task.filePath, false);
         m_projectMgr->updateFileSummary(task.filePath, task.fileSha256, task.llmModel, finalSummary);
 
         scheduleReadyDeferredProjectSummaries();
@@ -505,8 +506,9 @@ void SummaryWorker::onTaskCompleted(const AiTask& task, const QString& resultTex
     } else if (task.targetType == TaskTargetType::ProjectSummary) {
         const QString subRel = extractSubprojectRelFromTaskKey(task.filePath);
         const QString finalSummary = (task.appendToPreviousOutput && !task.previousOutput.isEmpty())
-                                         ? (task.previousOutput + "\n" + resultText)
-                                         : resultText;
+                                   ? (task.previousOutput + "\n" + resultText)
+                                   : resultText;
+        emit summaryStreamingReset(subRel, true);
         m_projectMgr->setProjectSummary(finalSummary, task.llmModel, subRel);
 
         scheduleReadyDeferredProjectSummaries();

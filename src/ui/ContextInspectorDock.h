@@ -40,6 +40,9 @@ signals:
 private:
     void rebuildProjectScopeCombo();
     void updateEffectivePreview();
+    void finishEditingFileSummary(bool saveChanges);
+    void finishEditingProjectSummary(bool saveChanges);
+
     static void setupMarkdownViewerStyle(QTextEdit* viewer);
     static void renderMarkdownPreservingScroll(QTextEdit* viewer,
                                                const QString& markdownText,
@@ -59,6 +62,7 @@ private:
 
     QTimer m_refreshDebounceTimer;
     bool m_updatingUi = false;
+    bool m_editingFileMarkdown = false;
     bool m_editingProjectMarkdown = false;
 
     QLabel* m_fileHeaderLabel = nullptr;
@@ -71,11 +75,14 @@ private:
     QPlainTextEdit* m_filePromptEdit = nullptr;
     QTextEdit* m_fileSummaryView = nullptr;
     QTextEdit* m_effectiveContextPreview = nullptr;
+
+    QPushButton* m_editFileSummaryBtn = nullptr;
     QPushButton* m_rebuildFileBtn = nullptr;
     QPushButton* m_continueFileBtn = nullptr;
     QPushButton* m_clearFileBtn = nullptr;
     QPushButton* m_removeFileBtn = nullptr;
+
+    QPushButton* m_editProjSummaryBtn = nullptr;
     QPushButton* m_rebuildProjBtn = nullptr;
     QPushButton* m_continueProjBtn = nullptr;
-    QPushButton* m_editProjSummaryBtn = nullptr;
 };

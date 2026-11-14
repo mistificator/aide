@@ -143,6 +143,7 @@ add_executable(aide WIN32 MACOSX_BUNDLE
     ${AIDE_PLATFORM_SOURCES}
 
     .github/workflows/ci.yml
+    README.md
 )
 
 add_dependencies(aide aide_icons)
