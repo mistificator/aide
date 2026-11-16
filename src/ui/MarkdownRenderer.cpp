@@ -31,6 +31,7 @@ QString MarkdownRenderer::toHtml(const QString& markdown) {
     QStringList codeLines;
 
     bool inMathBlock = false;
+    QString mathCloseToken;
     QStringList mathLines;
 
     bool inUl = false;
@@ -55,7 +56,7 @@ QString MarkdownRenderer::toHtml(const QString& markdown) {
         const QString& rawLine = lines[i];
         const QString trimmed = rawLine.trimmed();
 
-        // 1. Ограждённые блоки кода ```lang ... ```
+        // 1. Блоки кода ```lang ... ```
         if (trimmed.startsWith("```")) {
             closeLists();
             closeTable();
@@ -77,37 +78,34 @@ QString MarkdownRenderer::toHtml(const QString& markdown) {
             continue;
         }
 
-        // 1b. Блочные математические формулы $$ ... $$
-        if (trimmed.startsWith("$$")) {
+        // 1b. Блочные формулы $$ ... $$ или \[ ... \]
+        if (!inMathBlock && (trimmed.startsWith("$$") || trimmed.startsWith("\\["))) {
             closeLists();
             closeTable();
-            if (!inMathBlock) {
-                if (trimmed.length() > 4 && trimmed.endsWith("$$")) {
-                    QString innerMath = trimmed.mid(2, trimmed.length() - 4).trimmed();
-                    html += renderLatexMath(innerMath, true);
-                } else {
-                    inMathBlock = true;
-                    mathLines.clear();
-                    QString firstPart = trimmed.mid(2).trimmed();
-                    if (!firstPart.isEmpty()) mathLines.append(firstPart);
-                }
+            const QString openTok = trimmed.startsWith("$$") ? QStringLiteral("$$") : QStringLiteral("\\[");
+            const QString closeTok = trimmed.startsWith("$$") ? QStringLiteral("$$") : QStringLiteral("\\]");
+
+            if (trimmed.length() > openTok.length() && trimmed.endsWith(closeTok)) {
+                QString innerMath = trimmed.mid(openTok.length(),
+                                                trimmed.length() - openTok.length() - closeTok.length()).trimmed();
+                html += renderLatexMath(innerMath, true);
             } else {
-                QString lastPart = trimmed;
-                if (lastPart.endsWith("$$")) lastPart.chop(2);
-                if (!lastPart.trimmed().isEmpty()) mathLines.append(lastPart.trimmed());
-                html += renderLatexMath(mathLines.join(' '), true);
-                inMathBlock = false;
+                inMathBlock = true;
+                mathCloseToken = closeTok;
                 mathLines.clear();
+                QString firstPart = trimmed.mid(openTok.length()).trimmed();
+                if (!firstPart.isEmpty()) mathLines.append(firstPart);
             }
             continue;
         }
 
         if (inMathBlock) {
-            if (trimmed.endsWith("$$")) {
-                QString lastPart = trimmed.left(trimmed.length() - 2).trimmed();
+            if (trimmed.endsWith(mathCloseToken)) {
+                QString lastPart = trimmed.left(trimmed.length() - mathCloseToken.length()).trimmed();
                 if (!lastPart.isEmpty()) mathLines.append(lastPart);
-                html += renderLatexMath(mathLines.join(' '), true);
+                html += renderLatexMath(mathLines.join('\n'), true);
                 inMathBlock = false;
+                mathCloseToken.clear();
                 mathLines.clear();
             } else {
                 mathLines.append(trimmed);
@@ -235,7 +233,7 @@ QString MarkdownRenderer::toHtml(const QString& markdown) {
         html += renderCodeBlock(codeLines.join('\n'), codeLang);
     }
     if (inMathBlock && !mathLines.isEmpty()) {
-        html += renderLatexMath(mathLines.join(' '), true);
+        html += renderLatexMath(mathLines.join('\n'), true);
     }
     closeLists();
     closeTable();
@@ -252,6 +250,59 @@ QString MarkdownRenderer::escapeHtml(QString s) {
     return s;
 }
 
+QString MarkdownRenderer::decodeCommonHtmlEntities(QString s) {
+    if (!s.contains('&')) return s;
+    struct EntityMap { const char* ent; const char16_t* uni; };
+    static constexpr EntityMap kEntities[] = {
+        {"&rarr;", u"\u2192"},   {"&larr;", u"\u2190"},   {"&harr;", u"\u2194"},
+        {"&rArr;", u"\u21D2"},   {"&lArr;", u"\u21D0"},   {"&hArr;", u"\u21D4"},
+        {"&uarr;", u"\u2191"},   {"&darr;", u"\u2193"},   {"&mdash;", u"\u2014"},
+        {"&ndash;", u"\u2013"},  {"&hellip;", u"\u2026"}, {"&bull;", u"\u2022"},
+        {"&middot;", u"\u00B7"}, {"&times;", u"\u00D7"},  {"&divide;", u"\u00F7"},
+        {"&plusmn;", u"\u00B1"}, {"&le;", u"\u2264"},     {"&ge;", u"\u2265"},
+        {"&ne;", u"\u2260"},     {"&asymp;", u"\u2248"},  {"&equiv;", u"\u2261"},
+        {"&infin;", u"\u221E"},  {"&deg;", u"\u00B0"},    {"&nbsp;", u"\u00A0"}
+    };
+    for (const auto& e : kEntities) {
+        s.replace(QLatin1String(e.ent), QString::fromUtf16(e.uni), Qt::CaseInsensitive);
+    }
+    return s;
+}
+
+QString MarkdownRenderer::replaceBareLatexArrowsAndSymbols(QString s) {
+    if (!s.contains('\\')) return s;
+
+    struct BareSym { const char* cmd; const char16_t* uni; };
+    static constexpr BareSym kBareSymbols[] = {
+        {"\\Longleftrightarrow", u"\u27FA"}, {"\\Longrightarrow", u"\u27F9"},
+        {"\\Longleftarrow", u"\u27F8"},      {"\\longleftrightarrow", u"\u27F7"},
+        {"\\longrightarrow", u"\u27F6"},     {"\\longleftarrow", u"\u27F5"},
+        {"\\Leftrightarrow", u"\u21D4"},     {"\\leftrightarrow", u"\u2194"},
+        {"\\hookrightarrow", u"\u21AA"},     {"\\hookleftarrow", u"\u21A9"},
+        {"\\Rightarrow", u"\u21D2"},         {"\\Leftarrow", u"\u21D0"},
+        {"\\rightarrow", u"\u2192"},         {"\\leftarrow", u"\u2190"},
+        {"\\updownarrow", u"\u2195"},        {"\\uparrow", u"\u2191"},
+        {"\\downarrow", u"\u2193"},          {"\\mapsto", u"\u21A6"},
+        {"\\implies", u"\u21D2"},            {"\\iff", u"\u21D4"},
+        {"\\leqslant", u"\u2264"},           {"\\geqslant", u"\u2265"},
+        {"\\leq", u"\u2264"},                {"\\geq", u"\u2265"},
+        {"\\neq", u"\u2260"},                {"\\approx", u"\u2248"},
+        {"\\equiv", u"\u2261"},              {"\\times", u"\u00D7"},
+        {"\\div", u"\u00F7"},                {"\\pm", u"\u00B1"},
+        {"\\infty", u"\u221E"},              {"\\checkmark", u"\u2713"}
+    };
+
+    for (const auto& b : kBareSymbols) {
+        // Не заменяем внутри путей Windows (после буквы диска/слэша/цифры)
+        QString pattern = QStringLiteral("(?<![A-Za-z0-9_:/\\\\])")
+                          + QRegularExpression::escape(QString::fromLatin1(b.cmd))
+                          + QStringLiteral("(?![A-Za-z0-9_/\\\\])");
+        QRegularExpression rx(pattern);
+        s.replace(rx, QString::fromUtf16(b.uni));
+    }
+    return s;
+}
+
 QStringList MarkdownRenderer::splitTableRow(const QString& row) {
     QStringList out;
     QString cur;
@@ -263,7 +314,15 @@ QStringList MarkdownRenderer::splitTableRow(const QString& row) {
             inCode = !inCode;
             cur += ch;
         } else if (ch == '$' && !inCode) {
-            inMath = !inMath;
+            if (!inMath) {
+                // Включаем режим формулы только если в строке есть закрывающий '$'
+                int nextDollar = row.indexOf('$', i + 1);
+                if (nextDollar > i) {
+                    inMath = true;
+                }
+            } else {
+                inMath = false;
+            }
             cur += ch;
         } else if (ch == '|' && !inCode && !inMath) {
             out.append(cur);
@@ -292,129 +351,313 @@ QString MarkdownRenderer::renderLatexMath(const QString& rawLatex, bool displayM
     QString s = rawLatex.trimmed();
     if (s.isEmpty()) return {};
 
-    // Удаляем размерные модификаторы скобок и пробельные макросы LaTeX
-    static const QRegularExpression rxLeftRight(R"(\\left\b|\\right\b|\\big\b|\\Big\b|\\bigl\b|\\bigr\b)");
+    // 0. Сохраняем экранированные фигурные скобки \{ и \} в плейсхолдеры
+    s.replace("\\{", "\x02LBRACE\x02");
+    s.replace("\\}", "\x02RBRACE\x02");
+
+    // 1. Извлекаем текстовые макросы \text{...}, \mathrm{...}, \textrm{...}, \operatorname{...}, \mbox{...}
+    QStringList textSpans;
+    static const QRegularExpression rxTextMacro(
+        R"(\\(?:text|textrm|textsf|mathrm|operatorname\*?|mbox|hbox)\s*\{([^{}]*)\})");
+    while (true) {
+        auto m = rxTextMacro.match(s);
+        if (!m.hasMatch()) break;
+        QString rawInner = m.captured(1);
+        QString escapedInner = escapeHtml(rawInner);
+        if (escapedInner.startsWith(' ')) {
+            escapedInner.replace(0, 1, "&nbsp;");
+        }
+        if (escapedInner.endsWith(' ') && escapedInner.length() > 1) {
+            escapedInner.chop(1);
+            escapedInner += "&nbsp;";
+        }
+        int idx = textSpans.size();
+        textSpans.append(escapedInner);
+        s.replace(m.capturedStart(), m.capturedLength(), QString("\x02TXT%1\x02").arg(idx));
+    }
+
+    // 1b. Стрелки с надписями \xrightarrow[sub]{sup} и \xleftarrow[sub]{sup}
+    static const QRegularExpression rxXRightArrowOpt(R"(\\xrightarrow\s*\[([^\[\]]*)\]\s*\{([^{}]*)\})");
+    s.replace(rxXRightArrowOpt, QStringLiteral(" \u2014[\\2 / \\1]\u2192 "));
+    static const QRegularExpression rxXRightArrow(R"(\\xrightarrow\s*\{([^{}]*)\})");
+    while (true) {
+        auto m = rxXRightArrow.match(s);
+        if (!m.hasMatch()) break;
+        QString lbl = m.captured(1).trimmed();
+        QString repl = lbl.isEmpty() ? QStringLiteral("\u2192") : QStringLiteral(" \u2014(%1)\u2192 ").arg(lbl);
+        s.replace(m.capturedStart(), m.capturedLength(), repl);
+    }
+
+    static const QRegularExpression rxXLeftArrowOpt(R"(\\xleftarrow\s*\[([^\[\]]*)\]\s*\{([^{}]*)\})");
+    s.replace(rxXLeftArrowOpt, QStringLiteral(" \u2190[\\2 / \\1]\u2014 "));
+    static const QRegularExpression rxXLeftArrow(R"(\\xleftarrow\s*\{([^{}]*)\})");
+    while (true) {
+        auto m = rxXLeftArrow.match(s);
+        if (!m.hasMatch()) break;
+        QString lbl = m.captured(1).trimmed();
+        QString repl = lbl.isEmpty() ? QStringLiteral("\u2190") : QStringLiteral(" \u2190(%1)\u2014 ").arg(lbl);
+        s.replace(m.capturedStart(), m.capturedLength(), repl);
+    }
+
+    // 2. Градусы, штрихи и отрицания с \not
+    static const QRegularExpression rxDegree(
+        R"(\^\s*\{\s*\\circ\s*\}|\^\s*\\circ(?![A-Za-z])|\\degree(?![A-Za-z]))");
+    s.replace(rxDegree, QStringLiteral("\u00B0"));
+
+    static const QRegularExpression rxDoublePrime(
+        R"(\^\s*\{\s*\\prime\s*\\prime\s*\})");
+    s.replace(rxDoublePrime, QStringLiteral("\u2033"));
+
+    static const QRegularExpression rxSinglePrime(
+        R"(\^\s*\{\s*\\prime\s*\}|\^\s*\\prime(?![A-Za-z])|\\prime(?![A-Za-z]))");
+    s.replace(rxSinglePrime, QStringLiteral("\u2032"));
+
+    // Комбинации \not=, \not\in, \not\equiv, \not\subset, \not\subseteq, \not\approx, \not\sim
+    s.replace(QRegularExpression(R"(\\not\s*=)"), QStringLiteral("\u2260"));
+    s.replace(QRegularExpression(R"(\\not\s*\\in(?![A-Za-z]))"), QStringLiteral("\u2209"));
+    s.replace(QRegularExpression(R"(\\not\s*\\equiv(?![A-Za-z]))"), QStringLiteral("\u2262"));
+    s.replace(QRegularExpression(R"(\\not\s*\\subseteq(?![A-Za-z]))"), QStringLiteral("\u2288"));
+    s.replace(QRegularExpression(R"(\\not\s*\\subset(?![A-Za-z]))"), QStringLiteral("\u2284"));
+    s.replace(QRegularExpression(R"(\\not\s*\\supseteq(?![A-Za-z]))"), QStringLiteral("\u2289"));
+    s.replace(QRegularExpression(R"(\\not\s*\\supset(?![A-Za-z]))"), QStringLiteral("\u2285"));
+    s.replace(QRegularExpression(R"(\\not\s*\\approx(?![A-Za-z]))"), QStringLiteral("\u2249"));
+    s.replace(QRegularExpression(R"(\\not\s*\\sim(?![A-Za-z]))"), QStringLiteral("\u2241"));
+    s.replace(QRegularExpression(R"(\\not\s*\\parallel(?![A-Za-z]))"), QStringLiteral("\u2226"));
+
+    // 3. Окружения \begin{...} / \end{...} и размерные модификаторы LaTeX
+    s.replace(QRegularExpression(R"(\\begin\s*\{pmatrix\})"), "(");
+    s.replace(QRegularExpression(R"(\\end\s*\{pmatrix\})"), ")");
+    s.replace(QRegularExpression(R"(\\begin\s*\{bmatrix\})"), "[");
+    s.replace(QRegularExpression(R"(\\end\s*\{bmatrix\})"), "]");
+    s.replace(QRegularExpression(R"(\\begin\s*\{Bmatrix\})"), "\x02LBRACE\x02");
+    s.replace(QRegularExpression(R"(\\end\s*\{Bmatrix\})"), "\x02RBRACE\x02");
+    s.replace(QRegularExpression(R"(\\begin\s*\{vmatrix\})"), "|");
+    s.replace(QRegularExpression(R"(\\end\s*\{vmatrix\})"), "|");
+    s.replace(QRegularExpression(R"(\\begin\s*\{Vmatrix\})"), QStringLiteral("\u2016"));
+    s.replace(QRegularExpression(R"(\\end\s*\{Vmatrix\})"), QStringLiteral("\u2016"));
+    s.remove(QRegularExpression(R"(\\(?:begin|end)\s*\{[A-Za-z0-9\*]+\}(?:\s*\{[^{}]*\})?)"));
+
+    // Невидимые ограничители \left. и \right.
+    s.remove(QRegularExpression(R"(\\(?:left|right|middle)\s*\.)"));
+
+    static const QRegularExpression rxLeftRight(
+        R"(\\(?:left|right|middle|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr|biggl|biggr|Biggl|Biggr|limits|nolimits|displaystyle|textstyle|scriptstyle|scriptscriptstyle|ensuremath)(?![A-Za-z]))");
     s.remove(rxLeftRight);
+
+    // Двойная вертикальная черта \| -> ‖ (до обработки \\)
+    s.replace("\\|", QStringLiteral("\u2016"));
+
+    // Перенос строки \\ в блочных/строчных формулах (до замены "\ ")
+    s.replace("\\\\", "\x02MATHBR\x02");
+
     s.replace("\\,", " ");
     s.replace("\\;", " ");
     s.replace("\\:", " ");
+    s.replace("\\>", " ");
     s.replace("\\!", "");
+    s.replace("\\enspace", " ");
     s.replace("\\quad", "  ");
     s.replace("\\qquad", "    ");
     s.replace("\\ ", " ");
+    s.replace("\\%", "%");
+    s.replace("\\$", "$");
+    s.replace("\\&", "&");
+    s.replace("\\#", "#");
+    s.replace("\\_", "_");
 
-    // Замена таблицы символов LaTeX на Unicode
-    struct SymMap { const char* cmd; const char* uni; };
+    static const QRegularExpression rxUnescapedTilde(R"((?<!\\)~)");
+    s.replace(rxUnescapedTilde, " ");
+
+    // Разделитель колонок & в окружениях aligned / cases / matrix
+    s.replace(QRegularExpression(R"((?<!\\)&)"), "  ");
+
+    // 4. Таблица символов LaTeX -> Unicode (с обязательным QRegularExpression::escape!)
+    struct SymMap { const char* cmd; const char16_t* uni; };
     static constexpr SymMap kSymbols[] = {
-        {"\\Longleftrightarrow", "⟺"}, {"\\iff", "⇔"},
-        {"\\Longrightarrow", "⟹"},     {"\\implies", "⇒"},
-        {"\\Longleftarrow", "⟸"},      {"\\longleftrightarrow", "⟷"},
-        {"\\longrightarrow", "⟶"},     {"\\longleftarrow", "⟵"},
-        {"\\leftrightarrow", "↔"},     {"\\Leftrightarrow", "⇔"},
-        {"\\rightarrow", "→"},         {"\\to", "→"},
-        {"\\leftarrow", "←"},          {"\\gets", "←"},
-        {"\\Rightarrow", "⇒"},         {"\\Leftarrow", "⇐"},
-        {"\\uparrow", "↑"},            {"\\downarrow", "↓"},
-        {"\\updownarrow", "↕"},        {"\\mapsto", "↦"},
-        {"\\hookleftarrow", "↩"},      {"\\hookrightarrow", "↪"},
-        {"\\nearrow", "↗"},            {"\\searrow", "↘"},
-        {"\\leqslant", "≤"},           {"\\geqslant", "≥"},
-        {"\\leq", "≤"},                {"\\le", "≤"},
-        {"\\geq", "≥"},                {"\\ge", "≥"},
-        {"\\neq", "≠"},                {"\\ne", "≠"},
-        {"\\approx", "≈"},             {"\\equiv", "≡"},
-        {"\\cong", "≅"},               {"\\sim", "∼"},
-        {"\\simeq", "≃"},              {"\\propto", "∝"},
-        {"\\ll", "≪"},                 {"\\gg", "≫"},
-        {"\\times", "×"},              {"\\div", "÷"},
-        {"\\cdot", "·"},               {"\\ast", "∗"},
-        {"\\star", "⋆"},               {"\\circ", "∘"},
-        {"\\bullet", "∙"},             {"\\pm", "±"},
-        {"\\mp", "∓"},                 {"\\oplus", "⊕"},
-        {"\\ominus", "⊖"},             {"\\otimes", "⊗"},
-        {"\\infty", "∞"},              {"\\partial", "∂"},
-        {"\\nabla", "∇"},              {"\\forall", "∀"},
-        {"\\exists", "∃"},             {"\\nexists", "∄"},
-        {"\\emptyset", "∅"},           {"\\varnothing", "∅"},
-        {"\\in", "∈"},                 {"\\notin", "∉"},
-        {"\\ni", "∋"},                 {"\\subseteq", "⊆"},
-        {"\\supseteq", "⊇"},           {"\\subset", "⊂"},
-        {"\\supset", "⊃"},             {"\\cup", "∪"},
-        {"\\cap", "∩"},                {"\\setminus", "∖"},
-        {"\\land", "∧"},               {"\\lor", "∨"},
-        {"\\lnot", "¬"},               {"\\neg", "¬"},
-        {"\\top", "⊤"},                {"\\bot", "⊥"},
-        {"\\perp", "⊥"},               {"\\parallel", "∥"},
-        {"\\angle", "∠"},              {"\\triangle", "△"},
-        {"\\sum", "∑"},                {"\\prod", "∏"},
-        {"\\int", "∫"},                {"\\oint", "∮"},
-        {"\\ldots", "…"},              {"\\cdots", "⋯"},
-        {"\\dots", "…"},               {"\\vdots", "⋮"},
-        {"\\ddots", "⋱"},              {"\\checkmark", "✓"},
+        {"\\Longleftrightarrow", u"\u27FA"}, {"\\iff", u"\u21D4"},
+        {"\\Longrightarrow", u"\u27F9"},     {"\\implies", u"\u21D2"},
+        {"\\Longleftarrow", u"\u27F8"},      {"\\impliedby", u"\u21D0"},
+        {"\\longleftrightarrow", u"\u27F7"}, {"\\longrightarrow", u"\u27F6"},
+        {"\\longleftarrow", u"\u27F5"},      {"\\longmapsto", u"\u27FC"},
+        {"\\leftrightarrow", u"\u2194"},     {"\\Leftrightarrow", u"\u21D4"},
+        {"\\rightleftharpoons", u"\u21CC"},  {"\\hookrightarrow", u"\u21AA"},
+        {"\\hookleftarrow", u"\u21A9"},      {"\\rightharpoonup", u"\u21C0"},
+        {"\\rightharpoondown", u"\u21C1"},   {"\\leftharpoonup", u"\u21BC"},
+        {"\\leftharpoondown", u"\u21BD"},    {"\\rightarrow", u"\u2192"},
+        {"\\to", u"\u2192"},                 {"\\leftarrow", u"\u2190"},
+        {"\\gets", u"\u2190"},               {"\\Rightarrow", u"\u21D2"},
+        {"\\Leftarrow", u"\u21D0"},          {"\\updownarrow", u"\u2195"},
+        {"\\Updownarrow", u"\u21D5"},        {"\\uparrow", u"\u2191"},
+        {"\\Uparrow", u"\u21D1"},            {"\\downarrow", u"\u2193"},
+        {"\\Downarrow", u"\u21D3"},          {"\\mapsto", u"\u21A6"},
+        {"\\nearrow", u"\u2197"},            {"\\searrow", u"\u2198"},
+        {"\\swarrow", u"\u2199"},            {"\\nwarrow", u"\u2196"},
+        {"\\leqslant", u"\u2264"},           {"\\geqslant", u"\u2265"},
+        {"\\leq", u"\u2264"},                {"\\le", u"\u2264"},
+        {"\\geq", u"\u2265"},                {"\\ge", u"\u2265"},
+        {"\\neq", u"\u2260"},                {"\\ne", u"\u2260"},
+        {"\\approxeq", u"\u224A"},           {"\\approx", u"\u2248"},
+        {"\\equiv", u"\u2261"},              {"\\cong", u"\u2245"},
+        {"\\simeq", u"\u2243"},              {"\\sim", u"\u223C"},
+        {"\\propto", u"\u221D"},             {"\\asymp", u"\u224D"},
+        {"\\doteq", u"\u2250"},              {"\\triangleq", u"\u225C"},
+        {"\\coloneqq", u":="},               {"\\eqqcolon", u"=:"},
+        {"\\ll", u"\u226A"},                 {"\\gg", u"\u226B"},
+        {"\\preceq", u"\u2AAF"},             {"\\succeq", u"\u2AB0"},
+        {"\\prec", u"\u227A"},               {"\\succ", u"\u227B"},
+        {"\\times", u"\u00D7"},              {"\\div", u"\u00F7"},
+        {"\\cdot", u"\u00B7"},               {"\\ast", u"\u2217"},
+        {"\\star", u"\u22C6"},               {"\\circ", u"\u2218"},
+        {"\\bullet", u"\u2219"},             {"\\pm", u"\u00B1"},
+        {"\\mp", u"\u2213"},                 {"\\oplus", u"\u2295"},
+        {"\\ominus", u"\u2296"},             {"\\otimes", u"\u2297"},
+        {"\\oslash", u"\u2298"},             {"\\odot", u"\u2299"},
+        {"\\dagger", u"\u2020"},             {"\\ddagger", u"\u2021"},
+        {"\\amalg", u"\u2A3F"},              {"\\infty", u"\u221E"},
+        {"\\partial", u"\u2202"},            {"\\nabla", u"\u2207"},
+        {"\\forall", u"\u2200"},             {"\\nexists", u"\u2204"},
+        {"\\exists", u"\u2203"},             {"\\emptyset", u"\u2205"},
+        {"\\varnothing", u"\u2205"},         {"\\notin", u"\u2209"},
+        {"\\in", u"\u2208"},                 {"\\ni", u"\u220B"},
+        {"\\nsubseteq", u"\u2288"},          {"\\subsetneq", u"\u228A"},
+        {"\\subseteq", u"\u2286"},           {"\\supseteq", u"\u2287"},
+        {"\\subset", u"\u2282"},             {"\\supset", u"\u2283"},
+        {"\\bigcup", u"\u22C3"},             {"\\bigcap", u"\u22C2"},
+        {"\\bigsqcup", u"\u2A06"},           {"\\bigoplus", u"\u2A01"},
+        {"\\bigotimes", u"\u2A02"},          {"\\bigodot", u"\u2A00"},
+        {"\\bigvee", u"\u22C1"},             {"\\bigwedge", u"\u22C0"},
+        {"\\cup", u"\u222A"},                {"\\cap", u"\u2229"},
+        {"\\smallsetminus", u"\u2216"},      {"\\setminus", u"\u2216"},
+        {"\\land", u"\u2227"},               {"\\wedge", u"\u2227"},
+        {"\\lor", u"\u2228"},                {"\\vee", u"\u2228"},
+        {"\\lnot", u"\u00AC"},               {"\\neg", u"\u00AC"},
+        {"\\top", u"\u22A4"},                {"\\bot", u"\u22A5"},
+        {"\\perp", u"\u22A5"},               {"\\nparallel", u"\u2226"},
+        {"\\parallel", u"\u2225"},           {"\\nmid", u"\u2224"},
+        {"\\mid", u"|"},                     {"\\vdash", u"\u22A2"},
+        {"\\models", u"\u22A8"},             {"\\measuredangle", u"\u2221"},
+        {"\\angle", u"\u2220"},              {"\\triangle", u"\u25B3"},
+        {"\\square", u"\u25A1"},             {"\\Box", u"\u25A1"},
+        {"\\Diamond", u"\u25C7"},            {"\\diamond", u"\u22C4"},
+        {"\\coprod", u"\u2210"},             {"\\sum", u"\u2211"},
+        {"\\prod", u"\u220F"},               {"\\iiint", u"\u222D"},
+        {"\\iint", u"\u222C"},               {"\\oint", u"\u222E"},
+        {"\\int", u"\u222B"},                {"\\ldots", u"\u2026"},
+        {"\\cdots", u"\u22EF"},              {"\\dots", u"\u2026"},
+        {"\\vdots", u"\u22EE"},              {"\\ddots", u"\u22F1"},
+        {"\\checkmark", u"\u2713"},          {"\\langle", u"\u27E8"},
+        {"\\rangle", u"\u27E9"},             {"\\lfloor", u"\u230A"},
+        {"\\rfloor", u"\u230B"},             {"\\lceil", u"\u2308"},
+        {"\\rceil", u"\u2309"},              {"\\Vert", u"\u2016"},
+        {"\\vert", u"|"},                    {"\\backslash", u"\\"},
+        {"\\colon", u":"},                   {"\\hbar", u"\u210F"},
+        {"\\ell", u"\u2113"},                {"\\Re", u"\u211C"},
+        {"\\Im", u"\u2111"},                {"\\wp", u"\u2118"},
+        {"\\aleph", u"\u2135"},
         // Греческий алфавит
-        {"\\alpha", "α"},   {"\\beta", "β"},    {"\\gamma", "γ"},   {"\\delta", "δ"},
-        {"\\varepsilon", "ε"}, {"\\epsilon", "ε"}, {"\\zeta", "ζ"}, {"\\eta", "η"},
-        {"\\vartheta", "ϑ"}, {"\\theta", "θ"},  {"\\iota", "ι"},    {"\\kappa", "κ"},
-        {"\\lambda", "λ"},  {"\\mu", "μ"},      {"\\nu", "ν"},      {"\\xi", "ξ"},
-        {"\\pi", "π"},      {"\\varpi", "ϖ"},   {"\\varrho", "ϱ"},  {"\\rho", "ρ"},
-        {"\\varsigma", "ς"}, {"\\sigma", "σ"},  {"\\tau", "τ"},     {"\\upsilon", "υ"},
-        {"\\varphi", "φ"},  {"\\phi", "φ"},     {"\\chi", "χ"},     {"\\psi", "psi"},
-        {"\\omega", "ω"},
-        {"\\Gamma", "Γ"},   {"\\Delta", "Δ"},   {"\\Theta", "Θ"},   {"\\Lambda", "Λ"},
-        {"\\Xi", "Ξ"},      {"\\Pi", "Π"},      {"\\Sigma", "∑"},   {"\\Upsilon", "Υ"},
-        {"\\Phi", "Φ"},     {"\\Psi", "Ψ"},     {"\\Omega", "Ω"},
-        // Стандартные математические функции
-        {"\\log", "log"},   {"\\ln", "ln"},     {"\\exp", "exp"},
-        {"\\sin", "sin"},   {"\\cos", "cos"},   {"\\tan", "tan"},
-        {"\\min", "min"},   {"\\max", "max"},   {"\\sup", "sup"},
-        {"\\inf", "inf"},   {"\\lim", "lim"},   {"\\mod", "mod"},
-        {"\\det", "det"},   {"\\dim", "dim"},   {"\\gcd", "gcd"}
+        {"\\alpha", u"\u03B1"},   {"\\beta", u"\u03B2"},    {"\\gamma", u"\u03B3"},   {"\\delta", u"\u03B4"},
+        {"\\varepsilon", u"\u03B5"}, {"\\epsilon", u"\u03B5"}, {"\\zeta", u"\u03B6"}, {"\\eta", u"\u03B7"},
+        {"\\vartheta", u"\u03D1"}, {"\\theta", u"\u03B8"},  {"\\iota", u"\u03B9"},    {"\\kappa", u"\u03BA"},
+        {"\\lambda", u"\u03BB"},  {"\\mu", u"\u03BC"},      {"\\nu", u"\u03BD"},      {"\\xi", u"\u03BE"},
+        {"\\varpi", u"\u03D6"},   {"\\pi", u"\u03C0"},      {"\\varrho", u"\u03F1"},  {"\\rho", u"\u03C1"},
+        {"\\varsigma", u"\u03C2"}, {"\\sigma", u"\u03C3"},  {"\\tau", u"\u03C4"},     {"\\upsilon", u"\u03C5"},
+        {"\\varphi", u"\u03C6"},  {"\\phi", u"\u03D5"},     {"\\chi", u"\u03C7"},     {"\\psi", u"\u03C8"},
+        {"\\omega", u"\u03C9"},
+        {"\\Gamma", u"\u0393"},   {"\\Delta", u"\u0394"},   {"\\Theta", u"\u0398"},   {"\\Lambda", u"\u039B"},
+        {"\\Xi", u"\u039E"},      {"\\Pi", u"\u03A0"},      {"\\Sigma", u"\u03A3"},   {"\\Upsilon", u"\u03A5"},
+        {"\\Phi", u"\u03A6"},     {"\\Psi", u"\u03A8"},     {"\\Omega", u"\u03A9"},
+        // Стандартные функции
+        {"\\arcsin", u"arcsin"},  {"\\arccos", u"arccos"},  {"\\arctan", u"arctan"},
+        {"\\sinh", u"sinh"},      {"\\cosh", u"cosh"},      {"\\tanh", u"tanh"},
+        {"\\sin", u"sin"},        {"\\cos", u"cos"},        {"\\tan", u"tan"},
+        {"\\cot", u"cot"},        {"\\sec", u"sec"},        {"\\csc", u"csc"},
+        {"\\log", u"log"},        {"\\ln", u"ln"},          {"\\exp", u"exp"},
+        {"\\min", u"min"},        {"\\max", u"max"},        {"\\sup", u"sup"},
+        {"\\inf", u"inf"},        {"\\lim", u"lim"},        {"\\mod", u"mod"},
+        {"\\det", u"det"},        {"\\dim", u"dim"},        {"\\gcd", u"gcd"},
+        {"\\deg", u"deg"}
     };
 
     for (const auto& m : kSymbols) {
-        QRegularExpression rx(QString::fromLatin1(m.cmd) + R"((?![A-Za-z]))");
-        s.replace(rx, QString::fromUtf8(m.uni));
+        QRegularExpression rx(QRegularExpression::escape(QString::fromLatin1(m.cmd)) + R"((?![A-Za-z]))");
+        s.replace(rx, QString::fromUtf16(m.uni));
     }
+
+    // ASCII-стрелки внутри формул ($A -> B$, $A <-> B$, $A => B$)
+    s.replace("<->", QStringLiteral("\u2194"));
+    s.replace("<=>", QStringLiteral("\u21D4"));
+    s.replace("-->", QStringLiteral("\u27F6"));
+    s.replace("<--", QStringLiteral("\u27F5"));
+    s.replace("->", QStringLiteral("\u2192"));
+    s.replace("<-", QStringLiteral("\u2190"));
+    s.replace("=>", QStringLiteral("\u21D2"));
 
     s = escapeHtml(s);
 
-    // Дроби \frac{a}{b} -> (a)/(b)
-    static const QRegularExpression rxFrac(R"(\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\})");
-    while (rxFrac.match(s).hasMatch()) {
-        s.replace(rxFrac, "<span style='white-space:nowrap;'>(\\1)/(\\2)</span>");
-    }
-
-    // Корни \sqrt{x} -> √(x)
-    static const QRegularExpression rxSqrtBrace(R"(\\sqrt\s*\{([^{}]*)\})");
-    s.replace(rxSqrtBrace, "√(\\1)");
-    s.replace("\\sqrt", "√");
-
-    // Текстовые и шрифтовые обёртки внутри формул
-    static const QRegularExpression rxText(R"(\\(?:text|mathrm|operatorname|mbox)\s*\{([^{}]*)\})");
-    s.replace(rxText, "\\1");
-    static const QRegularExpression rxBoldMath(R"(\\(?:mathbf|boldsymbol|textbf)\s*\{([^{}]*)\})");
+    // 5. Шрифтовые и декоративные макросы (\mathbf, \mathit, \mathtt, \mathcal, \overline, \underline, \vec, \hat...)
+    static const QRegularExpression rxBoldMath(R"(\\(?:mathbf|boldsymbol|textbf|bm)\s*\{([^{}]*)\})");
     s.replace(rxBoldMath, "<b>\\1</b>");
     static const QRegularExpression rxItalicMath(R"(\\(?:mathit|textit)\s*\{([^{}]*)\})");
     s.replace(rxItalicMath, "<i>\\1</i>");
     static const QRegularExpression rxMonoMath(R"(\\(?:mathtt|texttt)\s*\{([^{}]*)\})");
     s.replace(rxMonoMath, "<code style='font-family:monospace; color:#8be9fd;'>\\1</code>");
-    static const QRegularExpression rxCalMath(R"(\\(?:mathcal|mathbb)\s*\{([^{}]*)\})");
+    static const QRegularExpression rxCalMath(R"(\\(?:mathcal|mathbb|mathfrak|mathscr)\s*\{([^{}]*)\})");
     s.replace(rxCalMath, "<b>\\1</b>");
 
-    // Верхние и нижние индексы: ^{...}, ^x, _{...}, _x
-    static const QRegularExpression rxSupBrace(R"(\^\{([^{}]+)\})");
-    s.replace(rxSupBrace, "<sup>\\1</sup>");
-    static const QRegularExpression rxSupChar(R"(\^([A-Za-z0-9\+\-\*]))");
-    s.replace(rxSupChar, "<sup>\\1</sup>");
+    static const QRegularExpression rxOverline(R"(\\(?:overline|bar)\s*\{([^{}]*)\})");
+    s.replace(rxOverline, "<span style='text-decoration:overline;'>\\1</span>");
+    static const QRegularExpression rxUnderline(R"(\\underline\s*\{([^{}]*)\})");
+    s.replace(rxUnderline, "<u>\\1</u>");
+    static const QRegularExpression rxCancel(R"(\\(?:cancel|bcancel|xcancel)\s*\{([^{}]*)\})");
+    s.replace(rxCancel, "<s>\\1</s>");
+    static const QRegularExpression rxBoxed(R"(\\boxed\s*\{([^{}]*)\})");
+    s.replace(rxBoxed, "<span style='border:1px solid #f1fa8c; padding:1px 4px;'>\\1</span>");
+    static const QRegularExpression rxVec(R"(\\(?:vec|overrightarrow)\s*\{([^{}]*)\})");
+    s.replace(rxVec, QStringLiteral("\\1\u20D7"));
+    static const QRegularExpression rxHat(R"(\\(?:hat|widehat)\s*\{([^{}]*)\})");
+    s.replace(rxHat, QStringLiteral("\\1\u0302"));
+    static const QRegularExpression rxTilde(R"(\\(?:tilde|widetilde)\s*\{([^{}]*)\})");
+    s.replace(rxTilde, QStringLiteral("\\1\u0303"));
+    static const QRegularExpression rxDdot(R"(\\ddot\s*\{([^{}]*)\})");
+    s.replace(rxDdot, QStringLiteral("\\1\u0308"));
+    static const QRegularExpression rxDot(R"(\\dot\s*\{([^{}]*)\})");
+    s.replace(rxDot, QStringLiteral("\\1\u0307"));
 
-    static const QRegularExpression rxSubBrace(R"(_\{([^{}]+)\})");
-    s.replace(rxSubBrace, "<sub>\\1</sub>");
-    static const QRegularExpression rxSubChar(R"(_([A-Za-z0-9\+\-]))");
-    s.replace(rxSubChar, "<sub>\\1</sub>");
+    // 6. Индексы (^{...}, ^x, _{...}, _x), дроби \frac/\dfrac/\tfrac, биномы \binom и корни \sqrt
+    static const QRegularExpression rxSupBrace(R"(\^\s*\{([^{}]+)\})");
+    static const QRegularExpression rxSupChar(R"(\^([^\s<>\{\}\^_]))");
+    static const QRegularExpression rxSubBrace(R"(_\s*\{([^{}]+)\})");
+    static const QRegularExpression rxSubChar(R"(_([^\s<>\{\}\^_]))");
+    static const QRegularExpression rxFrac(R"(\\(?:d|t|c)?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\})");
+    static const QRegularExpression rxBinom(R"(\\(?:d|t)?binom\s*\{([^{}]*)\}\s*\{([^{}]*)\})");
+    static const QRegularExpression rxSqrtNth(R"(\\sqrt\s*\[([^\[\]]+)\]\s*\{([^{}]*)\})");
+    static const QRegularExpression rxSqrtBrace(R"(\\sqrt\s*\{([^{}]*)\})");
 
-    // Очистка оставшихся экранированных фигурных скобок \{ и \} и одиночных группирующих { }
-    s.replace("\\{", "{");
-    s.replace("\\}", "}");
+    for (int pass = 0; pass < 4; ++pass) {
+        QString before = s;
+        s.replace(rxSupBrace, "<sup>\\1</sup>");
+        s.replace(rxSupChar, "<sup>\\1</sup>");
+        s.replace(rxSubBrace, "<sub>\\1</sub>");
+        s.replace(rxSubChar, "<sub>\\1</sub>");
+        s.replace(rxFrac, "<span style='white-space:nowrap;'>(\\1)/(\\2)</span>");
+        s.replace(rxBinom, "<span style='white-space:nowrap;'>C(\\1, \\2)</span>");
+        s.replace(rxSqrtNth, QStringLiteral("<sup>\\1</sup>\u221A(\\2)"));
+        s.replace(rxSqrtBrace, QStringLiteral("\u221A(\\1)"));
+        if (s == before) break;
+    }
+    s.replace("\\sqrt", QStringLiteral("\u221A"));
+
+    // Очистка оставшихся группирующих фигурных скобок и восстановление экранированных \{ и \}
+    s.remove('{');
+    s.remove('}');
+    s.replace("\x02LBRACE\x02", "{");
+    s.replace("\x02RBRACE\x02", "}");
+    s.replace("\x02MATHBR\x02", displayMode ? "<br/>" : "; ");
+
+    // 7. Возвращаем сохранённые \text{...} спаны
+    for (int idx = 0; idx < textSpans.size(); ++idx) {
+        s.replace(QString("\x02TXT%1\x02").arg(idx), textSpans[idx]);
+    }
 
     if (displayMode) {
         return QString("<div style='background-color:#232530; border-left:3px solid #f1fa8c; "
@@ -422,14 +665,7 @@ QString MarkdownRenderer::renderLatexMath(const QString& rawLatex, bool displayM
             .arg(s);
     }
 
-    // Если внутри $...$ была только одиночная стрелка или символ (например, $\rightarrow$),
-    // возвращаем её напрямую без лишнего изменения шрифта
-    QString plainCheck = s.trimmed();
-    if (plainCheck.length() <= 3 && !plainCheck.contains('<')) {
-        return plainCheck;
-    }
-
-    return QString("<span style='color:#f1fa8c;'>%1</span>").arg(s);
+    return QString("<span style='color:#f1fa8c; white-space:nowrap;'>%1</span>").arg(s);
 }
 
 QString MarkdownRenderer::formatInline(const QString& text) {
@@ -457,43 +693,66 @@ QString MarkdownRenderer::formatInline(const QString& text) {
         ++i;
     }
 
-    // 2. Вырезаем математические выражения $$...$$ и $...$ в плейсхолдеры до экранирования HTML и курсива
+    // 2. Вырезаем математические выражения $$...$$, \[...\], \(...\) и $...$
     QStringList mathSpans;
-    static const QRegularExpression rxInlineDisplayMath(R"(\$\$([^\$\n]+?)\$\$)");
-    auto dmIt = rxInlineDisplayMath.globalMatch(work);
-    while (dmIt.hasNext()) {
-        auto m = dmIt.next();
-        QString rendered = renderLatexMath(m.captured(1), false);
-        int idx = mathSpans.size();
-        mathSpans.append(rendered);
-        work.replace(m.captured(0), QString("\x01MATH%1\x01").arg(idx));
-        dmIt = rxInlineDisplayMath.globalMatch(work);
-    }
+    auto extractMathPattern = [&](const QRegularExpression& rx, bool displayMode) {
+        while (true) {
+            auto m = rx.match(work);
+            if (!m.hasMatch()) break;
+            QString rendered = renderLatexMath(m.captured(1), displayMode);
+            int idx = mathSpans.size();
+            mathSpans.append(rendered);
+            work.replace(m.capturedStart(), m.capturedLength(), QString("\x01MATH%1\x01").arg(idx));
+        }
+    };
 
-    // Одиночные $...$: без пробела сразу после открывающего $ и перед закрывающим $,
-    // чтобы не задевать обычные суммы в долларах вроде "$10 and $20"
-    static const QRegularExpression rxInlineMath(R"((?<!\\)\$(?!\s)([^\$\n]+?)(?<!\s)\$)");
+    static const QRegularExpression rxInlineDisplayMath(R"(\$\$([^\$\n]+?)\$\$)");
+    static const QRegularExpression rxBracketMath(R"(\\\[(.+?)\\\])");
+    static const QRegularExpression rxParenMath(R"(\\\((.+?)\\\))");
+    extractMathPattern(rxInlineDisplayMath, false);
+    extractMathPattern(rxBracketMath, false);
+    extractMathPattern(rxParenMath, false);
+
+    // Одиночные $...$: поддерживаем любые LaTeX-конструкции (включая $\rightarrow$2D),
+    // отсекая только валютные диапазоны вроде "$100 - $200"
+    static const QRegularExpression rxInlineMath(R"((?<!\\)\$([^\$\n]+?)(?<!\\)\$)");
     int searchPos = 0;
     while (true) {
         auto m = rxInlineMath.match(work, searchPos);
         if (!m.hasMatch()) break;
-        QString inner = m.captured(1);
-        // Если выражение начинается с цифры и не содержит ни команд LaTeX (\), ни индексов (^, _), ни операторов,
-        // пропускаем его (защита от "$100 - $200")
-        bool looksLikeCurrencyRange = inner[0].isDigit() &&
-                                      !inner.contains('\\') && !inner.contains('^') &&
-                                      !inner.contains('_') && !inner.contains('=');
-        if (looksLikeCurrencyRange) {
-            searchPos = m.capturedEnd();
+
+        QString rawInner = m.captured(1);
+        QString trimmedInner = rawInner.trimmed();
+        bool hasLatexMarkers = rawInner.contains('\\') || rawInner.contains('^') ||
+                               rawInner.contains('_') || rawInner.contains('{') ||
+                               rawInner.contains('}');
+        bool hasLeadingOrTrailingSpace = !rawInner.isEmpty() &&
+                                         (rawInner.front().isSpace() || rawInner.back().isSpace());
+        bool followedByDigit = (m.capturedEnd() < work.length()) && work[m.capturedEnd()].isDigit();
+        bool looksLikeCurrencyRange = !trimmedInner.isEmpty() &&
+                                      trimmedInner.front().isDigit() &&
+                                      !hasLatexMarkers &&
+                                      !trimmedInner.contains('=') &&
+                                      !trimmedInner.contains('<') &&
+                                      !trimmedInner.contains('>');
+
+        if (trimmedInner.isEmpty() ||
+            (!hasLatexMarkers && (hasLeadingOrTrailingSpace || followedByDigit || looksLikeCurrencyRange))) {
+            searchPos = m.capturedEnd() - 1;
             continue;
         }
-        QString rendered = renderLatexMath(inner, false);
+
+        QString rendered = renderLatexMath(trimmedInner, false);
         int idx = mathSpans.size();
         mathSpans.append(rendered);
         QString placeholder = QString("\x01MATH%1\x01").arg(idx);
         work.replace(m.capturedStart(), m.capturedLength(), placeholder);
         searchPos = m.capturedStart() + placeholder.length();
     }
+
+    // 3. Обрабатываем HTML-сущности (&rarr; и др.) и одиночные LaTeX-стрелки без $...$
+    work = decodeCommonHtmlEntities(work);
+    work = replaceBareLatexArrowsAndSymbols(work);
 
     work = escapeHtml(work);
 

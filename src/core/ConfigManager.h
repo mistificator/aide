@@ -22,6 +22,11 @@ enum class ProjectCustomPromptContextMode {
     BothSummaryAndSourcesMarkdown = 2
 };
 
+struct AiChatMessage {
+    QString role;    // "system", "user", "assistant"
+    QString content;
+};
+
 struct AiConnectionConfig {
     QString profileName = "Ollama (Offline)";
     AiBackendType backend = AiBackendType::Ollama;
@@ -36,6 +41,11 @@ struct AiConnectionConfig {
     int timeoutSec = 120;
     int projectSummaryIntervalMin = 5;
 
+    // Настройки локального исполняемого файла для профиля
+    bool useLocalExecutable = false;
+    QString localExecutablePath;
+    QString localCommandLineArgs;
+
     QString llmIdentifier() const {
         QString providerPrefix = (backend == AiBackendType::Ollama) ? "ollama"
                                  : (backend == AiBackendType::KoboldCpp) ? "koboldcpp"
@@ -46,16 +56,20 @@ struct AiConnectionConfig {
 };
 
 struct AiBehaviorConfig {
+    QString responseLocale = "default";
     AutoSummaryMode autoSummaryMode = AutoSummaryMode::FilesAndProject;
     bool includeDocumentSummaryInPrompt = true;
     bool includeProjectSummaryInPrompt = true;
-    ProjectCustomPromptContextMode projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     bool summaryUseSyntaxExtensions = true;
     int promptHistoryLimit = 50;
-    QString responseLocale = "default";
+    ProjectCustomPromptContextMode projectCustomPromptContextMode =
+        ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
     QStringList summaryAllowedFilenames;
     QStringList summaryAllowedExtensions;
     QStringList summaryIgnoredDirs;
+
+    // Общая опция автозапуска для оффлайн-профилей с указанным исполняемым файлом
+    bool autoStartLocalExecutable = false;
 };
 
 struct PromptHistoryItem {
@@ -88,6 +102,7 @@ public:
     QVector<AiConnectionConfig> aiProfiles() const { return m_aiProfiles; }
     QString activeAiProfileName() const { return m_aiConfig.profileName; }
     void setAiProfiles(const QVector<AiConnectionConfig>& profiles, const QString& activeProfileName);
+    void setActiveAiProfile(const QString& profileName);
     static QVector<AiConnectionConfig> defaultAiProfiles();
 
     // Настройки поведения AI и фильтрации саммари
@@ -112,6 +127,7 @@ public:
     void setPromptHistoryLimit(int limit);
     static QString computePromptHash(const QString& promptText);
 
+    void invalidateSyntaxExtensionsCache();
     QStringList extensionsFromLoadedSyntaxes() const;
     bool shouldGenerateSummaryForFile(const QString& filePath, QString* outSkipReasonMarkdown = nullptr) const;
     bool isDirectoryIgnoredForSummary(const QString& dirNameOrPath) const;
@@ -160,7 +176,6 @@ public:
     QString configDirPath() const;
     QString syntaxDirPath() const { return configDirPath() + "/syntax"; }
     QString themesDirPath() const { return configDirPath() + "/themes"; }
-
 signals:
     void aiConfigChanged(const AiConnectionConfig& newConfig);
     void aiBehaviorChanged(const AiBehaviorConfig& newBehavior);
@@ -196,4 +211,7 @@ private:
     QString m_syntaxBaseUrl = "https://raw.githubusercontent.com/KDE/syntax-highlighting/master/data/syntax/";
     QVector<FileTypeRule> m_fileTypes;
     QJsonObject m_promptTemplates;
+
+    mutable QStringList m_cachedSyntaxExtensions;
+    mutable bool m_syntaxExtensionsCacheValid = false;
 };

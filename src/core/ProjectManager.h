@@ -1,93 +1,158 @@
 // src/core/ProjectManager.h
 #pragma once
 #include <QObject>
-#include <QMap>
 #include <QString>
 #include <QStringList>
+#include <QMap>
+#include <QSet>
 #include <QDateTime>
+#include <QTimer>
+#include <functional>
 #include "ConfigManager.h"
+
+class QFileSystemWatcher;
 
 struct FileContextData {
     QString relativePath;
+    QString subprojectRelPath;
     QString sha256;
     QString llmModel;
     QString userPrompt;
     QString aiSummary;
-    QDateTime updatedAt;
     bool summaryCreated = false;
     bool isSummaryPending = false;
     QString pendingSha256;
     QString pendingLlmModel;
+    QDateTime updatedAt;
 };
 
 class ProjectManager : public QObject {
     Q_OBJECT
 public:
+    using ProgressCallback = std::function<bool(int processedDirs, int foundFiles, const QString& currentDir)>;
+
     explicit ProjectManager(QObject* parent = nullptr);
 
-    bool openProjectFolder(const QString& folderPath);
-    bool loadProjectFile(const QString& aideFilePath);
-    bool saveProjectFile();
+    bool openProjectFolder(const QString& folderPath, const ProgressCallback& progressCb = nullptr);
     void closeProject();
+    bool saveProjectFile();
 
     bool hasOpenProject() const { return !m_rootPath.isEmpty(); }
     QString projectRootPath() const { return m_rootPath; }
-    QString projectFilePath() const { return m_aideFilePath; }
+    QString projectFilePath() const;
 
-    QString projectSystemPrompt() const { return m_projectSystemPrompt; }
-    void setProjectSystemPrompt(const QString& prompt);
+    QString toRelativePath(const QString& filePathOrRel) const;
+    QString toAbsolutePath(const QString& relPath) const;
 
-    QString projectSummary() const { return m_projectSummary; }
-    QString projectSummaryLlmModel() const { return m_projectSummaryLlmModel; }
-    void setProjectSummary(const QString& summary, const QString& llmModel = {});
+    // Различие между проиндексированным подпроектом (виртуальным или .aide) и физическим файлом .aide на диске
+    bool isSubprojectDir(const QString& dirPathOrRel) const;
+    bool hasStandaloneAideFile(const QString& dirPathOrRel) const;
+    void ensureSubprojectNode(const QString& dirPathOrRel);
 
-    FileContextData fileContext(const QString& absoluteOrRelPath) const;
-    bool hasFileSummary(const QString& absoluteOrRelPath) const;
-    int indexedFilesCount() const;
-    QStringList indexedFilePaths() const;
+    QStringList subprojectRelPaths() const;
+    QStringList directChildSubprojects(const QString& parentSubRel = {}) const;
+    QStringList dirtyProjectRelPathsBottomUp() const;
+    QString owningProjectRelPathForFile(const QString& filePathOrRel) const;
+    QString nearestIndexedSubprojectForFile(const QString& filePathOrRel) const;
+    QString projectDirPathForRel(const QString& subprojectRel) const;
 
-    void updateFileUserPrompt(const QString& filePath, const QString& prompt);
-    void updateFileSummary(const QString& filePath, const QString& sha256, const QString& llmModel, const QString& summary);
-    void clearFileSummary(const QString& filePath, const QString& currentSha256 = {});
-    void setFileSummaryPending(const QString& filePath, bool pending, const QString& pendingSha256 = {}, const QString& pendingLlmModel = {});
+    const QStringList& allProjectFileRelPaths() const { return m_allProjectFiles; }
 
-    bool isFileSummaryOutdated(const QString& filePath, const QByteArray& currentContent, const QString& currentLlmModel) const;
-    bool isProjectSummaryDirty() const { return m_projectSummaryDirty; }
+    bool createSubproject(const QString& dirPath);
+    bool removeSubproject(const QString& dirPath);
+    void reconcileProjectStructure(const ProgressCallback& progressCb = nullptr, bool fullDiskScan = false);
 
-    QString toRelativePath(const QString& path) const;
+    QString projectSystemPrompt(const QString& subprojectRel = {}) const;
+    void setProjectSystemPrompt(const QString& prompt, const QString& subprojectRel = {});
+
+    QString projectSummary(const QString& subprojectRel = {}) const;
+    QString projectSummaryLlm(const QString& subprojectRel = {}) const;
+    void setProjectSummary(const QString& summary, const QString& llmModel = {}, const QString& subprojectRel = {});
+    bool isProjectSummaryDirty(const QString& subprojectRel = {}) const;
+    void markProjectSummaryDirty(const QString& subprojectRel = {}, bool cascadeToParents = true);
+
+    int indexedFilesCount(const QString& subprojectRel = {}, bool includeNestedSubprojects = true) const;
+    QStringList unindexedAllowedFilePaths(const QString& subprojectRel = {}, bool includeNestedSubprojects = false) const;
+
+    FileContextData fileContext(const QString& filePathOrRel) const;
+    bool isFileSummaryOutdated(const QString& filePathOrRel, const QByteArray& content, const QString& currentLlm = {}) const;
+
+    void updateFileUserPrompt(const QString& filePathOrRel, const QString& prompt);
+    void setFileSummaryPending(const QString& filePathOrRel,
+                               bool pending,
+                               const QString& pendingSha256 = {},
+                               const QString& pendingLlm = {});
+    void updateFileSummary(const QString& filePathOrRel,
+                           const QString& sha256,
+                           const QString& llmModel,
+                           const QString& summary);
+    void clearFileSummary(const QString& filePathOrRel, const QString& sha256 = {});
+    void removeFileSummary(const QString& filePathOrRel);
+
+    bool renameProjectFile(const QString& oldAbsPath, const QString& newAbsPath);
+    bool deleteProjectFile(const QString& absPath);
+
+    int exportProjectWiki(const QString& targetRootDir, QString* outError = nullptr) const;
+
+    QString buildAggregatedFilesDigest(const QString& subprojectRel = {}) const;
     QString buildEffectiveSystemContext(const QString& filePath) const;
-    QString buildAggregatedFilesDigest() const;
-
-    // Сборка единого Markdown-документа из выбранных пользователем файлов проекта
-    QString buildSelectedFilesSourceMarkdown(const QStringList& selectedFilePaths,
-                                             const QMap<QString, QString>& unsavedBufferOverrides = {},
-                                             int* outIncludedFilesCount = nullptr) const;
-
-    // Сборка единого Markdown-документа из всех проиндексированных файлов проекта
-    QString buildIndexedFilesSourceMarkdown(const QMap<QString, QString>& unsavedBufferOverrides = {},
-                                            int* outIncludedFilesCount = nullptr) const;
-
-    // Сборка контекста для Custom Prompt по проекту с явным списком выбранных файлов
     QString buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
-                                            const QStringList& selectedFilePaths,
-                                            const QMap<QString, QString>& unsavedBufferOverrides = {},
-                                            int* outIncludedFilesCount = nullptr) const;
+                                            const QStringList& selectedFiles,
+                                            const QMap<QString, QString>& openBuffers,
+                                            int* outIncludedFiles = nullptr) const;
 
-    // Перегрузка по умолчанию (использует все проиндексированные файлы)
-    QString buildProjectCustomPromptContext(ProjectCustomPromptContextMode mode,
-                                            const QMap<QString, QString>& unsavedBufferOverrides = {},
-                                            int* outIndexedFilesCount = nullptr) const;
+    void beginBatchUpdate();
+    void endBatchUpdate();
 
     static QString computeSha256(const QByteArray& data);
 
 signals:
     void projectLoaded(const QString& rootPath);
     void projectClosed();
-    void fileContextChanged(const QString& relativePath);
+    void fileContextChanged(const QString& relPath);
     void projectContextChanged();
+    void subprojectsChanged();
+    void fileRemovedFromProject(const QString& relPath, const QString& absPath);
+    void fileRenamedInProject(const QString& oldRelPath, const QString& newRelPath, const QString& newAbsPath);
 
 private:
-    QString m_rootPath, m_aideFilePath, m_projectSystemPrompt, m_projectSummary, m_projectSummaryLlmModel;
-    bool m_projectSummaryDirty = false;
-    QMap<QString, FileContextData> m_files;
+    struct ProjectNodeData {
+        QString subprojectRel; // "" для корня проекта
+        QString aideFilePath;  // пусто для виртуального подпроекта; непусто для корня и отдельных .aide
+        QString projectName;
+        QString systemPrompt;
+        QString summary;
+        QString summaryLlm;
+        bool summaryDirty = false;
+        QDateTime updatedAt;
+
+        bool isVirtual() const { return !subprojectRel.isEmpty() && aideFilePath.isEmpty(); }
+    };
+
+    QString normalizeScopeRel(const QString& scopeOrPath) const;
+    QString parentSubprojectRel(const QString& subRel) const;
+    QString owningStorageNodeForRelPath(const QString& relPath) const;
+    void ensureVirtualSubprojectChain(const QString& dirRel);
+
+    static QString defaultAideFilePathForDir(const QString& absDirPath);
+    static QString findExistingAideFileInDir(const QString& absDirPath);
+
+    bool loadNodeFromDisk(const QString& subRel,
+                          const QString& aidePath,
+                          QMap<QString, FileContextData>& outLoadedFiles,
+                          QMap<QString, ProjectNodeData>& outLoadedVirtualNodes);
+    bool saveNodeToDisk(const ProjectNodeData& storageNode) const;
+    void rebuildWatcherPaths();
+    void reassignAllFilesToNearestOwners();
+
+    QString m_rootPath;
+    QMap<QString, ProjectNodeData> m_nodes;     // ключ: subprojectRel ("" = корень)
+    QMap<QString, FileContextData> m_files;     // ключ: relPath относительно m_rootPath
+    QStringList m_allProjectFiles;              // все неигнорируемые файлы проекта (relPath) для быстрого поиска
+    QFileSystemWatcher* m_fsWatcher = nullptr;
+    QTimer m_watchDebounceTimer;
+    bool m_reconciling = false;
+    int m_batchDepth = 0;
+    bool m_batchProjectDirty = false;
+    QString m_lastBatchChangedFileRel;
 };

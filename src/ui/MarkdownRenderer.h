@@ -11,6 +11,8 @@ public:
 
 private:
     static QString escapeHtml(QString s);
+    static QString decodeCommonHtmlEntities(QString s);
+    static QString replaceBareLatexArrowsAndSymbols(QString s);
     static QStringList splitTableRow(const QString& row);
     static QString renderCodeBlock(const QString& code, const QString& lang);
     static QString renderLatexMath(const QString& rawLatex, bool displayMode = false);

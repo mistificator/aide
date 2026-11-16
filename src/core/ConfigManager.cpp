@@ -68,14 +68,7 @@ QVector<AiConnectionConfig> ConfigManager::defaultAiProfiles() {
 }
 
 AiBehaviorConfig ConfigManager::defaultAiBehavior() {
-    AiBehaviorConfig b;
-    b.autoSummaryMode = AutoSummaryMode::FilesAndProject;
-    b.includeDocumentSummaryInPrompt = true;
-    b.includeProjectSummaryInPrompt = true;
-    b.projectCustomPromptContextMode = ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown;
-    b.responseLocale = "default";
-    b.summaryUseSyntaxExtensions = true;
-    b.promptHistoryLimit = 50;
+    AiBehaviorConfig b {};
     b.summaryAllowedFilenames = {
         "CMakeLists.txt", "Makefile", "GNUmakefile", "Dockerfile", "meson.build", "SConstruct"
     };
@@ -307,7 +300,10 @@ QJsonObject ConfigManager::serializeAiConfig(const AiConnectionConfig& cfg) {
         {"maxOutputSummaryTokens", cfg.maxOutputSummaryTokens},
         {"contextWindow", cfg.contextWindow},
         {"timeoutSec", cfg.timeoutSec},
-        {"projectSummaryIntervalMin", cfg.projectSummaryIntervalMin}
+        {"projectSummaryIntervalMin", cfg.projectSummaryIntervalMin},
+        {"useLocalExecutable", cfg.useLocalExecutable},
+        {"localExecutablePath", cfg.localExecutablePath},
+        {"localCommandLineArgs", cfg.localCommandLineArgs}
     };
 }
 
@@ -326,6 +322,10 @@ AiConnectionConfig ConfigManager::deserializeAiConfig(const QJsonObject& ai, con
     cfg.contextWindow = ai["contextWindow"].toInt(131072);
     cfg.timeoutSec = ai["timeoutSec"].toInt(120);
     cfg.projectSummaryIntervalMin = ai["projectSummaryIntervalMin"].toInt(5);
+
+    cfg.useLocalExecutable = ai["useLocalExecutable"].toBool(false);
+    cfg.localExecutablePath = ai["localExecutablePath"].toString();
+    cfg.localCommandLineArgs = ai["localCommandLineArgs"].toString();
 
     if (cfg.profileName == "KoboldCpp (Offline)" &&
         cfg.backend == AiBackendType::KoboldCpp &&
@@ -392,7 +392,7 @@ void ConfigManager::loadConfig() {
         m_aiBehavior = defaultAiBehavior();
         if (obj.contains("aiBehavior") && obj["aiBehavior"].isObject()) {
             auto beh = obj["aiBehavior"].toObject();
-            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::FilesAndProject));
+            int modeVal = beh["autoSummaryMode"].toInt(static_cast<int>(AutoSummaryMode::None));
             m_aiBehavior.autoSummaryMode = static_cast<AutoSummaryMode>(qBound(0, modeVal, 2));
             m_aiBehavior.includeDocumentSummaryInPrompt = beh["includeDocumentSummaryInPrompt"].toBool(true);
             m_aiBehavior.includeProjectSummaryInPrompt = beh["includeProjectSummaryInPrompt"].toBool(true);
@@ -406,6 +406,7 @@ void ConfigManager::loadConfig() {
             }
             m_aiBehavior.summaryUseSyntaxExtensions = beh["summaryUseSyntaxExtensions"].toBool(true);
             m_aiBehavior.promptHistoryLimit = qBound(5, beh["promptHistoryLimit"].toInt(50), 1000);
+            m_aiBehavior.autoStartLocalExecutable = beh["autoStartLocalExecutable"].toBool(false);
 
             if (beh.contains("summaryAllowedFilenames")) {
                 m_aiBehavior.summaryAllowedFilenames.clear();
@@ -694,16 +695,17 @@ void ConfigManager::saveConfig() {
     for (const QString& dirPat : m_aiBehavior.summaryIgnoredDirs) ignoredDirsArr.append(dirPat);
 
     QJsonObject behaviorObj{
+        {"responseLocale", m_aiBehavior.responseLocale},
         {"autoSummaryMode", static_cast<int>(m_aiBehavior.autoSummaryMode)},
         {"includeDocumentSummaryInPrompt", m_aiBehavior.includeDocumentSummaryInPrompt},
         {"includeProjectSummaryInPrompt", m_aiBehavior.includeProjectSummaryInPrompt},
-        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryUseSyntaxExtensions", m_aiBehavior.summaryUseSyntaxExtensions},
         {"promptHistoryLimit", m_aiBehavior.promptHistoryLimit},
-        {"responseLocale", m_aiBehavior.responseLocale.isEmpty() ? QStringLiteral("default") : m_aiBehavior.responseLocale},
+        {"projectCustomPromptContextMode", static_cast<int>(m_aiBehavior.projectCustomPromptContextMode)},
         {"summaryAllowedFilenames", allowedFilesArr},
         {"summaryAllowedExtensions", allowedExtsArr},
-        {"summaryIgnoredDirs", ignoredDirsArr}
+        {"summaryIgnoredDirs", ignoredDirsArr},
+        {"autoStartLocalExecutable", m_aiBehavior.autoStartLocalExecutable}
     };
 
     QJsonArray historyArr;
@@ -788,6 +790,20 @@ void ConfigManager::setAiProfiles(const QVector<AiConnectionConfig>& profiles, c
     emit aiConfigChanged(m_aiConfig);
 }
 
+void ConfigManager::setActiveAiProfile(const QString& profileName) {
+    const QString clean = profileName.trimmed();
+    if (clean.isEmpty() || m_aiConfig.profileName == clean) return;
+
+    for (const auto& p : m_aiProfiles) {
+        if (p.profileName == clean) {
+            m_aiConfig = p;
+            saveConfig();
+            emit aiConfigChanged(m_aiConfig);
+            return;
+        }
+    }
+}
+
 void ConfigManager::setAiBehavior(const AiBehaviorConfig& behavior) {
     m_aiBehavior = behavior;
     m_aiBehavior.promptHistoryLimit = qBound(5, m_aiBehavior.promptHistoryLimit, 1000);
@@ -804,21 +820,42 @@ void ConfigManager::setProjectExplorerFilterSupported(bool filterSupportedOnly) 
     emit projectExplorerFilterChanged(m_projectExplorerFilterSupported);
 }
 
+void ConfigManager::invalidateSyntaxExtensionsCache() {
+    m_syntaxExtensionsCacheValid = false;
+    m_cachedSyntaxExtensions.clear();
+}
+
 QStringList ConfigManager::extensionsFromLoadedSyntaxes() const {
-    QStringList result;
-    QString synDir = syntaxDirPath();
+    if (m_syntaxExtensionsCacheValid) {
+        return m_cachedSyntaxExtensions;
+    }
+
+    QSet<QString> uniqueExts;
     for (const auto& r : m_fileTypes) {
-        bool hasXml = !r.syntaxFile.isEmpty() && QFile::exists(synDir + "/" + r.syntaxFile);
-        if (hasXml || !r.extensions.isEmpty()) {
-            for (const QString& ext : r.extensions) {
+        for (const QString& e : r.extensions) {
+            QString clean = e.trimmed().toLower();
+            if (clean.startsWith("*.")) clean = clean.mid(2);
+            else if (clean.startsWith('.')) clean = clean.mid(1);
+            if (!clean.isEmpty()) uniqueExts.insert(clean);
+        }
+    }
+
+    QDir synDir(syntaxDirPath());
+    const QStringList xmlFiles = synDir.entryList({"*.xml"}, QDir::Files);
+    for (const QString& fn : xmlFiles) {
+        auto meta = LexicalHighlighter::inspectSyntaxXml(synDir.filePath(fn));
+        if (meta.valid) {
+            for (const QString& ext : meta.extensions) {
                 QString clean = ext.trimmed().toLower();
-                if (!clean.isEmpty() && !result.contains(clean)) {
-                    result.append(clean);
-                }
+                if (!clean.isEmpty()) uniqueExts.insert(clean);
             }
         }
     }
-    return result;
+
+    m_cachedSyntaxExtensions = uniqueExts.values();
+    m_cachedSyntaxExtensions.sort(Qt::CaseInsensitive);
+    m_syntaxExtensionsCacheValid = true;
+    return m_cachedSyntaxExtensions;
 }
 
 QStringList ConfigManager::supportedProjectFileNameFilters() const {
@@ -995,6 +1032,7 @@ void ConfigManager::setSyntaxBaseUrl(const QString& url) {
 
 void ConfigManager::setFileTypeRules(const QVector<FileTypeRule>& rules) {
     m_fileTypes = rules;
+    invalidateSyntaxExtensionsCache();
     saveConfig();
     emit fileTypesChanged();
 }
@@ -1009,6 +1047,7 @@ void ConfigManager::upsertFileTypeRule(const FileTypeRule& rule) {
         }
     }
     m_fileTypes.append(rule);
+    invalidateSyntaxExtensionsCache();
     saveConfig();
     emit fileTypesChanged();
 }

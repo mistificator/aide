@@ -10,12 +10,68 @@
 #include <QMenu>
 #include <QInputDialog>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QFontDatabase>
 #include <QContextMenuEvent>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QTextOption>
+
+namespace {
+
+bool showWrappedPromptDialog(QWidget* parent,
+                             const QString& windowTitle,
+                             const QString& labelText,
+                             const QString& initialText,
+                             QString* outText) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle(windowTitle);
+    dlg.resize(620, 320);
+
+    auto* lay = new QVBoxLayout(&dlg);
+    lay->setContentsMargins(10, 10, 10, 10);
+    lay->setSpacing(8);
+
+    auto* lbl = new QLabel(labelText, &dlg);
+    lbl->setWordWrap(true);
+    lay->addWidget(lbl);
+
+    auto* edit = new QPlainTextEdit(&dlg);
+    edit->setPlainText(initialText);
+    edit->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    edit->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    edit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    edit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    edit->setPlaceholderText("Enter instructions for the LLM...");
+    edit->selectAll();
+    lay->addWidget(edit, 1);
+
+    auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    if (auto* okBtn = btns->button(QDialogButtonBox::Ok)) {
+        okBtn->setText("Run Prompt");
+    }
+    lay->addWidget(btns);
+
+    QObject::connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    edit->setFocus();
+
+    if (dlg.exec() != QDialog::Accepted) {
+        return false;
+    }
+
+    if (outText) {
+        *outText = edit->toPlainText().trimmed();
+    }
+    return true;
+}
+
+} // namespace
 
 CodeEditor::CodeEditor(QWidget* parent)
     : QPlainTextEdit(parent),
@@ -154,6 +210,23 @@ void CodeEditor::beginAiStreamEdit() {
     m_tailBuf.clear();
 }
 
+void CodeEditor::beginAiStreamContinueEdit() {
+    if (m_streamCursor.isNull()) {
+        m_streamCursor = textCursor();
+        m_streamCursor.movePosition(QTextCursor::End);
+    } else {
+        m_streamCursor.clearSelection();
+    }
+    // Продолжаем присоединять к предыдущему блоку Undo
+    m_isFirstChunk = false;
+    m_headerResolved = false;
+    m_userScrolledUpDuringStream = false;
+    m_updatingStreamText = false;
+    m_lastAutoScrollValue = verticalScrollBar()->value();
+    m_headerBuf.clear();
+    m_tailBuf.clear();
+}
+
 void CodeEditor::appendAiStreamChunk(const QString& chunk) {
     auto commitText = [this](const QString& txt) {
         if (txt.isEmpty()) return;
@@ -274,22 +347,59 @@ void CodeEditor::triggerAiAction(AiEditAction action) {
 
 void CodeEditor::triggerCustomPromptWithText(const QString& initialPromptText) {
     if (m_isAiBusy) return;
-    bool ok = false;
-    QString customInst = QInputDialog::getMultiLineText(
-        this,
-        "AI Custom Prompt",
-        "Enter instructions for the LLM:",
-        initialPromptText,
-        &ok);
-    if (!ok || customInst.trimmed().isEmpty()) return;
-    customInst = customInst.trimmed();
+
+    QTextCursor c = textCursor();
+    const bool hasSel = c.hasSelection();
+    const QString labelText = hasSel
+                                  ? QStringLiteral("Enter instructions for the LLM (will be applied to selected code):")
+                                  : QStringLiteral("Enter instructions for the LLM (will be applied to current document):");
+
+    QString customInst;
+    if (!showWrappedPromptDialog(this,
+                                 "AI Custom Prompt (Document)",
+                                 labelText,
+                                 initialPromptText,
+                                 &customInst) ||
+        customInst.isEmpty()) {
+        return;
+    }
 
     // Сохраняет промпт и автоматически поднимает его в глобальной истории по SHA-256
     ConfigManager::instance().setLastCustomPrompt(customInst);
 
-    QTextCursor c = textCursor();
-    QString targetText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
+    QString targetText = hasSel ? c.selectedText().replace(QChar(0x2029), '\n') : toPlainText();
     emit aiActionRequested(this, AiEditAction::CustomPrompt, targetText, customInst);
+}
+
+void CodeEditor::triggerContinueAiGeneration() {
+    if (m_isAiBusy || m_lastAiHistory.isEmpty()) return;
+    emit aiContinueRequested(this, {}, true);
+}
+
+void CodeEditor::triggerFollowUpAiPrompt() {
+    if (m_isAiBusy || !hasLastAiContext()) return;
+
+    QString followUpInst;
+    if (!showWrappedPromptDialog(
+            this,
+            "Continue Last AI Request (Follow-up)",
+            "Enter follow-up instructions for the LLM (previous conversation history is preserved):",
+            ConfigManager::instance().lastCustomPrompt(),
+            &followUpInst) ||
+        followUpInst.isEmpty()) {
+        return;
+    }
+
+    ConfigManager::instance().setLastCustomPrompt(followUpInst);
+    emit aiContinueRequested(this, followUpInst, false);
+}
+
+void CodeEditor::setLastAiConversationContext(const QString& systemPrompt,
+                                              const QVector<AiChatMessage>& history,
+                                              AiEditAction lastAction) {
+    m_lastAiSystemPrompt = systemPrompt;
+    m_lastAiHistory = history;
+    m_lastAiAction = lastAction;
 }
 
 void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
@@ -317,6 +427,11 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     for (const auto& [title, act] : actions) {
         if (act == AiEditAction::CustomPrompt) aiMenu->addSeparator();
         aiMenu->addAction(title, this, [this, act]() { triggerAiAction(act); });
+    }
+    if (hasLastAiContext()) {
+        aiMenu->addSeparator();
+        aiMenu->addAction("Continue Last Generation (From End)", this, &CodeEditor::triggerContinueAiGeneration);
+        aiMenu->addAction("Continue Last Request (Follow-up)...", this, &CodeEditor::triggerFollowUpAiPrompt);
     }
     menu->exec(event->globalPos());
     delete menu;

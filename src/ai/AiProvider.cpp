@@ -393,27 +393,31 @@ void AiProvider::sendRequest(const QString& taskId,
                              const QString& userPrompt,
                              bool stream,
                              const AiConnectionConfig& cfg,
-                             int maxOutputTokensOverride) {
+                             int maxOutputTokensOverride,
+                             const QVector<AiChatMessage>& history) {
     if (m_currentReply) {
         cleanupActiveReply();
     }
-
     m_activeTaskId = taskId;
     m_activeBackend = cfg.backend;
     m_isStreaming = stream;
     m_aborted = false;
     m_streamBuffer.clear();
     m_accumulatedResponse.clear();
+
     m_isThinking = false;
     m_inThinkTag = false;
     m_stripLeadingWhitespaceAfterThink = false;
     m_activeThinkCloseTag.clear();
     m_thinkParseBuffer.clear();
-    m_activeTimeoutMs = qMax(5, cfg.timeoutSec) * 1000;
 
+    m_activeTimeoutMs = qMax(5, cfg.timeoutSec) * 1000;
     int maxTokens = (maxOutputTokensOverride > 0) ? maxOutputTokensOverride : cfg.maxOutputCodeTokens;
     m_maxOutputTokens = maxTokens;
-    m_promptChars = systemPrompt.length() + userPrompt.length();
+
+    int historyChars = 0;
+    for (const auto& m : history) historyChars += m.content.length();
+    m_promptChars = systemPrompt.length() + historyChars + userPrompt.length();
     m_estimatedPromptTokens = (m_promptChars + 3) / 4;
     m_ttftMs = -1;
     m_thinkingChunks = 0;
@@ -431,23 +435,59 @@ void AiProvider::sendRequest(const QString& taskId,
     QJsonObject payload;
 
     if (cfg.backend == AiBackendType::Ollama) {
-        url = QUrl(base + "/api/generate");
-        payload = {
-            {"model", cfg.modelName},
-            {"system", systemPrompt},
-            {"prompt", userPrompt},
-            {"stream", stream},
-            {"options", QJsonObject{
-                            {"temperature", cfg.temperature},
-                            {"top_p", cfg.topP},
-                            {"num_predict", maxTokens},
-                            {"num_ctx", cfg.contextWindow}
-                        }}
-        };
+        if (history.isEmpty()) {
+            url = QUrl(base + "/api/generate");
+            payload = {
+                {"model", cfg.modelName},
+                {"system", systemPrompt},
+                {"prompt", userPrompt},
+                {"stream", stream},
+                {"options", QJsonObject{
+                                {"temperature", cfg.temperature},
+                                {"top_p", cfg.topP},
+                                {"num_predict", maxTokens},
+                                {"num_ctx", cfg.contextWindow}
+                            }}
+            };
+        } else {
+            url = QUrl(base + "/api/chat");
+            QJsonArray msgs;
+            if (!systemPrompt.trimmed().isEmpty()) {
+                msgs.append(QJsonObject{{"role", "system"}, {"content", systemPrompt}});
+            }
+            for (const auto& msg : history) {
+                if (!msg.content.isEmpty()) {
+                    msgs.append(QJsonObject{{"role", msg.role}, {"content", msg.content}});
+                }
+            }
+            if (!userPrompt.isEmpty()) {
+                msgs.append(QJsonObject{{"role", "user"}, {"content", userPrompt}});
+            }
+            payload = {
+                {"model", cfg.modelName},
+                {"messages", msgs},
+                {"stream", stream},
+                {"options", QJsonObject{
+                                {"temperature", cfg.temperature},
+                                {"top_p", cfg.topP},
+                                {"num_predict", maxTokens},
+                                {"num_ctx", cfg.contextWindow}
+                            }}
+            };
+        }
     } else if (cfg.backend == AiBackendType::KoboldCpp && !base.endsWith("/v1", Qt::CaseInsensitive)) {
         url = QUrl(base + (stream ? "/api/extra/generate/stream" : "/api/v1/generate"));
+        QStringList combinedParts;
+        if (!systemPrompt.trimmed().isEmpty()) combinedParts << systemPrompt.trimmed();
+        for (const auto& msg : history) {
+            QString roleHdr = (msg.role == "assistant") ? "### Assistant:" : "### User:";
+            combinedParts << (roleHdr + "\n" + msg.content);
+        }
+        if (!userPrompt.isEmpty()) {
+            combinedParts << (history.isEmpty() ? userPrompt : ("### User:\n" + userPrompt + "\n\n### Assistant:\n"));
+        }
         payload = {
-            {"prompt", systemPrompt.isEmpty() ? userPrompt : (systemPrompt + "\n\n" + userPrompt)},
+            {"prompt", combinedParts.join("\n\n")},
             {"temperature", cfg.temperature},
             {"top_p", cfg.topP},
             {"max_length", maxTokens},
@@ -456,8 +496,17 @@ void AiProvider::sendRequest(const QString& taskId,
     } else {
         url = QUrl(buildOpenAiEndpoint(base, "/chat/completions"));
         QJsonArray msgs;
-        if (!systemPrompt.isEmpty()) msgs.append(QJsonObject{{"role", "system"}, {"content", systemPrompt}});
-        msgs.append(QJsonObject{{"role", "user"}, {"content", userPrompt}});
+        if (!systemPrompt.isEmpty()) {
+            msgs.append(QJsonObject{{"role", "system"}, {"content", systemPrompt}});
+        }
+        for (const auto& msg : history) {
+            if (!msg.content.isEmpty()) {
+                msgs.append(QJsonObject{{"role", msg.role}, {"content", msg.content}});
+            }
+        }
+        if (!userPrompt.isEmpty()) {
+            msgs.append(QJsonObject{{"role", "user"}, {"content", userPrompt}});
+        }
         payload = {
             {"model", cfg.modelName},
             {"messages", msgs},
@@ -475,8 +524,9 @@ void AiProvider::sendRequest(const QString& taskId,
 
     QByteArray jsonBytes = QJsonDocument(payload).toJson(QJsonDocument::Indented);
     emit debugLog("REQUEST",
-                  QString("POST %1 [Task: %2, Stream: %3, Prompt: ~%4 tok, MaxTokens: %5]")
+                  QString("POST %1 [Task: %2, Stream: %3, History: %4 msg, Prompt: ~%5 tok, MaxTokens: %6]")
                       .arg(url.toString(), taskId, stream ? "true" : "false")
+                      .arg(history.size())
                       .arg(m_estimatedPromptTokens)
                       .arg(maxTokens),
                   QString::fromUtf8(jsonBytes));
@@ -576,7 +626,12 @@ void AiProvider::parseSseStreamChunk(const QByteArray& rawData) {
 }
 
 QString AiProvider::extractNonStreamText(AiBackendType backend, const QJsonObject& obj) {
-    if (backend == AiBackendType::Ollama) return stripThinkingBlocks(obj["response"].toString());
+    if (backend == AiBackendType::Ollama) {
+        if (obj.contains("message")) {
+            return stripThinkingBlocks(obj["message"].toObject()["content"].toString());
+        }
+        return stripThinkingBlocks(obj["response"].toString());
+    }
     if (obj.contains("results")) {
         auto arr = obj["results"].toArray();
         if (!arr.isEmpty()) return stripThinkingBlocks(arr[0].toObject()["text"].toString());

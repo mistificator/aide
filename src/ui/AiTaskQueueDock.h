@@ -16,6 +16,7 @@ public:
     explicit AiTaskQueueDock(AiTaskQueue* taskQueue, QWidget* parent = nullptr);
 
 public slots:
+    void scheduleRefreshQueueView();
     void refreshQueueView();
     void updateLiveMetrics();
 
@@ -23,6 +24,7 @@ private:
     static QString targetTypeToString(const AiTask& task);
     static QString formatDurationMs(qint64 ms);
     void appendTaskRow(const AiTask& task, const QString& statusText, bool isRunning);
+    void appendOverflowRow(int hiddenTasksCount);
     void updateActiveRowWidgets(const AiTask& cur);
 
     AiTaskQueue* m_taskQueue = nullptr;
@@ -35,4 +37,5 @@ private:
     QPushButton* m_cancelBgBtn = nullptr;
     QPushButton* m_cancelAllBtn = nullptr;
     QTimer m_liveTickTimer;
+    QTimer m_refreshDebounceTimer;
 };

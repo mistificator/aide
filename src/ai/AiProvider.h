@@ -19,7 +19,8 @@ public:
                      const QString& userPrompt,
                      bool stream,
                      const AiConnectionConfig& cfg,
-                     int maxOutputTokensOverride = -1);
+                     int maxOutputTokensOverride = -1,
+                     const QVector<AiChatMessage>& history = {});
     void abortActiveRequest();
 
 signals:

@@ -3,11 +3,14 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QList>
+#include <QStringList>
 #include <QPointer>
+#include <QTimer>
 #include "../editor/CodeEditor.h"
 
 class QTreeView;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QComboBox;
 class QMenu;
@@ -27,10 +30,17 @@ class ThemeAndSyntaxDownloader;
 class PromptHistoryDock;
 class ProjectPromptResultDialog;
 struct AiTask;
+class QMenuCompat;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+    enum class LlmConnectionState {
+        Disconnected, // Серая лампа — нет подключения (очередь на паузе)
+        Connecting,   // Жёлтая лампа — идёт проверка или ожидание подъёма порта локальной LLM
+        Connected     // Зелёная лампа — Test/Fetch успешен (очередь активна)
+    };
+
     explicit MainWindow(QWidget* parent = nullptr);
 
 protected:
@@ -42,21 +52,34 @@ private slots:
     void onOpenFile();
     void onOpenFolder();
     void onCloseAllProjects();
+    void onExportProjectWiki();
     void onCompareUnsavedDiff(CodeEditor* targetEditor = nullptr);
     void onFindReplaceDialog();
     void onEditorPreferences();
     void onAiPreferences();
     void onRecursiveProjectSummary(const QString& startDir = {});
-    void onRebuildProjectSummary();
+    void onRebuildProjectSummary(const QString& subprojectRel = {});
+    void onContinueProjectSummary(const QString& subprojectRel = {});
     void onProjectCustomPrompt(const QString& initialPromptText = {});
     void onProjectTreeContextMenu(const QPoint& pos);
+    void onRenameProjectFile(const QString& filePath);
+    void onDeleteProjectFile(const QString& filePath);
+
+    void onProjectSearchTextChanged(const QString& text);
+    void onProjectSearchNext();
+    void onProjectSearchPrev();
 
     void onActiveEditorChanged(CodeEditor* editor);
     void onEditorAiAction(CodeEditor* editor, AiEditAction action, const QString& selectedText, const QString& customInstruction);
+    void onEditorAiContinue(CodeEditor* editor, const QString& followUpInstruction, bool seamlessAppend);
     void onTaskStreamChunk(const AiTask& task, const QString& chunk);
     void onTaskCompleted(const AiTask& task, const QString& resultText);
     void onTaskFailed(const AiTask& task, const QString& errorText);
     void onTaskCancelled(const AiTask& task);
+
+    void onQuickProfileSelected(int index);
+    void onModelsFetchedForStatus(const QStringList& models);
+    void onLocalLlmProcessStateChanged();
 
     void populateRecentProjectsMenu();
     void populateWindowMenu();
@@ -71,11 +94,25 @@ private:
     void updateCentralViewState();
     void updateAiActionsState();
     void applyProjectExplorerFilter();
+    void revealProjectFileInTree(const QString& relFilePath);
+
+    void refreshProfileSelectors();
+    void startLlmConnectionCheck(bool allowLocalStartupRetries = false);
+    void probeLlmConnectionNow();
+    void setLlmConnectionState(LlmConnectionState state, const QString& statusText = {}, const QString& toolTipText = {});
+    static QIcon createStatusLampIcon(const QColor& fillColor, const QColor& glowColor);
+
     void rebuildSingleFileSummary(const QString& filePath,
                                   bool checkLimits = true,
                                   int maxTokensOverride = 0,
                                   int ctxWindowOverride = 0);
+    int enqueueBatchFilesWithProgress(const QStringList& files,
+                                      const QString& titlePrefix,
+                                      int* outMaxTokens = nullptr,
+                                      int* outCtxWindow = nullptr);
     void clearSingleFileSummary(const QString& filePath);
+    void removeSingleFileSummary(const QString& filePath);
+    void continueSingleFileSummary(const QString& filePath);
     QMap<QString, QString> collectOpenEditorBuffers() const;
     bool verifyAndAdjustContextLimits(const QString& taskTitle,
                                       const QString& systemPrompt,
@@ -104,28 +141,46 @@ private:
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
 
+    QLineEdit* m_projectSearchEdit = nullptr;
+    QLabel* m_projectSearchCountLabel = nullptr;
+    QPushButton* m_projectSearchPrevBtn = nullptr;
+    QPushButton* m_projectSearchNextBtn = nullptr;
+    QStringList m_projectSearchMatches;
+    int m_projectSearchIndex = -1;
+
     ContextInspectorDock* m_inspectorDock = nullptr;
     PromptHistoryDock* m_promptHistoryDock = nullptr;
     AiDebugConsoleDock* m_debugConsoleDock = nullptr;
     AiTaskQueueDock* m_taskQueueDock = nullptr;
-
     QMap<QString, QPointer<ProjectPromptResultDialog>> m_projectPromptWindows;
 
     QToolBar* m_aiToolBar = nullptr;
+    QComboBox* m_toolbarProfileCombo = nullptr;
     QAction* m_actProjCustomPrompt = nullptr;
     QAction* m_actProjSummaryRebuild = nullptr;
     QAction* m_actProjRecursiveSummary = nullptr;
+    QAction* m_actProjExportWiki = nullptr;
     QAction* m_actFileCustomPrompt = nullptr;
     QAction* m_actFileSummaryRebuild = nullptr;
+    QAction* m_actFileSummaryRemove = nullptr;
+    QAction* m_actFileAiContinueGen = nullptr;
+    QAction* m_actFileAiFollowUp = nullptr;
     QAction* m_actCodeExplain = nullptr;
     QAction* m_actAddDocs = nullptr;
     QList<QAction*> m_otherFileAiActions;
 
-    QMenu* m_recentProjectsMenu = nullptr;
-    QMenu* m_windowMenu = nullptr;
-    QMenu* m_themeMenu = nullptr;
-    QMenu* m_langMenu = nullptr;
+    QMenuCompat* m_recentProjectsMenu = nullptr;
+    QMenuCompat* m_windowMenu = nullptr;
+    QMenuCompat* m_themeMenu = nullptr;
+    QMenuCompat* m_langMenu = nullptr;
 
+    QComboBox* m_statusProfileCombo = nullptr;
+    QPushButton* m_llmConnStatusBtn = nullptr;
     QPushButton* m_queueStatusBtn = nullptr;
     QLabel* m_langStatusLabel = nullptr;
+
+    QTimer m_llmConnectRetryTimer;
+    LlmConnectionState m_llmConnState = LlmConnectionState::Disconnected;
+    int m_llmConnectRetriesLeft = 0;
+    bool m_updatingProfileCombos = false;
 };
