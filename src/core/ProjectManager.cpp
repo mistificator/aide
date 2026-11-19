@@ -1641,54 +1641,67 @@ QString ProjectManager::buildAggregatedFilesDigest(const QString& subprojectRel)
 
 QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) const {
     if (!hasOpenProject()) return {};
+
     const auto beh = ConfigManager::instance().aiBehavior();
     QStringList sections;
 
-    const QString rootSys = projectSystemPrompt().trimmed();
-    if (!rootSys.isEmpty()) {
-        sections << "=== PROJECT SYSTEM INSTRUCTIONS ===\n" + rootSys;
-    }
-
-    const QString ownerSub = filePath.isEmpty() ? QString() : owningProjectRelPathForFile(filePath);
-    QStringList ancestorChain;
-    if (!ownerSub.isEmpty()) {
-        QString cur = ownerSub;
-        while (!cur.isEmpty()) {
-            ancestorChain.prepend(cur);
-            cur = parentSubprojectRel(cur);
-        }
-    }
-
-    for (const QString& anc : ancestorChain) {
-        const QString subSys = projectSystemPrompt(anc).trimmed();
-        if (!subSys.isEmpty() && subSys != rootSys) {
-            sections << QString("=== SUBPROJECT (%1) INSTRUCTIONS ===\n%2").arg(anc, subSys);
-        }
+    const QString rootPrompt = projectSystemPrompt().trimmed();
+    if (!rootPrompt.isEmpty()) {
+        sections << "=== ROOT PROJECT SYSTEM INSTRUCTIONS ===\n" + rootPrompt;
     }
 
     if (beh.includeProjectSummaryInPrompt) {
         const QString rootSum = projectSummary().trimmed();
         if (!rootSum.isEmpty()) {
-            sections << "=== PROJECT ARCHITECTURE SUMMARY ===\n" + rootSum;
+            sections << "=== ROOT PROJECT ARCHITECTURE SUMMARY ===\n" + rootSum;
         }
-        for (const QString& anc : ancestorChain) {
-            const QString subSum = projectSummary(anc).trimmed();
+    }
+
+    if (filePath.trimmed().isEmpty()) {
+        // Для общепроектного запроса включаем системные инструкции и саммари всех подпроектов
+        const QStringList subprojects = subprojectRelPaths();
+        for (const QString& subRel : subprojects) {
+            if (subRel.trimmed().isEmpty()) continue;
+
+            const QString subPrompt = projectSystemPrompt(subRel).trimmed();
+            if (!subPrompt.isEmpty() && subPrompt != rootPrompt) {
+                sections << QString("=== SUBPROJECT INSTRUCTIONS (%1) ===\n%2")
+                .arg(subRel, subPrompt);
+            }
+            if (beh.includeProjectSummaryInPrompt) {
+                const QString subSum = projectSummary(subRel).trimmed();
+                if (!subSum.isEmpty()) {
+                    sections << QString("=== SUBPROJECT SUMMARY (%1) ===\n%2")
+                    .arg(subRel, subSum);
+                }
+            }
+        }
+        return sections.join("\n\n");
+    }
+
+    // Для конкретного файла — цепочка подпроектов от корня к владельцу файла
+    const QString ownerSub = owningProjectRelPathForFile(filePath);
+    if (!ownerSub.isEmpty()) {
+        const QString subPrompt = projectSystemPrompt(ownerSub).trimmed();
+        if (!subPrompt.isEmpty() && subPrompt != rootPrompt) {
+            sections << QString("=== SUBPROJECT INSTRUCTIONS (%1) ===\n%2").arg(ownerSub, subPrompt);
+        }
+        if (beh.includeProjectSummaryInPrompt) {
+            const QString subSum = projectSummary(ownerSub).trimmed();
             if (!subSum.isEmpty()) {
-                sections << QString("=== SUBPROJECT (%1) ARCHITECTURE SUMMARY ===\n%2").arg(anc, subSum);
+                sections << QString("=== SUBPROJECT SUMMARY (%1) ===\n%2").arg(ownerSub, subSum);
             }
         }
     }
 
-    if (!filePath.isEmpty()) {
-        const FileContextData fc = fileContext(filePath);
-        if (!fc.userPrompt.trimmed().isEmpty()) {
-            sections << QString("=== DOCUMENT INSTRUCTIONS (%1) ===\n%2")
-            .arg(fc.relativePath, fc.userPrompt.trimmed());
-        }
-        if (beh.includeDocumentSummaryInPrompt && !fc.aiSummary.trimmed().isEmpty()) {
-            sections << QString("=== DOCUMENT SUMMARY (%1) ===\n%2")
-            .arg(fc.relativePath, fc.aiSummary.trimmed());
-        }
+    const auto fc = fileContext(filePath);
+    if (!fc.userPrompt.trimmed().isEmpty()) {
+        sections << QString("=== DOCUMENT INSTRUCTIONS (%1) ===\n%2")
+        .arg(fc.relativePath, fc.userPrompt.trimmed());
+    }
+    if (beh.includeDocumentSummaryInPrompt && !fc.aiSummary.trimmed().isEmpty()) {
+        sections << QString("=== DOCUMENT SUMMARY (%1) ===\n%2")
+        .arg(fc.relativePath, fc.aiSummary.trimmed());
     }
 
     return sections.join("\n\n");

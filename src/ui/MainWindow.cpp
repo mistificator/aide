@@ -1765,7 +1765,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                       static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
 
     auto beh = ConfigManager::instance().aiBehavior();
-    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 2));
+    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 0));
     ctxRow->addWidget(ctxCombo, 1);
     lay->addLayout(ctxRow);
 

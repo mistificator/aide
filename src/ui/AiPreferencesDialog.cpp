@@ -1425,7 +1425,7 @@ AiBehaviorConfig AiPreferencesDialog::resultBehavior() const {
     b.projectCustomPromptContextMode = static_cast<ProjectCustomPromptContextMode>(
         m_projCustomPromptCtxCombo
             ? m_projCustomPromptCtxCombo->currentData().toInt()
-            : static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
+            : static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
     b.autoStartLocalExecutable = m_autoStartLocalExecCheck && m_autoStartLocalExecCheck->isChecked();
     return b;
 }
