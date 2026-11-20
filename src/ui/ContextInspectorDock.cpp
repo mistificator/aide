@@ -674,6 +674,22 @@ void ContextInspectorDock::refreshDisplay() {
     m_updatingUi = true;
 
     const bool hasProj = m_projectMgr && m_projectMgr->hasOpenProject();
+    const bool documentMode = hasProj && m_projectMgr->projectMode() == ProjectMode::Documents;
+    m_projectSummaryView->setPlaceholderText(documentMode
+                                                 ? "Synthesized document collection / book overview..."
+                                                 : "Synthesized project architecture summary...");
+    m_projectPromptEdit->setPlaceholderText(documentMode
+                                                ? "Collection or section instructions (e.g. Preserve the author's voice and terminology)..."
+                                                : "Global or subproject-specific instructions (e.g. Use C++20, Qt6 style)...");
+    m_filePromptEdit->setPlaceholderText(documentMode
+                                             ? "Enter specific AI instructions for this document..."
+                                             : "Enter specific AI instructions for this file...");
+    m_rebuildProjBtn->setToolTip(documentMode
+                                     ? "Rebuild Document Collection / Section Overview"
+                                     : "Rebuild Project / Subproject Architecture Summary");
+    m_rebuildFileBtn->setToolTip(documentMode
+                                     ? "Regenerate AI summary for this document"
+                                     : "Regenerate AI summary for this file");
     if (m_projectScopeCombo && m_projectScopeCombo->count() <= 1 && hasProj) {
         rebuildProjectScopeCombo();
     }

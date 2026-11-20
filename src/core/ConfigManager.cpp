@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QCryptographicHash>
 #include <QSet>
+#include <QMap>
 #include <QLocale>
 #include <algorithm>
 
@@ -116,6 +117,11 @@ QJsonObject ConfigManager::defaultPromptTemplates() {
         "Every single function, switch case, and block MUST be written in full. "
         "Output ONLY raw code without markdown fences:";
 
+    const QString completeTextRule =
+        " STRICT RULE: Return the COMPLETE resulting text. NEVER omit passages, use ellipses (`...`), or insert placeholders. "
+        "Preserve the original meaning, facts, terminology, formatting, and authorial voice unless explicitly asked to change them. "
+        "Output ONLY the resulting text without markdown fences or commentary:";
+
     return {
         {"ExplainCode",
          "Explain the logic, architecture, and potential pitfalls of the following code clearly and concisely:"},
@@ -146,7 +152,42 @@ QJsonObject ConfigManager::defaultPromptTemplates() {
         {"FileSummary",
          "Analyze this source file and output a compact structured technical summary in Markdown format (use ### headings, bullet points, and `inline code`): 1) Purpose, 2) Exported classes/structs/functions with signatures, 3) Key dependencies."},
         {"ProjectSummary",
-         "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"}
+         "Synthesize a concise architectural summary of the entire project in Markdown format (use ### headings, bullet points, and `inline code`) based on the following individual file summaries:"},
+        {"ExplainText",
+         "Explain the meaning, structure, central ideas or events, and notable details of the following text clearly and concisely. "
+         "Do not rewrite the source text; provide the explanation in Markdown:"},
+        {"ImproveWriting",
+         "Edit and improve the following text for grammar, clarity, coherence, and style while preserving its intent and voice." + completeTextRule},
+        {"CheckTextConsistency",
+         "Review the following text for contradictions, continuity errors, factual inconsistencies, ambiguous wording, missing transitions, "
+         "and unresolved references. Correct the issues while preserving the author's intent." + completeTextRule},
+        {"ImproveTextFlow",
+         "Improve the narrative flow, pacing, paragraph structure, and transitions of the following text without changing its substance." + completeTextRule},
+        {"AddEditorialNotes",
+         "Add useful explanatory or editorial notes to the following text without removing or altering its original content. "
+         "Use the document's existing annotation convention, or [Note: ...] when none exists." + completeTextRule},
+        {"GenerateReviewQuestions",
+         "Keep the complete original text unchanged and append a Markdown section titled 'Review Questions' with thoughtful questions "
+         "about its key ideas, details, implications, and connections. Do not add answers unless the text requests them." + completeTextRule},
+        {"ContinueDocumentChapter",
+         "Continue the following document or chapter from its exact ending, matching its tone, style, terminology, narrative perspective, "
+         "and structure. Preserve the original text verbatim and append a substantive continuation without repeating existing passages." + completeTextRule},
+        {"DocumentCustomPrompt",
+         "If modifying or generating text, return ONLY the complete resulting text without markdown fences unless the user requests them. "
+         "Preserve meaning, facts, terminology, and voice unless instructed otherwise. NEVER omit passages, use ellipses (`...`), or insert placeholders:"},
+        {"DocumentProjectCustomPrompt",
+         "Provide a comprehensive, well-structured response in Markdown format. When outputting complete documents or chapters, use fenced "
+         "Markdown or text blocks and precede each file block with a heading containing its relative path (for example, `### File: chapters/intro.md`). "
+         "NEVER omit paragraphs, use ellipses (`...`), or insert placeholders. Preserve established terminology, style, and continuity; "
+         "prefer complete documents, or complete explicitly scoped sections when a full document cannot fit:"},
+        {"DocumentSummary",
+         "Analyze this document and output a compact structured summary in Markdown format with ### headings and bullet points: "
+         "1) Purpose and intended audience, 2) Main topics, arguments, or events in document order, "
+         "3) Key people, concepts, and terminology, 4) Open questions, unresolved threads, or editorial gaps:"},
+        {"DocumentCollectionSummary",
+         "Synthesize a concise editorial overview of the document collection or book in Markdown format based on the individual document "
+         "summaries. Cover its purpose and audience, structure and reading order, recurring themes or narrative arcs, shared terminology, "
+         "cross-document dependencies, and inconsistencies or content gaps:"}
     };
 }
 
@@ -1100,6 +1141,29 @@ QString ConfigManager::promptLanguageInstruction() const {
 
     return QString("LANGUAGE REQUIREMENT: Write all Markdown text, explanations, summaries, documentation, and code comments in %1.")
         .arg(langDesc);
+}
+
+QString ConfigManager::promptKeyForProjectMode(const QString& actionKey, ProjectMode projectMode) {
+    if (projectMode == ProjectMode::Code) return actionKey;
+
+    static const QMap<QString, QString> documentKeys = {
+        {"ExplainCode", "ExplainText"},
+        {"RefactorCode", "ImproveWriting"},
+        {"FindBugs", "CheckTextConsistency"},
+        {"OptimizePerformance", "ImproveTextFlow"},
+        {"AddDocumentation", "AddEditorialNotes"},
+        {"GenerateUnitTests", "GenerateReviewQuestions"},
+        {"CompleteCode", "ContinueDocumentChapter"},
+        {"CustomPrompt", "DocumentCustomPrompt"},
+        {"ProjectCustomPrompt", "DocumentProjectCustomPrompt"},
+        {"FileSummary", "DocumentSummary"},
+        {"ProjectSummary", "DocumentCollectionSummary"}
+    };
+    return documentKeys.value(actionKey, actionKey);
+}
+
+QString ConfigManager::promptTemplate(const QString& actionKey, ProjectMode projectMode) const {
+    return promptTemplate(promptKeyForProjectMode(actionKey, projectMode));
 }
 
 QString ConfigManager::promptTemplate(const QString& actionKey) const {

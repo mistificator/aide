@@ -248,6 +248,13 @@ void EditorTabWidget::setProjectRootPath(const QString& rootPath) {
     }
 }
 
+void EditorTabWidget::setProjectMode(ProjectMode mode) {
+    m_projectMode = mode;
+    for (int i = 0; i < count(); ++i) {
+        if (auto* ed = editorAt(i)) ed->setProjectMode(mode);
+    }
+}
+
 void EditorTabWidget::refreshEditorModeBar(CodeEditor* ed) {
     int idx = indexOfEditor(ed);
     if (idx < 0) return;
@@ -449,6 +456,7 @@ CodeEditor* EditorTabWidget::openFile(const QString& filePath) {
 }
 
 void EditorTabWidget::registerEditor(CodeEditor* ed) {
+    ed->setProjectMode(m_projectMode);
     connect(ed->document(), &QTextDocument::modificationChanged, this, [this, ed](bool) {
         updateTabTitle(ed);
     });

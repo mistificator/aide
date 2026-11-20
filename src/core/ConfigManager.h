@@ -22,6 +22,11 @@ enum class ProjectCustomPromptContextMode {
     BothSummaryAndSourcesMarkdown = 2
 };
 
+enum class ProjectMode {
+    Code = 0,
+    Documents = 1
+};
+
 struct AiChatMessage {
     QString role;    // "system", "user", "assistant"
     QString content;
@@ -116,6 +121,8 @@ public:
     QJsonObject promptTemplates() const { return m_promptTemplates; }
     void setPromptTemplates(const QJsonObject& templates);
     QString promptTemplate(const QString& actionKey) const;
+    QString promptTemplate(const QString& actionKey, ProjectMode projectMode) const;
+    static QString promptKeyForProjectMode(const QString& actionKey, ProjectMode projectMode);
     static QJsonObject defaultPromptTemplates();
     static QString defaultPromptTemplate(const QString& actionKey);
 

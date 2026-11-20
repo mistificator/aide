@@ -58,6 +58,7 @@
 #include <QTimer>
 #include <QPainter>
 #include <QRadialGradient>
+#include <QSignalBlocker>
 #include <algorithm>
 
 class ProjectTreeModel : public QFileSystemModel {
@@ -314,9 +315,23 @@ void MainWindow::setupUiAndDocks() {
     filterRow->addWidget(filterLbl);
     filterRow->addWidget(m_projectFilterCombo, 1);
 
+    auto* modeRow = new QHBoxLayout();
+    modeRow->setContentsMargins(0, 2, 0, 0);
+    auto* modeLbl = new QLabel("AI Mode:", pathHeaderBox);
+    modeLbl->setStyleSheet("color: #888899; font-size: 10px; font-weight: bold; border: none; background: transparent;");
+    m_projectModeCombo = new QComboBox(pathHeaderBox);
+    m_projectModeCombo->addItem("Code", static_cast<int>(ProjectMode::Code));
+    m_projectModeCombo->addItem("Documents / Book", static_cast<int>(ProjectMode::Documents));
+    m_projectModeCombo->setToolTip(
+        "Project-wide AI action labels and prompt templates. Stored in the root .aide file. Existing summaries are preserved.");
+    m_projectModeCombo->setEnabled(false);
+    modeRow->addWidget(modeLbl);
+    modeRow->addWidget(m_projectModeCombo, 1);
+
     pathHeaderLay->addWidget(pathTitleLbl);
     pathHeaderLay->addWidget(m_projectPathLabel);
     pathHeaderLay->addLayout(filterRow);
+    pathHeaderLay->addLayout(modeRow);
 
     m_projectTree = new QTreeView(projExplorerPage);
     m_projectTree->setUniformRowHeights(true);
@@ -444,7 +459,7 @@ void MainWindow::setupMenus() {
     fileMenu->addSeparator();
     fileMenu->addAction("Save", QKeySequence::Save, m_tabWidget, &EditorTabWidget::saveCurrentDocument);
     fileMenu->addAction("Save As...", QKeySequence::SaveAs, m_tabWidget, &EditorTabWidget::saveCurrentDocumentAs);
-    fileMenu->addAction("Save All", QKeySequence("Ctrl+Shift+S"), m_tabWidget, &EditorTabWidget::saveAllDocuments);
+    fileMenu->addAction("Save All", QKeySequence("Ctrl+Alt+S"), m_tabWidget, &EditorTabWidget::saveAllDocuments);
     fileMenu->addAction("Save Project (.aide)", this, [this]() {
         if (m_projectMgr->saveProjectFile()) statusBar()->showMessage("Project and subprojects (.aide) saved.", 3000);
     });
@@ -698,6 +713,20 @@ void MainWindow::setupMenus() {
 }
 
 void MainWindow::setupConnections() {
+    connect(m_projectModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index < 0 || !m_projectMgr->hasOpenProject()) return;
+        const auto mode = static_cast<ProjectMode>(m_projectModeCombo->itemData(index).toInt());
+        m_projectMgr->setProjectMode(mode);
+        statusBar()->showMessage(
+            mode == ProjectMode::Documents
+                ? QStringLiteral("Project AI mode: Documents / Book (saved in root .aide)")
+                : QStringLiteral("Project AI mode: Code (saved in root .aide)"),
+            4000);
+    });
+    connect(m_projectMgr, &ProjectManager::projectModeChanged, this, [this](ProjectMode) {
+        updateProjectModeUi();
+    });
+
     connect(m_projectTree, &QTreeView::doubleClicked, this, [this](const QModelIndex& idx) {
         if (!m_fsModel->isDir(idx)) {
             m_tabWidget->openFile(m_fsModel->filePath(idx));
@@ -782,9 +811,11 @@ void MainWindow::setupConnections() {
                 }
             });
     connect(m_projectMgr, &ProjectManager::projectLoaded, this, [this](const QString&) {
+        updateProjectModeUi();
         updateAiActionsState();
     });
     connect(m_projectMgr, &ProjectManager::projectClosed, this, [this]() {
+        updateProjectModeUi();
         updateAiActionsState();
     });
     connect(m_tabWidget, &EditorTabWidget::documentSaved, this, [this](const QString&, const QByteArray&) {
@@ -1306,7 +1337,7 @@ void MainWindow::rebuildSingleFileSummary(const QString& filePath,
         QString relPath = m_projectMgr->toRelativePath(filePath);
         QString ownerSub = m_projectMgr->owningProjectRelPathForFile(filePath);
         QString sysPrompt = m_projectMgr->projectSystemPrompt(ownerSub);
-        QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+        QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary", m_projectMgr->projectMode())
                              + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
         if (!verifyAndAdjustContextLimits("Rebuild File Summary (" + relPath + ")",
                                           sysPrompt,
@@ -1391,7 +1422,7 @@ int MainWindow::enqueueBatchFilesWithProgress(const QStringList& files,
         const QString relPath = m_projectMgr->toRelativePath(largestPath);
         const QString ownerSub = m_projectMgr->owningProjectRelPathForFile(relPath);
         const QString sysPrompt = m_projectMgr->projectSystemPrompt(ownerSub);
-        const QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+        const QString userPrompt = ConfigManager::instance().promptTemplate("FileSummary", m_projectMgr->projectMode())
                                    + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(largestContent));
         if (!verifyAndAdjustContextLimits(
                 QString("%1 (Largest File: %2)").arg(titlePrefix, relPath),
@@ -1639,13 +1670,13 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
 
         if (indexedCount == 0) {
             msgBox.setText(
-                QString("<b>%1</b> currently has <b>0 indexed files</b>, and <b>%2 allowed source file(s)</b> without a summary.<br><br>"
+                QString("<b>%1</b> currently has <b>0 indexed files</b>, and <b>%2 eligible file(s)</b> without a summary.<br><br>"
                         "Would you like to generate summaries for those %2 file(s) now and then automatically synthesize the %1 summary (bottom-up across all subfolders)?")
                     .arg(targetName)
                     .arg(unindexedFiles.size()));
         } else {
             msgBox.setText(
-                QString("<b>%1</b> currently has only <b>%2 indexed file(s)</b>, while <b>%3 allowed source file(s)</b> do not have summaries yet.<br><br>"
+                QString("<b>%1</b> currently has only <b>%2 indexed file(s)</b>, while <b>%3 eligible file(s)</b> do not have summaries yet.<br><br>"
                         "If you rebuild now, only the %2 already-indexed file(s) will be included. "
                         "Would you like to index all %3 missing file(s) first and then automatically synthesize the complete summary?")
                     .arg(targetName)
@@ -1704,7 +1735,7 @@ void MainWindow::onRebuildProjectSummary(const QString& subprojectRel) {
     int ctxWindow = cfg.contextWindow;
 
     QString sysPrompt = m_projectMgr->projectSystemPrompt(cleanSubRel);
-    QString userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
+    QString userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary", m_projectMgr->projectMode()) + "\n\n" + digest;
     QString title = cleanSubRel.isEmpty()
                         ? QStringLiteral("Rebuild Project Summary")
                         : QString("Rebuild Subproject Summary (%1)").arg(cleanSubRel);
@@ -1735,8 +1766,9 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
         return;
     }
 
+    const bool documentMode = (m_projectMgr->projectMode() == ProjectMode::Documents);
     QDialog dlg(this);
-    dlg.setWindowTitle("AI Custom Prompt for Project");
+    dlg.setWindowTitle(documentMode ? "AI Custom Prompt for Document Collection" : "AI Custom Prompt for Project");
     dlg.resize(840, 680);
     auto* lay = new QVBoxLayout(&dlg);
 
@@ -1755,24 +1787,30 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     lay->addWidget(statusLbl);
 
     auto* ctxRow = new QHBoxLayout();
-    ctxRow->addWidget(new QLabel("Project Context Option:", &dlg));
+    ctxRow->addWidget(new QLabel(documentMode ? "Document Context Option:" : "Project Context Option:", &dlg));
     auto* ctxCombo = new QComboBox(&dlg);
-    ctxCombo->addItem("1. Project Summary Only",
+    ctxCombo->addItem(documentMode ? "1. Collection Overview Only" : "1. Project Summary Only",
                       static_cast<int>(ProjectCustomPromptContextMode::ProjectSummaryOnly));
-    ctxCombo->addItem("2. Selected Project Files (Concatenated Internal Markdown)",
+    ctxCombo->addItem(documentMode ? "2. Selected Documents (Concatenated Internal Markdown)"
+                                   : "2. Selected Project Files (Concatenated Internal Markdown)",
                       static_cast<int>(ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly));
-    ctxCombo->addItem("3. Both Project Summary and Selected Files Markdown",
+    ctxCombo->addItem(documentMode ? "3. Both Collection Overview and Selected Documents Markdown"
+                                   : "3. Both Project Summary and Selected Files Markdown",
                       static_cast<int>(ProjectCustomPromptContextMode::BothSummaryAndSourcesMarkdown));
 
     auto beh = ConfigManager::instance().aiBehavior();
-    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 0));
+    ctxCombo->setCurrentIndex(qBound(0, static_cast<int>(beh.projectCustomPromptContextMode), 2));
     ctxRow->addWidget(ctxCombo, 1);
     lay->addLayout(ctxRow);
 
     auto* split = new QSplitter(Qt::Vertical, &dlg);
     split->setChildrenCollapsible(false);
 
-    auto* filesBox = new QGroupBox("Project Files to Include in Prompt Context (Indexed files are pre-selected):", split);
+    auto* filesBox = new QGroupBox(
+        documentMode
+            ? "Documents to Include in Prompt Context (Documents with summaries are pre-selected):"
+            : "Project Files to Include in Prompt Context (Indexed files are pre-selected):",
+        split);
     auto* filesLay = new QVBoxLayout(filesBox);
     auto* fileSelector = new ProjectFileSelectorWidget(
         m_projectMgr,
@@ -1792,7 +1830,9 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
         promptBox));
     auto* promptEdit = new QPlainTextEdit(promptBox);
     promptEdit->setPlaceholderText(
-        "e.g. Analyze the project architecture, propose new classes/files, or generate implementation files...");
+        documentMode
+            ? "e.g. Analyze the manuscript structure, check continuity, edit selected chapters, or draft new documents..."
+            : "e.g. Analyze the project architecture, propose new classes/files, or generate implementation files...");
     QString seedText = initialPromptText.isEmpty() ? ConfigManager::instance().lastCustomPrompt() : initialPromptText;
     promptEdit->setPlainText(seedText);
     promptLay->addWidget(promptEdit, 1);
@@ -1816,7 +1856,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
 
     const auto openBuffers = collectOpenEditorBuffers();
     const QString sysPrompt = m_projectMgr->projectSystemPrompt();
-    const QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+    const QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt", m_projectMgr->projectMode());
     const int projSummaryChars = m_projectMgr->projectSummary().length();
 
     auto updateLiveContextEstimate = [&]() {
@@ -1836,7 +1876,9 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                           .arg(selCount)
                           .arg(selBytes / 1024));
         } else {
-            selectedCountLbl->setText("File selection is inactive in '1. Project Summary Only' mode.");
+            selectedCountLbl->setText(documentMode
+                                          ? "Document selection is inactive in '1. Collection Overview Only' mode."
+                                          : "File selection is inactive in '1. Project Summary Only' mode.");
         }
 
         qint64 estProjCtxChars = 0;
@@ -1975,7 +2017,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
     task.targetType = TaskTargetType::ProjectCustomPrompt;
-    task.filePath = "[Project Custom Prompt]";
+    task.filePath = documentMode ? "[Document Collection Custom Prompt]" : "[Project Custom Prompt]";
     task.llmModel = cfg.llmIdentifier();
     task.maxOutputTokens = finalMaxOutputTokens;
     task.contextWindow = finalContextWindow;
@@ -1987,6 +2029,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
 
     auto* resWin = new ProjectPromptResultDialog(
         finalCustomInst, m_projectMgr->projectRootPath(), taskId, sysPrompt, finalFullUserPrompt, this);
+    if (documentMode) resWin->setWindowTitle("AI Document Collection Custom Prompt Result");
     m_projectPromptWindows.insert(taskId, resWin);
 
     connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
@@ -1998,7 +2041,7 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                    bool seamlessAppend) {
                 if (!dlgPtr) return;
                 const auto& aiCfg = ConfigManager::instance().aiConfig();
-                QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt");
+                QString mdSuffix = ConfigManager::instance().promptTemplate("ProjectCustomPrompt", m_projectMgr->projectMode());
                 QString effectiveUser = (!seamlessAppend && !mdSuffix.trimmed().isEmpty())
                                             ? (followUpUserPrompt + "\n\n" + mdSuffix.trimmed())
                                             : followUpUserPrompt;
@@ -2006,7 +2049,9 @@ void MainWindow::onProjectCustomPrompt(const QString& initialPromptText) {
                 AiTask contTask;
                 contTask.priority = TaskPriority::High_UserAction;
                 contTask.targetType = TaskTargetType::ProjectCustomPrompt;
-                contTask.filePath = "[Project Custom Prompt — Continue]";
+                contTask.filePath = m_projectMgr->projectMode() == ProjectMode::Documents
+                                        ? "[Document Collection Custom Prompt — Continue]"
+                                        : "[Project Custom Prompt — Continue]";
                 contTask.llmModel = aiCfg.llmIdentifier();
                 contTask.maxOutputTokens = aiCfg.maxOutputCodeTokens;
                 contTask.contextWindow = aiCfg.contextWindow;
@@ -2248,6 +2293,82 @@ void MainWindow::updateCentralViewState() {
     updateAiActionsState();
 }
 
+void MainWindow::updateProjectModeUi() {
+    const ProjectMode mode = m_projectMgr ? m_projectMgr->projectMode() : ProjectMode::Code;
+    const bool documents = (mode == ProjectMode::Documents);
+
+    if (m_projectModeCombo) {
+        m_projectModeCombo->setEnabled(m_projectMgr && m_projectMgr->hasOpenProject());
+        const int index = m_projectModeCombo->findData(static_cast<int>(mode));
+        if (index >= 0 && index != m_projectModeCombo->currentIndex()) {
+            const QSignalBlocker blocker(m_projectModeCombo);
+            m_projectModeCombo->setCurrentIndex(index);
+        }
+    }
+    if (m_tabWidget) m_tabWidget->setProjectMode(mode);
+
+    if (m_actCodeExplain) {
+        m_actCodeExplain->setText(aiEditActionLabel(AiEditAction::ExplainCode, mode));
+        m_actCodeExplain->setToolTip(m_actCodeExplain->text() + " (Current File / Selection)");
+    }
+    if (m_actAddDocs) {
+        m_actAddDocs->setText(aiEditActionLabel(AiEditAction::AddDocumentation, mode));
+        m_actAddDocs->setToolTip(m_actAddDocs->text() + " (Current File / Selection)");
+    }
+
+    const AiEditAction otherActions[] = {
+        AiEditAction::RefactorCode,
+        AiEditAction::FindBugs,
+        AiEditAction::OptimizePerformance,
+        AiEditAction::GenerateUnitTests,
+        AiEditAction::CompleteCode
+    };
+    const int count = qMin(static_cast<int>(m_otherFileAiActions.size()), static_cast<int>(std::size(otherActions)));
+    for (int i = 0; i < count; ++i) {
+        if (m_otherFileAiActions[i]) {
+            m_otherFileAiActions[i]->setText(aiEditActionLabel(otherActions[i], mode));
+        }
+    }
+
+    if (m_actFileCustomPrompt) {
+        m_actFileCustomPrompt->setToolTip(documents ? "Document Custom Prompt..." : "File Custom Prompt...");
+    }
+    if (m_actFileSummaryRebuild) {
+        m_actFileSummaryRebuild->setText(documents ? "Rebuild Document Summary" : "Rebuild Summary");
+        m_actFileSummaryRebuild->setToolTip(m_actFileSummaryRebuild->text());
+    }
+    if (m_actFileSummaryRemove) {
+        m_actFileSummaryRemove->setText(documents ? "Remove Document Summary" : "Remove Summary");
+        m_actFileSummaryRemove->setToolTip(documents
+                                               ? "Completely remove summary for the current document"
+                                               : "Completely remove summary for the current file");
+    }
+    if (m_actProjCustomPrompt) {
+        m_actProjCustomPrompt->setToolTip(documents
+                                              ? "Document Collection Custom Prompt... (Ctrl+Shift+P)"
+                                              : "Project Custom Prompt... (Ctrl+Shift+P)");
+    }
+    if (m_actProjSummaryRebuild) {
+        m_actProjSummaryRebuild->setText(documents ? "Rebuild Collection Summary" : "Rebuild Summary");
+        m_actProjSummaryRebuild->setToolTip(documents
+                                                ? "Rebuild Document Collection / Section Summary"
+                                                : "Rebuild Project / Subproject Summary");
+    }
+    if (m_actProjRecursiveSummary) {
+        m_actProjRecursiveSummary->setText(documents
+                                               ? "Generate Document Summaries (Recursive)..."
+                                               : "Generate Summaries (Recursive)...");
+        m_actProjRecursiveSummary->setToolTip(documents
+                                                  ? "Generate Summaries for Project Documents (Recursive)..."
+                                                  : "Generate Summaries for Project Files (Recursive)...");
+    }
+    if (m_actProjExportWiki) {
+        m_actProjExportWiki->setText(documents
+                                         ? "Export Document Summaries as Wiki (Markdown)..."
+                                         : "Export Project Summaries as Wiki (Markdown)...");
+    }
+}
+
 void MainWindow::updateAiActionsState() {
     const bool hasProj = (m_projectMgr && m_projectMgr->hasOpenProject());
     CodeEditor* ed = m_tabWidget ? m_tabWidget->currentEditor() : nullptr;
@@ -2450,17 +2571,7 @@ void MainWindow::onActiveEditorChanged(CodeEditor* editor) {
 }
 
 QString MainWindow::actionKeyForEnum(AiEditAction action) {
-    switch (action) {
-    case AiEditAction::ExplainCode:         return "ExplainCode";
-    case AiEditAction::RefactorCode:        return "RefactorCode";
-    case AiEditAction::FindBugs:            return "FindBugs";
-    case AiEditAction::OptimizePerformance: return "OptimizePerformance";
-    case AiEditAction::AddDocumentation:    return "AddDocumentation";
-    case AiEditAction::GenerateUnitTests:   return "GenerateUnitTests";
-    case AiEditAction::CompleteCode:        return "CompleteCode";
-    case AiEditAction::CustomPrompt:        return "CustomPrompt";
-    }
-    return "RefactorCode";
+    return aiEditActionKey(action);
 }
 
 void MainWindow::onEditorAiAction(CodeEditor* editor,
@@ -2469,10 +2580,10 @@ void MainWindow::onEditorAiAction(CodeEditor* editor,
                                   const QString& customInstruction) {
     if (!editor) return;
     QString sysCtx = m_projectMgr->buildEffectiveSystemContext(editor->filePath());
-    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
+    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt", m_projectMgr->projectMode());
     QString instruction = (action == AiEditAction::CustomPrompt)
                               ? (customSuffix.isEmpty() ? customInstruction : (customInstruction + "\n" + customSuffix))
-                              : ConfigManager::instance().promptTemplate(actionKeyForEnum(action));
+                              : ConfigManager::instance().promptTemplate(actionKeyForEnum(action), m_projectMgr->projectMode());
 
     QString fullUserPrompt = instruction + "\n\n" + selectedText;
 
@@ -2516,19 +2627,25 @@ void MainWindow::onEditorAiContinue(CodeEditor* editor, const QString& followUpI
     if (!editor || !editor->hasLastAiContext()) return;
 
     const auto& cfg = ConfigManager::instance().aiConfig();
-    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt");
+    const bool documentMode = (m_projectMgr->projectMode() == ProjectMode::Documents);
+    QString customSuffix = ConfigManager::instance().promptTemplate("CustomPrompt", m_projectMgr->projectMode());
 
     QString userPrompt;
     if (seamlessAppend) {
-        userPrompt = QStringLiteral(
-            "Continue outputting ONLY the remaining raw code from the exact point where you stopped, "
-            "without repeating any already generated lines and without markdown fences:");
+        userPrompt = documentMode
+                         ? QStringLiteral(
+                               "Continue outputting ONLY the remaining document text from the exact point where you stopped, "
+                               "without repeating already generated passages or adding commentary. Preserve the document's formatting:")
+                         : QStringLiteral(
+                               "Continue outputting ONLY the remaining raw code from the exact point where you stopped, "
+                               "without repeating any already generated lines and without markdown fences:");
     } else {
         QTextCursor c = editor->textCursor();
-        QString currentCode = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : editor->toPlainText();
+        QString currentText = c.hasSelection() ? c.selectedText().replace(QChar(0x2029), '\n') : editor->toPlainText();
         userPrompt = followUpInstruction
                      + (customSuffix.isEmpty() ? QString() : ("\n" + customSuffix))
-                     + "\n\nCurrent code state:\n" + currentCode;
+                     + (documentMode ? "\n\nCurrent document text:\n" : "\n\nCurrent code state:\n")
+                     + currentText;
     }
 
     AiTask task;
@@ -2580,14 +2697,16 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
 
     if (task.targetType != TaskTargetType::ExplainToDialog) return;
 
+    const bool documentMode = (m_projectMgr->projectMode() == ProjectMode::Documents);
     auto* resWin = new ProjectPromptResultDialog(
-        "Explain Code: " + (task.filePath.isEmpty() ? QStringLiteral("Selection") : QFileInfo(task.filePath).fileName()),
+        QString(documentMode ? "Explain Text: " : "Explain Code: ") +
+            (task.filePath.isEmpty() ? QStringLiteral("Selection") : QFileInfo(task.filePath).fileName()),
         m_projectMgr->projectRootPath(),
         task.taskId,
         task.systemPrompt,
         task.userPrompt,
         this);
-    resWin->setWindowTitle("AI Code Explanation");
+    resWin->setWindowTitle(documentMode ? "AI Text Explanation" : "AI Code Explanation");
     resWin->finalizeResponse(resultText);
 
     connect(resWin, &ProjectPromptResultDialog::cancelTaskRequested, m_taskQueue, &AiTaskQueue::cancelTaskById);
@@ -2602,7 +2721,9 @@ void MainWindow::onTaskCompleted(const AiTask& task, const QString& resultText) 
                 AiTask contTask;
                 contTask.priority = TaskPriority::High_UserAction;
                 contTask.targetType = TaskTargetType::ProjectCustomPrompt;
-                contTask.filePath = "[Explain Code — Continue]";
+                contTask.filePath = m_projectMgr->projectMode() == ProjectMode::Documents
+                                        ? "[Explain Text — Continue]"
+                                        : "[Explain Code — Continue]";
                 contTask.llmModel = aiCfg.llmIdentifier();
                 contTask.maxOutputTokens = aiCfg.maxOutputCodeTokens;
                 contTask.contextWindow = aiCfg.contextWindow;

@@ -21,6 +21,7 @@ public:
     CodeEditor* findEditorByPath(const QString& filePath) const;
 
     void setProjectRootPath(const QString& rootPath);
+    void setProjectMode(ProjectMode mode);
     void refreshEditorModeBar(CodeEditor* ed);
     void toggleCurrentMarkdownViewMode();
     bool isCurrentTabInRawEditMode() const;
@@ -56,4 +57,5 @@ private:
     bool maybeSave(CodeEditor* ed);
 
     QString m_projectRootPath;
+    ProjectMode m_projectMode = ProjectMode::Code;
 };

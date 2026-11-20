@@ -36,6 +36,7 @@ It combines a fast tabbed code editor with non-blocking token streaming, atomic 
   * **Green Lamp (`LLM: Connected`)**: `Test / Fetch` succeeded. `AiTaskQueue` automatically unpauses and begins processing tasks.
 
 ### 3. Hierarchical Project Context & Subprojects (`.aide`)
+* **Project-Wide Code / Documents Mode**: Choose **AI Mode: Code** or **Documents / Book** in the Project Explorer. The root `.aide` file stores the choice as `"project_mode": "code"` or `"documents"`; it applies to all nested subprojects and open editors. Document mode substitutes writing-oriented action labels and prompt templates, including document and collection summaries. Both prompt sets can be edited independently in **AI -> Preferences -> Prompts**. Existing projects default to Code, and switching modes preserves existing summaries without automatically regenerating them.
 * **Nested "Matryoshka" Subprojects**:
   * Supports both **Standalone `.aide` Subprojects** (stored in `<subfolder>/<subfolder>.aide`) and **Virtual Subprojects** (stored inside the parent `.aide` file).
   * Convert any folder between a Virtual Subproject and a Standalone `.aide` file via the Project Explorer context menu without touching source files on disk; existing file summaries migrate automatically.
@@ -216,6 +217,7 @@ Stored in the root of an opened project folder (and optionally in subfolders mar
 ```json
 {
   "project_name": "my_project",
+  "project_mode": "code",
   "project_system_prompt": "Use C++20 and Qt6 conventions.",
   "project_summary": "Synthesized architectural overview...",
   "project_summary_llm": "ollama:qwen2.5-coder:7b",
@@ -255,7 +257,8 @@ Stored in the root of an opened project folder (and optionally in subfolders mar
 | `Ctrl + Shift + O` | Open Folder / Project... |
 | `Ctrl + Shift + W` | Close All Projects |
 | `Ctrl + S` | Save Current Document (schedules background summary if enabled) |
-| `Ctrl + Shift + S` | Save All Modified Documents |
+| `Ctrl + Shift + S` | Save Current Document As... |
+| `Ctrl + Alt + S` | Save All Modified Documents |
 | `Ctrl + D` | Compare Unsaved Changes (Two-Pane Diff Viewer) |
 | `Ctrl + Shift + P` | AI Custom Prompt for Project... |
 | `Ctrl + Shift + M` | Toggle Markdown View Mode (Raw / Rendered / Extended Code View) |

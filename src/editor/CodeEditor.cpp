@@ -73,6 +73,47 @@ bool showWrappedPromptDialog(QWidget* parent,
 
 } // namespace
 
+QString aiEditActionKey(AiEditAction action) {
+    switch (action) {
+    case AiEditAction::ExplainCode:         return "ExplainCode";
+    case AiEditAction::RefactorCode:        return "RefactorCode";
+    case AiEditAction::FindBugs:            return "FindBugs";
+    case AiEditAction::OptimizePerformance: return "OptimizePerformance";
+    case AiEditAction::AddDocumentation:    return "AddDocumentation";
+    case AiEditAction::GenerateUnitTests:   return "GenerateUnitTests";
+    case AiEditAction::CompleteCode:        return "CompleteCode";
+    case AiEditAction::CustomPrompt:        return "CustomPrompt";
+    }
+    return "CustomPrompt";
+}
+
+QString aiEditActionLabel(AiEditAction action, ProjectMode projectMode) {
+    if (projectMode == ProjectMode::Documents) {
+        switch (action) {
+        case AiEditAction::ExplainCode:         return QStringLiteral("Explain Text");
+        case AiEditAction::RefactorCode:        return QStringLiteral("Edit && Improve Text");
+        case AiEditAction::FindBugs:            return QStringLiteral("Check Consistency && Gaps");
+        case AiEditAction::OptimizePerformance: return QStringLiteral("Improve Clarity && Flow");
+        case AiEditAction::AddDocumentation:    return QStringLiteral("Add Annotations / Notes");
+        case AiEditAction::GenerateUnitTests:   return QStringLiteral("Generate Review Questions");
+        case AiEditAction::CompleteCode:        return QStringLiteral("Continue Document / Chapter");
+        case AiEditAction::CustomPrompt:        return QStringLiteral("Custom Prompt...");
+        }
+    }
+
+    switch (action) {
+    case AiEditAction::ExplainCode:         return QStringLiteral("Explain Code");
+    case AiEditAction::RefactorCode:        return QStringLiteral("Refactor && Clean Up");
+    case AiEditAction::FindBugs:            return QStringLiteral("Find Bugs && Edge Cases");
+    case AiEditAction::OptimizePerformance: return QStringLiteral("Optimize Performance");
+    case AiEditAction::AddDocumentation:    return QStringLiteral("Add Documentation / Comments");
+    case AiEditAction::GenerateUnitTests:   return QStringLiteral("Generate Unit Tests");
+    case AiEditAction::CompleteCode:        return QStringLiteral("Complete / Continue Code");
+    case AiEditAction::CustomPrompt:        return QStringLiteral("Custom Prompt...");
+    }
+    return QStringLiteral("Custom Prompt...");
+}
+
 CodeEditor::CodeEditor(QWidget* parent)
     : QPlainTextEdit(parent),
     m_lineNumberArea(new LineNumberArea(this)),
@@ -350,8 +391,11 @@ void CodeEditor::triggerCustomPromptWithText(const QString& initialPromptText) {
 
     QTextCursor c = textCursor();
     const bool hasSel = c.hasSelection();
+    const bool documentMode = (m_projectMode == ProjectMode::Documents);
     const QString labelText = hasSel
-                                  ? QStringLiteral("Enter instructions for the LLM (will be applied to selected code):")
+                                  ? (documentMode
+                                         ? QStringLiteral("Enter instructions for the LLM (will be applied to selected text):")
+                                         : QStringLiteral("Enter instructions for the LLM (will be applied to selected code):"))
                                   : QStringLiteral("Enter instructions for the LLM (will be applied to current document):");
 
     QString customInst;
@@ -414,19 +458,19 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event) {
     QMenu* aiMenu = menu->addMenu("AI");
     aiMenu->setEnabled(!m_isAiBusy);
 
-    const QList<QPair<QString, AiEditAction>> actions = {
-        {"Explain Code", AiEditAction::ExplainCode},
-        {"Refactor && Clean Up", AiEditAction::RefactorCode},
-        {"Find Bugs && Edge Cases", AiEditAction::FindBugs},
-        {"Optimize Performance", AiEditAction::OptimizePerformance},
-        {"Add Documentation / Comments", AiEditAction::AddDocumentation},
-        {"Generate Unit Tests", AiEditAction::GenerateUnitTests},
-        {"Complete / Continue Code", AiEditAction::CompleteCode},
-        {"Custom Prompt...", AiEditAction::CustomPrompt}
+    const QList<AiEditAction> actions = {
+        AiEditAction::ExplainCode,
+        AiEditAction::RefactorCode,
+        AiEditAction::FindBugs,
+        AiEditAction::OptimizePerformance,
+        AiEditAction::AddDocumentation,
+        AiEditAction::GenerateUnitTests,
+        AiEditAction::CompleteCode,
+        AiEditAction::CustomPrompt
     };
-    for (const auto& [title, act] : actions) {
+    for (const AiEditAction act : actions) {
         if (act == AiEditAction::CustomPrompt) aiMenu->addSeparator();
-        aiMenu->addAction(title, this, [this, act]() { triggerAiAction(act); });
+        aiMenu->addAction(aiEditActionLabel(act, m_projectMode), this, [this, act]() { triggerAiAction(act); });
     }
     if (hasLastAiContext()) {
         aiMenu->addSeparator();

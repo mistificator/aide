@@ -65,6 +65,7 @@ private:
     void enqueueProjectSummaryNow(const QString& subRel, int maxOutputTokensOverride, int contextWindowOverride);
     bool hasPendingFileSummariesForScope(const QString& subRel) const;
     QString buildSystemPromptForNode(const QString& subprojectRel) const;
+    QString promptTemplate(const QString& actionKey) const;
 
     static QString makeProjectSummaryTaskKey(const QString& subprojectRel);
     static QString extractSubprojectRelFromTaskKey(const QString& taskFilePath);

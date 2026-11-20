@@ -58,7 +58,18 @@ constexpr PromptActionMeta kPromptActions[] = {
     {"CustomPrompt",        "Custom Prompt... (Document Instruction)",  "Appended after user's custom instruction in 'AI -> Current File -> Custom Prompt...' for a document."},
     {"ProjectCustomPrompt", "Custom Prompt for Project... (Markdown)",  "Appended after user's custom instruction in 'AI -> Project -> Custom Prompt...'. Requests Markdown output."},
     {"FileSummary",         "Rebuild File Summary",                     "Used when indexing a source file into Markdown summary (background or manual)."},
-    {"ProjectSummary",      "Rebuild Project Summary",                  "Used when synthesizing the global project architecture summary from file summaries."}
+    {"ProjectSummary",      "Rebuild Project Summary",                  "Used when synthesizing the global project architecture summary from file summaries."},
+    {"ExplainText",         "Documents: Explain Text",                  "Used instead of Explain Code for document projects. Output is rendered as Markdown in a dialog."},
+    {"ImproveWriting",      "Documents: Edit & Improve Text",           "Used instead of Refactor & Clean Up. Replaces the selected text or full document."},
+    {"CheckTextConsistency", "Documents: Check Consistency & Gaps",     "Checks and corrects contradictions, continuity, unresolved references, and missing transitions."},
+    {"ImproveTextFlow",     "Documents: Improve Clarity & Flow",        "Improves pacing, paragraph structure, and transitions while preserving substance."},
+    {"AddEditorialNotes",   "Documents: Add Annotations / Notes",       "Adds explanatory or editorial notes without removing the original text."},
+    {"GenerateReviewQuestions", "Documents: Generate Review Questions", "Appends review questions to the complete original document."},
+    {"ContinueDocumentChapter", "Documents: Continue Document / Chapter", "Preserves the original document and appends a continuation matching its style."},
+    {"DocumentCustomPrompt", "Documents: Custom Prompt... (Document)",  "Appended after the user's custom instruction in a document project."},
+    {"DocumentProjectCustomPrompt", "Documents: Collection Custom Prompt...", "Used for collection-level custom prompts and complete Markdown document generation."},
+    {"DocumentSummary",     "Documents: Rebuild Document Summary",      "Used when indexing a document into a structured Markdown summary."},
+    {"DocumentCollectionSummary", "Documents: Rebuild Collection Summary", "Synthesizes an editorial overview of the document collection or book."}
 };
 
 } // namespace
@@ -881,7 +892,7 @@ AiPreferencesDialog::AiPreferencesDialog(AiProvider* provider, QWidget* parent)
     m_promptHintLabel->setWordWrap(true);
     promptsGroupLay->addWidget(m_promptHintLabel);
 
-    promptsGroupLay->addWidget(new QLabel("Prompt Instruction Sent to LLM (target code or digest is appended after this prompt):", promptsGroup));
+    promptsGroupLay->addWidget(new QLabel("Prompt Instruction Sent to LLM (target code, text, or digest is appended after this prompt):", promptsGroup));
     m_promptEdit = new QPlainTextEdit(promptsGroup);
     m_promptEdit->setPlaceholderText("Enter prompt template for the selected AI action...");
     promptsGroupLay->addWidget(m_promptEdit, 1);

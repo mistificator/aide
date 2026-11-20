@@ -448,6 +448,12 @@ bool ProjectManager::loadNodeFromDisk(const QString& subRel,
         node.projectName = root["project_name"].toString(node.projectName);
         node.systemPrompt = root["project_system_prompt"].toString();
         node.summary = root["project_summary"].toString();
+        if (subRel.isEmpty()) {
+            const QString mode = root["project_mode"].toString(QStringLiteral("code"));
+            node.projectMode = mode.compare(QStringLiteral("documents"), Qt::CaseInsensitive) == 0
+                                   ? ProjectMode::Documents
+                                   : ProjectMode::Code;
+        }
         node.summaryLlm = root["project_summary_llm"].toString();
         node.summaryDirty = root["project_summary_dirty"].toBool(false);
         node.updatedAt = QDateTime::fromString(root["updated_at"].toString(), Qt::ISODate);
@@ -537,6 +543,11 @@ bool ProjectManager::saveNodeToDisk(const ProjectNodeData& storageNode) const {
     root["project_name"] = storageNode.projectName;
     root["project_system_prompt"] = storageNode.systemPrompt;
     root["project_summary"] = storageNode.summary;
+    if (storageNode.subprojectRel.isEmpty()) {
+        root["project_mode"] = storageNode.projectMode == ProjectMode::Documents
+                                   ? QStringLiteral("documents")
+                                   : QStringLiteral("code");
+    }
     root["project_summary_llm"] = storageNode.summaryLlm;
     root["project_summary_dirty"] = storageNode.summaryDirty;
     root["updated_at"] = storageNode.updatedAt.toUTC().toString(Qt::ISODate);
@@ -973,6 +984,23 @@ void ProjectManager::setProjectSystemPrompt(const QString& prompt, const QString
     m_nodes[norm].systemPrompt = prompt;
     m_nodes[norm].updatedAt = QDateTime::currentDateTimeUtc();
     emit subprojectsChanged();
+    emit projectContextChanged();
+}
+
+ProjectMode ProjectManager::projectMode() const {
+    if (!hasOpenProject()) return ProjectMode::Code;
+    return m_nodes.value(QString()).projectMode;
+}
+
+void ProjectManager::setProjectMode(ProjectMode mode) {
+    if (!hasOpenProject() || !m_nodes.contains(QString())) return;
+    ProjectNodeData& rootNode = m_nodes[QString()];
+    if (rootNode.projectMode == mode) return;
+
+    rootNode.projectMode = mode;
+    rootNode.updatedAt = QDateTime::currentDateTimeUtc();
+    saveNodeToDisk(rootNode);
+    emit projectModeChanged(mode);
     emit projectContextChanged();
 }
 
@@ -1587,6 +1615,7 @@ int ProjectManager::exportProjectWiki(const QString& targetRootDir, QString* out
 QString ProjectManager::buildAggregatedFilesDigest(const QString& subprojectRel) const {
     if (!hasOpenProject()) return {};
     const QString normScope = normalizeScopeRel(subprojectRel);
+    const bool documentMode = (projectMode() == ProjectMode::Documents);
 
     QStringList sections;
 
@@ -1607,7 +1636,7 @@ QString ProjectManager::buildAggregatedFilesDigest(const QString& subprojectRel)
         }
     }
     if (!childSubBlocks.isEmpty()) {
-        sections << "## Child Subprojects Summaries\n\n" + childSubBlocks.join("\n\n");
+        sections << QString(documentMode ? "## Child Section Overviews\n\n" : "## Child Subprojects Summaries\n\n") + childSubBlocks.join("\n\n");
     }
 
     QStringList fileKeys;
@@ -1627,12 +1656,16 @@ QString ProjectManager::buildAggregatedFilesDigest(const QString& subprojectRel)
     fileBlocks.reserve(fileKeys.size());
     for (const QString& key : fileKeys) {
         const FileContextData& fc = m_files.value(key);
-        fileBlocks << QString("### File: %1\n%2").arg(fc.relativePath, fc.aiSummary.trimmed());
+        fileBlocks << QString(documentMode ? "### Document: %1\n%2" : "### File: %1\n%2").arg(fc.relativePath, fc.aiSummary.trimmed());
     }
     if (!fileBlocks.isEmpty()) {
-        const QString hdr = normScope.isEmpty()
-        ? QStringLiteral("## Root Directory Indexed Files (%1)").arg(fileBlocks.size())
-        : QStringLiteral("## Subproject '%1' Direct Indexed Files (%2)").arg(normScope).arg(fileBlocks.size());
+        const QString hdr = documentMode
+                                ? (normScope.isEmpty()
+                                       ? QStringLiteral("## Root Directory Indexed Documents (%1)").arg(fileBlocks.size())
+                                       : QStringLiteral("## Section '%1' Direct Indexed Documents (%2)").arg(normScope).arg(fileBlocks.size()))
+                                : (normScope.isEmpty()
+                                       ? QStringLiteral("## Root Directory Indexed Files (%1)").arg(fileBlocks.size())
+                                       : QStringLiteral("## Subproject '%1' Direct Indexed Files (%2)").arg(normScope).arg(fileBlocks.size()));
         sections << hdr + "\n\n" + fileBlocks.join("\n\n");
     }
 
@@ -1643,6 +1676,7 @@ QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) con
     if (!hasOpenProject()) return {};
 
     const auto beh = ConfigManager::instance().aiBehavior();
+    const bool documentMode = (projectMode() == ProjectMode::Documents);
     QStringList sections;
 
     const QString rootPrompt = projectSystemPrompt().trimmed();
@@ -1653,7 +1687,9 @@ QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) con
     if (beh.includeProjectSummaryInPrompt) {
         const QString rootSum = projectSummary().trimmed();
         if (!rootSum.isEmpty()) {
-            sections << "=== ROOT PROJECT ARCHITECTURE SUMMARY ===\n" + rootSum;
+            sections << QString(documentMode
+                                    ? "=== ROOT DOCUMENT COLLECTION OVERVIEW ===\n"
+                                    : "=== ROOT PROJECT ARCHITECTURE SUMMARY ===\n") + rootSum;
         }
     }
 
@@ -1671,7 +1707,9 @@ QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) con
             if (beh.includeProjectSummaryInPrompt) {
                 const QString subSum = projectSummary(subRel).trimmed();
                 if (!subSum.isEmpty()) {
-                    sections << QString("=== SUBPROJECT SUMMARY (%1) ===\n%2")
+                    sections << QString(documentMode
+                                            ? "=== SECTION OVERVIEW (%1) ===\n%2"
+                                            : "=== SUBPROJECT SUMMARY (%1) ===\n%2")
                     .arg(subRel, subSum);
                 }
             }
@@ -1689,7 +1727,9 @@ QString ProjectManager::buildEffectiveSystemContext(const QString& filePath) con
         if (beh.includeProjectSummaryInPrompt) {
             const QString subSum = projectSummary(ownerSub).trimmed();
             if (!subSum.isEmpty()) {
-                sections << QString("=== SUBPROJECT SUMMARY (%1) ===\n%2").arg(ownerSub, subSum);
+                sections << QString(documentMode
+                                        ? "=== SECTION OVERVIEW (%1) ===\n%2"
+                                        : "=== SUBPROJECT SUMMARY (%1) ===\n%2").arg(ownerSub, subSum);
             }
         }
     }
@@ -1715,18 +1755,21 @@ QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptConte
     if (!hasOpenProject()) return {};
 
     QStringList sections;
+    const bool documentMode = (projectMode() == ProjectMode::Documents);
     const bool includeSummary = (mode != ProjectCustomPromptContextMode::IndexedSourcesMarkdownOnly);
     const bool includeFiles   = (mode != ProjectCustomPromptContextMode::ProjectSummaryOnly);
 
     if (includeSummary) {
         const QString rootSum = projectSummary().trimmed();
         if (!rootSum.isEmpty()) {
-            sections << "## Global Project Architecture Summary\n\n" + rootSum;
+            sections << QString(documentMode
+                                    ? "## Document Collection Overview\n\n"
+                                    : "## Global Project Architecture Summary\n\n") + rootSum;
         }
         for (const QString& subRel : subprojectRelPaths()) {
             const QString subSum = projectSummary(subRel).trimmed();
             if (!subSum.isEmpty()) {
-                sections << QString("## Subproject Architecture Summary: %1\n\n%2").arg(subRel, subSum);
+                sections << QString(documentMode ? "## Section Overview: %1\n\n%2" : "## Subproject Architecture Summary: %1\n\n%2").arg(subRel, subSum);
             }
         }
     }
@@ -1762,7 +1805,7 @@ QString ProjectManager::buildProjectCustomPromptContext(ProjectCustomPromptConte
         }
         if (outIncludedFiles) *outIncludedFiles = included;
         if (!fileBlocks.isEmpty()) {
-            sections << "## Selected Project Files Context\n\n" + fileBlocks.join("\n\n");
+            sections << QString(documentMode ? "## Selected Documents Context\n\n" : "## Selected Project Files Context\n\n") + fileBlocks.join("\n\n");
         }
     }
 

@@ -65,6 +65,9 @@ public:
     QString projectSystemPrompt(const QString& subprojectRel = {}) const;
     void setProjectSystemPrompt(const QString& prompt, const QString& subprojectRel = {});
 
+    ProjectMode projectMode() const;
+    void setProjectMode(ProjectMode mode);
+
     QString projectSummary(const QString& subprojectRel = {}) const;
     QString projectSummaryLlm(const QString& subprojectRel = {}) const;
     void setProjectSummary(const QString& summary, const QString& llmModel = {}, const QString& subprojectRel = {});
@@ -109,6 +112,7 @@ public:
 signals:
     void projectLoaded(const QString& rootPath);
     void projectClosed();
+    void projectModeChanged(ProjectMode newMode);
     void fileContextChanged(const QString& relPath);
     void projectContextChanged();
     void subprojectsChanged();
@@ -122,6 +126,7 @@ private:
         QString projectName;
         QString systemPrompt;
         QString summary;
+        ProjectMode projectMode = ProjectMode::Code;
         QString summaryLlm;
         bool summaryDirty = false;
         QDateTime updatedAt;

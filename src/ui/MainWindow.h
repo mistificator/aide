@@ -93,6 +93,7 @@ private:
     void openProjectAtPath(const QString& dirPath);
     void updateCentralViewState();
     void updateAiActionsState();
+    void updateProjectModeUi();
     void applyProjectExplorerFilter();
     void revealProjectFileInTree(const QString& relFilePath);
 
@@ -138,6 +139,7 @@ private:
     QStackedWidget* m_projectDockStack = nullptr;
     QLabel* m_projectPathLabel = nullptr;
     QComboBox* m_projectFilterCombo = nullptr;
+    QComboBox* m_projectModeCombo = nullptr;
     QTreeView* m_projectTree = nullptr;
     ProjectTreeModel* m_fsModel = nullptr;
 

@@ -79,6 +79,11 @@ QString SummaryWorker::buildSystemPromptForNode(const QString& subprojectRel) co
     return parts.join("\n\n");
 }
 
+QString SummaryWorker::promptTemplate(const QString& actionKey) const {
+    const ProjectMode mode = m_projectMgr ? m_projectMgr->projectMode() : ProjectMode::Code;
+    return ConfigManager::instance().promptTemplate(actionKey, mode);
+}
+
 void SummaryWorker::updateTimerInterval() {
     int mins = qMax(1, ConfigManager::instance().aiConfig().projectSummaryIntervalMin);
     m_projectRebuildTimer.start(mins * 60 * 1000);
@@ -189,7 +194,7 @@ void SummaryWorker::forceRebuildFileSummary(const QString& filePath,
     task.maxOutputTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
     task.contextWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
     task.systemPrompt = buildSystemPromptForNode(ownerSubRel);
-    task.userPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+    task.userPrompt = promptTemplate("FileSummary")
                       + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
     task.stream = true;
 
@@ -203,7 +208,7 @@ int SummaryWorker::scheduleFileSummariesBatch(const QVector<BatchFileSummaryItem
 
     const auto& cfg = ConfigManager::instance().aiConfig();
     const QString llmModel = cfg.llmIdentifier();
-    const QString tmpl = ConfigManager::instance().promptTemplate("FileSummary");
+    const QString tmpl = promptTemplate("FileSummary");
     const int maxTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
     const int ctxWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
 
@@ -264,7 +269,7 @@ void SummaryWorker::continueFileSummary(const QString& filePath,
     const QString llmModel = cfg.llmIdentifier();
     m_projectMgr->setFileSummaryPending(relPath, true, sha256, llmModel);
 
-    const QString initialUserPrompt = ConfigManager::instance().promptTemplate("FileSummary")
+    const QString initialUserPrompt = promptTemplate("FileSummary")
                                       + QString("\n\nFile: %1\n\n%2").arg(relPath, QString::fromUtf8(content));
 
     AiTask task;
@@ -280,8 +285,11 @@ void SummaryWorker::continueFileSummary(const QString& filePath,
         {"user", initialUserPrompt},
         {"assistant", fc.aiSummary}
     };
+    const QString continueSummaryPrompt = m_projectMgr->projectMode() == ProjectMode::Documents
+                                              ? QStringLiteral("Continue and complete the document summary from the exact point where it stopped without repeating already written sections.")
+                                              : QStringLiteral("Continue and complete the technical summary from the exact point where it stopped without repeating already written sections.");
     task.userPrompt = followUpInstruction.trimmed().isEmpty()
-                          ? QStringLiteral("Continue and complete the technical summary from the exact point where it stopped without repeating already written sections.")
+                          ? continueSummaryPrompt
                           : followUpInstruction.trimmed();
     task.isContinuation = true;
     task.appendToPreviousOutput = true;
@@ -309,7 +317,7 @@ void SummaryWorker::enqueueProjectSummaryNow(const QString& subRel,
     task.maxOutputTokens = maxOutputTokensOverride > 0 ? maxOutputTokensOverride : cfg.maxOutputSummaryTokens;
     task.contextWindow = contextWindowOverride > 0 ? contextWindowOverride : cfg.contextWindow;
     task.systemPrompt = buildSystemPromptForNode(subRel);
-    task.userPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
+    task.userPrompt = promptTemplate("ProjectSummary") + "\n\n" + digest;
     task.stream = true;
 
     m_taskQueue->enqueueTask(task);
@@ -406,7 +414,7 @@ void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
 
     const QString digest = m_projectMgr->buildAggregatedFilesDigest(subRel);
     const auto& cfg = ConfigManager::instance().aiConfig();
-    const QString initialUserPrompt = ConfigManager::instance().promptTemplate("ProjectSummary") + "\n\n" + digest;
+    const QString initialUserPrompt = promptTemplate("ProjectSummary") + "\n\n" + digest;
 
     AiTask task;
     task.priority = TaskPriority::High_UserAction;
@@ -420,8 +428,11 @@ void SummaryWorker::continueProjectSummary(const QString& followUpInstruction,
         {"user", initialUserPrompt},
         {"assistant", existingSummary}
     };
+    const QString continueSummaryPrompt = m_projectMgr->projectMode() == ProjectMode::Documents
+                                              ? QStringLiteral("Continue and complete the document collection overview from the exact point where it stopped without repeating previous text.")
+                                              : QStringLiteral("Continue and complete the project architectural summary from the exact point where it stopped without repeating previous text.");
     task.userPrompt = followUpInstruction.trimmed().isEmpty()
-                          ? QStringLiteral("Continue and complete the project architectural summary from the exact point where it stopped without repeating previous text.")
+                          ? continueSummaryPrompt
                           : followUpInstruction.trimmed();
     task.isContinuation = true;
     task.appendToPreviousOutput = true;

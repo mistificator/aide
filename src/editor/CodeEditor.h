@@ -16,6 +16,9 @@ enum class AiEditAction {
     AddDocumentation, GenerateUnitTests, CompleteCode, CustomPrompt
 };
 
+QString aiEditActionKey(AiEditAction action);
+QString aiEditActionLabel(AiEditAction action, ProjectMode projectMode);
+
 class CodeEditor : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -33,6 +36,9 @@ public:
     void applyColorScheme(const ColorScheme& scheme);
     void setSyntaxLanguage(const QString& langId);
     QString syntaxLanguage() const;
+
+    void setProjectMode(ProjectMode mode) { m_projectMode = mode; }
+    ProjectMode projectMode() const { return m_projectMode; }
 
     void triggerAiAction(AiEditAction action);
     void triggerCustomPromptWithText(const QString& initialPromptText);
@@ -84,6 +90,7 @@ private:
     QWidget* m_lineNumberArea = nullptr;
     LexicalHighlighter* m_highlighter = nullptr;
     ColorScheme m_scheme;
+    ProjectMode m_projectMode = ProjectMode::Code;
 
     QWidget* m_busyBanner = nullptr;
     QLabel* m_busyLabel = nullptr;
